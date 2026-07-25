@@ -54,7 +54,9 @@ publish-*/
 *.db-shm
 *.db-wal
 *.sqlite
+!*.sqlite/
 *.sqlite3
+!*.sqlite3/
 
 # Local configuration and secrets
 .env
