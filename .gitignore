@@ -1,0 +1,92 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+[Aa]rtifacts/
+[Dd]ist/
+[Rr]eleases/
+
+# Visual Studio, VS Code, and JetBrains IDEs
+.vs/
+.vscode/
+.idea/
+.fleet/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.rsuser
+_ReSharper*/
+*.DotSettings.user
+
+# .NET tooling and packages
+.dotnet/
+.nuget/
+packages/
+*.nupkg
+*.snupkg
+project.lock.json
+project.fragment.lock.json
+artifacts.json
+
+# Test results and code coverage
+[Tt]est[Rr]esult*/
+[Tt]est-[Ww]orkspace/
+coverage/
+coverage.*
+*.coverage
+*.coveragexml
+*.trx
+*.testlog
+
+# Publish and deployment output
+**/[Pp]ublish/**
+!/publish/**
+publish-*/
+*.publish.xml
+*.pubxml.user
+[Rr]ealases/
+
+# Runtime state and local data
+.madorin/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+appsettings.Development.json
+appsettings.Local.json
+secrets.json
+*.pfx
+*.p12
+*.pem
+*.key
+
+# Temporary files and logs
+.tmp/
+tmp/
+temp/
+*.tmp
+*.temp
+*.bak
+*.log
+*.cache
+*.pid
+*~
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Local agent state
+.agents/
+.codex/
+.claude/
