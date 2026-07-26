@@ -15,7 +15,7 @@ public sealed class SessionListSchemaStage7Tests
     }
 
     [TestMethod]
-    public async Task EnsureCreatedAsync_MigratesFromSchema13To14_PreservesData()
+    public async Task EnsureCreatedAsync_MigratesFromSchema13ToCurrent_PreservesData()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         var ct = _testContext.CancellationToken;
@@ -60,7 +60,7 @@ public sealed class SessionListSchemaStage7Tests
 
         await using (var cmd = connection.CreateCommand())
         {
-            cmd.CommandText = "DELETE FROM schema_versions WHERE version = 14;";
+            cmd.CommandText = "DELETE FROM schema_versions WHERE version > 13;";
             await cmd.ExecuteNonQueryAsync(ct);
         }
 
@@ -83,7 +83,10 @@ public sealed class SessionListSchemaStage7Tests
         {
             cmd.CommandText = "SELECT COALESCE(MAX(version), 0) FROM schema_versions;";
             var version = Convert.ToInt32(await cmd.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
-            Assert.AreEqual(14, version, "Database should be migrated to schema version 14.");
+            Assert.AreEqual(
+                SqliteSchema.CurrentVersion,
+                version,
+                "Database should be migrated to the current schema version.");
         }
 
         await using (var cmd = connection.CreateCommand())

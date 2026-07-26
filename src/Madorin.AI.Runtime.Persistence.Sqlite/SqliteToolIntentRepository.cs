@@ -703,7 +703,8 @@ public sealed class SqliteToolIntentRepository(SqliteConnection connection) : IT
                     grant_id,
                     reason,
                     requested_at,
-                    decided_at)
+                    decided_at,
+                    request_kind)
                 VALUES(
                     $approvalRequestId,
                     $callId,
@@ -715,7 +716,8 @@ public sealed class SqliteToolIntentRepository(SqliteConnection connection) : IT
                     $grantId,
                     $reason,
                     $requestedAt,
-                    $decidedAt)
+                    $decidedAt,
+                    $requestKind)
                 ON CONFLICT(approval_request_id) DO UPDATE SET
                     decision = excluded.decision,
                     grant_id = excluded.grant_id,
@@ -725,7 +727,8 @@ public sealed class SqliteToolIntentRepository(SqliteConnection connection) : IT
                   AND tool_approvals.run_id = excluded.run_id
                   AND tool_approvals.agent_id = excluded.agent_id
                   AND tool_approvals.tool_id = excluded.tool_id
-                  AND tool_approvals.arguments_hash = excluded.arguments_hash;
+                  AND tool_approvals.arguments_hash = excluded.arguments_hash
+                  AND tool_approvals.request_kind = excluded.request_kind;
                 """;
             command.Parameters.AddWithValue("$approvalRequestId", approval.ApprovalRequestId);
             command.Parameters.AddWithValue("$callId", approval.CallId);
@@ -736,6 +739,7 @@ public sealed class SqliteToolIntentRepository(SqliteConnection connection) : IT
             command.Parameters.AddWithValue("$decision", approval.Decision);
             command.Parameters.AddWithValue("$grantId", DbValue(approval.GrantId));
             command.Parameters.AddWithValue("$reason", DbValue(approval.Reason));
+            command.Parameters.AddWithValue("$requestKind", approval.RequestKind);
             command.Parameters.AddWithValue("$requestedAt", FormatTimestamp(approval.RequestedAt));
             command.Parameters.AddWithValue(
                 "$decidedAt",
@@ -774,7 +778,8 @@ public sealed class SqliteToolIntentRepository(SqliteConnection connection) : IT
                        grant_id,
                        reason,
                        requested_at,
-                       decided_at
+                       decided_at,
+                       request_kind
                 FROM tool_approvals
                 WHERE approval_request_id = $approvalRequestId;
                 """;
@@ -796,7 +801,8 @@ public sealed class SqliteToolIntentRepository(SqliteConnection connection) : IT
                 GetNullableString(reader, 7),
                 GetNullableString(reader, 8),
                 ParseTimestamp(reader.GetString(9)),
-                reader.IsDBNull(10) ? null : ParseTimestamp(reader.GetString(10)));
+                reader.IsDBNull(10) ? null : ParseTimestamp(reader.GetString(10)),
+                reader.GetString(11));
         }
         finally
         {
@@ -1182,6 +1188,7 @@ public sealed class SqliteToolIntentRepository(SqliteConnection connection) : IT
         ArgumentException.ThrowIfNullOrWhiteSpace(approval.ToolId);
         ArgumentException.ThrowIfNullOrWhiteSpace(approval.ArgumentsHash);
         ArgumentException.ThrowIfNullOrWhiteSpace(approval.Decision);
+        ArgumentException.ThrowIfNullOrWhiteSpace(approval.RequestKind);
     }
 
     private static void ValidateAudit(ToolAuditRecord audit)

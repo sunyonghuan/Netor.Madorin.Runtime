@@ -1,0 +1,9 @@
+<Directives xmlns="http://schemas.microsoft.com/netfx/2013/01/metadata">
+  <Application>
+    <Assembly Name="Microsoft.Agents.AI" Dynamic="Required All" />
+    <Assembly Name="Microsoft.Agents.AI.Abstractions" Dynamic="Required All" />
+    <Assembly Name="Microsoft.Agents.AI.OpenAI" Dynamic="Required All" />
+    <Assembly Name="Microsoft.Extensions.AI" Dynamic="Required All" />
+    <Assembly Name="Microsoft.Extensions.AI.Abstractions" Dynamic="Required All" />
+  </Application>
+</Directives>

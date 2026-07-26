@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using Madorin.AI.Runtime.Cli;
+using Madorin.AI.Runtime.Cli.Config;
 
 namespace Madorin.AI.Runtime.EndToEnd.Tests;
 
@@ -123,6 +124,198 @@ public sealed class StandaloneCliProcessStage7Tests
         {
             DeleteDirectory(root);
         }
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task NoArgumentProcess_UsesWorkingDirectoryAsWorkspace()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Inconclusive("Explorer-path startup is a Windows stage 7 acceptance test.");
+        }
+
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var workspace = Path.Combine(root, "工作目录 with spaces");
+            var configDirectory = Path.Combine(root, "isolated config");
+            Directory.CreateDirectory(workspace);
+            await WriteStandaloneConfigurationAsync(configDirectory);
+
+            var executablePath = Path.Combine(AppContext.BaseDirectory, "madorin-ai-cli.exe");
+            Assert.IsTrue(File.Exists(executablePath), $"CLI apphost not found: {executablePath}");
+            var startInfo = new ProcessStartInfo(executablePath)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                WorkingDirectory = workspace
+            };
+            startInfo.Environment["MADORIN_CONFIG_DIR"] = configDirectory;
+            startInfo.Environment["NO_COLOR"] = "1";
+
+            using var process = Process.Start(startInfo)
+                ?? throw new InvalidOperationException("The no-argument CLI process could not start.");
+            var standardOutput = process.StandardOutput.ReadToEndAsync(_testContext.CancellationToken);
+            var standardError = process.StandardError.ReadToEndAsync(_testContext.CancellationToken);
+            await process.StandardInput.WriteLineAsync(
+                "/exit".AsMemory(),
+                _testContext.CancellationToken);
+            process.StandardInput.Close();
+            await process.WaitForExitAsync(_testContext.CancellationToken);
+            var output = await standardOutput;
+            var error = await standardError;
+
+            Assert.AreEqual(ExitCodes.Success, process.ExitCode, $"{output}\n{error}");
+            Assert.AreEqual(string.Empty, error);
+            Assert.Contains(
+                $"Workspace  {Path.GetFullPath(workspace)}{Environment.NewLine}",
+                output,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "Type /help to view commands, or /exit to quit.",
+                output,
+                StringComparison.Ordinal);
+
+            var context = StandaloneRuntimeContext.Create(
+                workspace,
+                configDirectory: configDirectory);
+            Assert.IsTrue(Directory.Exists(context.DataDirectory), context.DataDirectory);
+            Assert.IsTrue(
+                context.DataDirectory.StartsWith(configDirectory, StringComparison.OrdinalIgnoreCase),
+                context.DataDirectory);
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task NoArgumentProcess_AppliesWorkspaceSelection()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Inconclusive("Explorer-path startup is a Windows stage 7 acceptance test.");
+        }
+
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var workspace = Path.Combine(root, "layered workspace");
+            var configDirectory = Path.Combine(root, "isolated config");
+            var workspaceConfigDirectory = Path.Combine(workspace, ".madorin");
+            Directory.CreateDirectory(workspaceConfigDirectory);
+            await WriteStandaloneConfigurationAsync(
+                configDirectory,
+                includeWorkspaceDefaults: true);
+            await File.WriteAllTextAsync(
+                Path.Combine(workspaceConfigDirectory, "config.json"),
+                """
+                {
+                  "schemaVersion": 1,
+                  "selection": {
+                    "provider": "workspace-provider",
+                    "model": "workspace-model"
+                  }
+                }
+                """,
+                _testContext.CancellationToken);
+
+            var executablePath = Path.Combine(AppContext.BaseDirectory, "madorin-ai-cli.exe");
+            Assert.IsTrue(File.Exists(executablePath), $"CLI apphost not found: {executablePath}");
+            var startInfo = new ProcessStartInfo(executablePath)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                WorkingDirectory = workspace
+            };
+            startInfo.Environment["MADORIN_CONFIG_DIR"] = configDirectory;
+            startInfo.Environment["NO_COLOR"] = "1";
+
+            using var process = Process.Start(startInfo)
+                ?? throw new InvalidOperationException("The no-argument CLI process could not start.");
+            var standardOutput = process.StandardOutput.ReadToEndAsync(_testContext.CancellationToken);
+            var standardError = process.StandardError.ReadToEndAsync(_testContext.CancellationToken);
+            await process.StandardInput.WriteLineAsync(
+                "/exit".AsMemory(),
+                _testContext.CancellationToken);
+            process.StandardInput.Close();
+            await process.WaitForExitAsync(_testContext.CancellationToken);
+            var output = await standardOutput;
+            var error = await standardError;
+
+            Assert.AreEqual(ExitCodes.Success, process.ExitCode, $"{output}\n{error}");
+            Assert.AreEqual(string.Empty, error);
+            Assert.Contains(
+                $"Provider   workspace-provider{Environment.NewLine}",
+                output,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                $"Model      workspace-model{Environment.NewLine}",
+                output,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    private async Task WriteStandaloneConfigurationAsync(
+        string configDirectory,
+        bool includeWorkspaceDefaults = false)
+    {
+        var loader = new StandaloneConfigLoader(configDirectory);
+        var providers = new List<ProviderEntry>
+        {
+            new()
+            {
+                Name = "process-provider",
+                Protocol = "OpenAI",
+                BaseUrl = "https://process.invalid/v1",
+                ApiKey = "process-test-key",
+                Models = ["process-model"]
+            }
+        };
+        if (includeWorkspaceDefaults)
+        {
+            providers.Add(new ProviderEntry
+            {
+                Name = "workspace-provider",
+                Protocol = "OpenAI",
+                BaseUrl = "https://workspace.invalid/v1",
+                ApiKey = "workspace-test-key",
+                Models = ["workspace-model"]
+            });
+        }
+
+        await loader.SaveAsync(
+            new StandaloneConfig
+            {
+                DefaultProvider = "process-provider",
+                DefaultModel = "process-model",
+                DefaultAgent = "process-agent",
+                Providers = providers
+            },
+            _testContext.CancellationToken);
+        await loader.SaveAgentAsync(
+            new AgentConfig
+            {
+                Id = "process-agent",
+                Name = "Process Agent",
+                SystemPrompt = "Process test prompt",
+                Provider = includeWorkspaceDefaults ? null : "process-provider",
+                Model = includeWorkspaceDefaults ? null : "process-model"
+            },
+            _testContext.CancellationToken);
     }
 
     private static async Task<ProcessResult> RunServeToExitAsync(

@@ -58,11 +58,11 @@ public sealed partial class BuiltinFsToolExecutor : IToolExecutor
         }
     }
 
-    private static string GetRequiredString(JsonElement arguments, string propertyName) =>
+    internal static string GetRequiredString(JsonElement arguments, string propertyName) =>
         GetOptionalString(arguments, propertyName)
         ?? throw new ArgumentException($"Tool argument '{propertyName}' must be a string.");
 
-    private static string? GetOptionalString(JsonElement arguments, string propertyName)
+    internal static string? GetOptionalString(JsonElement arguments, string propertyName)
     {
         if (!arguments.TryGetProperty(propertyName, out var property))
         {

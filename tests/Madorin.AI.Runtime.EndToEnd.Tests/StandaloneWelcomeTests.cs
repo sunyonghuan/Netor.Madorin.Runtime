@@ -25,7 +25,7 @@ public sealed class StandaloneWelcomeTests
     [TestMethod]
     public void ReplWelcomeWriter_EmptyAgentName_WritesStableAgentId()
     {
-        var output = new StringWriter();
+        var terminal = new RecordingTerminal();
         var snapshot = new ReplWelcomeSnapshot(
             "0.1.0",
             RuntimeMode.Expert,
@@ -35,12 +35,87 @@ public sealed class StandaloneWelcomeTests
             "fake-model",
             Path.GetFullPath("workspace"));
 
-        ReplWelcomeWriter.Write(output, snapshot);
+        ReplWelcomeWriter.Write(terminal, snapshot);
 
         Assert.Contains(
             $"Agent      stable-agent-id{Environment.NewLine}",
-            output.ToString(),
+            terminal.Output.ToString(),
             StringComparison.Ordinal);
+    }
+
+    [TestMethod]
+    public void ReplWelcomeAndHelpWriters_AssignSemanticStyles()
+    {
+        var terminal = new RecordingTerminal();
+        ReplWelcomeWriter.Write(
+            terminal,
+            new ReplWelcomeSnapshot(
+                "0.1.0",
+                RuntimeMode.Expert,
+                "agent-one",
+                "Agent One",
+                "provider-one",
+                "model-one",
+                Path.GetFullPath("workspace")));
+        var wroteHelp = ReplHelpWriter.Write(terminal, "provider");
+
+        Assert.IsTrue(wroteHelp);
+        Assert.IsTrue(terminal.Writes.Any(write =>
+            write.Value == "Madorin AI Runtime 0.1.0"
+            && write.Style == CliTextStyle.Title));
+        Assert.IsTrue(terminal.Writes.Any(write =>
+            write.Value == "/help"
+            && write.Style == CliTextStyle.Command));
+        Assert.IsTrue(terminal.Writes.Any(write =>
+            write.Value == "/provider"
+            && write.Style == CliTextStyle.Command));
+        Assert.IsTrue(terminal.Writes.Any(write =>
+            write.Value == "[providerId]"
+            && write.Style == CliTextStyle.Parameter));
+        Assert.IsTrue(terminal.Writes.Any(write =>
+            write.Value == "ready"
+            && write.Style == CliTextStyle.Success));
+        Assert.IsTrue(terminal.Writes.Any(write =>
+            write.Value == "provider-one"
+            && write.Style == CliTextStyle.Selected));
+    }
+
+    [TestMethod]
+    [DataRow(CliTextStyle.Title, ConsoleColor.DarkCyan)]
+    [DataRow(CliTextStyle.Command, ConsoleColor.DarkCyan)]
+    [DataRow(CliTextStyle.Prompt, ConsoleColor.DarkCyan)]
+    [DataRow(CliTextStyle.Parameter, ConsoleColor.White)]
+    [DataRow(CliTextStyle.Selected, ConsoleColor.White)]
+    [DataRow(CliTextStyle.Success, ConsoleColor.DarkGreen)]
+    [DataRow(CliTextStyle.Warning, ConsoleColor.DarkYellow)]
+    [DataRow(CliTextStyle.Error, ConsoleColor.DarkRed)]
+    [DataRow(CliTextStyle.Muted, ConsoleColor.DarkGray)]
+    public void CliTerminal_ResolveColor_UsesRestrainedPalette(
+        CliTextStyle style,
+        ConsoleColor expected)
+    {
+        Assert.AreEqual(expected, CliTerminal.ResolveColor(style));
+    }
+
+    [TestMethod]
+    public async Task ReplSelectionMenu_CurrentMarker_UsesMutedStyle()
+    {
+        var terminal = new RecordingTerminal();
+
+        await ReplSelectionMenu.PromptAsync(
+            terminal,
+            "Available providers:",
+            "provider",
+            [("provider-one", "Provider One"), ("provider-two", "Provider Two")],
+            "provider-one",
+            CancellationToken.None);
+
+        Assert.IsTrue(terminal.Writes.Any(write =>
+            write.Value == "provider-one"
+            && write.Style == CliTextStyle.Selected));
+        Assert.IsTrue(terminal.Writes.Any(write =>
+            write.Value == " (current)"
+            && write.Style == CliTextStyle.Muted));
     }
 
     [TestMethod]
@@ -81,7 +156,10 @@ public sealed class StandaloneWelcomeTests
             Assert.Contains($"Model      fake-model{Environment.NewLine}", text, StringComparison.Ordinal);
             Assert.Contains($"Workspace  {workspace}{Environment.NewLine}", text, StringComparison.Ordinal);
             Assert.Contains($"Session    New{Environment.NewLine}", text, StringComparison.Ordinal);
-            Assert.Contains("Enter a message to begin. /exit to quit.", text, StringComparison.Ordinal);
+            Assert.Contains(
+                "Type /help to view commands, or /exit to quit.",
+                text,
+                StringComparison.Ordinal);
             Assert.AreEqual(1, CountOccurrences(text, "Madorin AI Runtime"));
 
             var welcomeIndex = text.IndexOf("Madorin AI Runtime", StringComparison.Ordinal);
@@ -353,6 +431,47 @@ public sealed class StandaloneWelcomeTests
         {
             ct.ThrowIfCancellationRequested();
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class RecordingTerminal : ICliTerminal
+    {
+        public StringWriter Output { get; } = new();
+
+        public List<(string Value, CliTextStyle Style)> Writes { get; } = [];
+
+        public void Write(string value) => Write(value, CliTextStyle.Default);
+
+        public void Write(string value, CliTextStyle style)
+        {
+            Writes.Add((value, style));
+            Output.Write(value);
+        }
+
+        public void WriteLine(string value = "") => WriteLine(value, CliTextStyle.Default);
+
+        public void WriteLine(string value, CliTextStyle style)
+        {
+            Writes.Add((value, style));
+            Output.WriteLine(value);
+        }
+
+        public void Clear()
+        {
+        }
+
+        public ValueTask<string?> ReadLineAsync(CancellationToken ct = default)
+        {
+            ct.ThrowIfCancellationRequested();
+            return ValueTask.FromResult<string?>(null);
+        }
+
+        public ValueTask<string> ReadSecretAsync(
+            string prompt,
+            CancellationToken ct = default)
+        {
+            ct.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(string.Empty);
         }
     }
 }

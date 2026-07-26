@@ -24,8 +24,8 @@ internal static class BuiltinProcessRunner
         string requested,
         IReadOnlyList<string> allowedExecutables)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(requested);
         ArgumentNullException.ThrowIfNull(allowedExecutables);
+        requested = NormalizeRequestedExecutable(requested);
         var comparer = OperatingSystem.IsWindows()
             ? StringComparer.OrdinalIgnoreCase
             : StringComparer.Ordinal;
@@ -68,6 +68,34 @@ internal static class BuiltinProcessRunner
         }
 
         return PinExecutable(executablePath);
+    }
+
+    internal static string NormalizeRequestedExecutable(string requested)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(requested);
+        if (Path.IsPathFullyQualified(requested))
+        {
+            var normalized = requested.Replace('\\', '/');
+            if (normalized.StartsWith("//", StringComparison.Ordinal)
+                || normalized.StartsWith("/dev/", StringComparison.Ordinal)
+                || normalized.StartsWith("/proc/", StringComparison.Ordinal)
+                || normalized.StartsWith("/sys/", StringComparison.Ordinal))
+            {
+                throw new UnauthorizedAccessException(
+                    "UNC, device, and platform special executable paths are not allowed.");
+            }
+
+            return Path.GetFullPath(requested);
+        }
+
+        if (requested.IndexOfAny([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar]) >= 0
+            || requested.Contains(':', StringComparison.Ordinal)
+            || !string.Equals(Path.GetFileName(requested), requested, StringComparison.Ordinal))
+        {
+            throw new UnauthorizedAccessException("Relative executable paths are not allowed.");
+        }
+
+        return requested;
     }
 
     public static PinnedExecutable ResolveAndPinFirstAvailable(
@@ -168,6 +196,43 @@ internal static class BuiltinProcessRunner
         }
 
         return result;
+    }
+
+    internal static string[] ParseRequestedEnvironmentVariableNames(
+        System.Text.Json.JsonElement arguments)
+    {
+        if (!arguments.TryGetProperty("environment", out var property))
+        {
+            return [];
+        }
+
+        if (property.ValueKind != System.Text.Json.JsonValueKind.Object)
+        {
+            throw new ArgumentException("Tool argument 'environment' must be an object.");
+        }
+
+        var names = new List<string>();
+        foreach (var item in property.EnumerateObject())
+        {
+            ValidateEnvironmentName(item.Name);
+            if (item.Value.ValueKind != System.Text.Json.JsonValueKind.String)
+            {
+                throw new ArgumentException(
+                    $"Environment variable '{item.Name}' must have a string value.");
+            }
+
+            names.Add(item.Name);
+        }
+
+        if (names.Count > MaxEnvironmentVariables)
+        {
+            throw new InvalidDataException("The environment variable limit was exceeded.");
+        }
+
+        var comparer = OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal;
+        return names.Distinct(comparer).Order(comparer).ToArray();
     }
 
     public static string? ParseStandardInput(

@@ -168,6 +168,86 @@ public sealed class ToolAuthorizationTests
     }
 
     [TestMethod]
+    public async Task AuthorizeAsync_ChildAgentAcceptsOnlyDirectCallBoundUserConsent()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync(TestContext.CancellationToken);
+        await SqliteSchema.EnsureCreatedAsync(connection, TestContext.CancellationToken);
+        using var store = new SqliteToolIntentRepository(connection);
+        var service = new ToolAuthorizationService(
+            store,
+            RuntimeToolPolicy.CreateRestricted(_workspace));
+        var invocation = new ToolInvocation(
+            "call-direct-consent",
+            "host.read",
+            "agent-child",
+            "agent-root",
+            "{}",
+            "run-1",
+            "session-1",
+            "invocation-child");
+        var descriptor = new ToolDescriptor(
+            invocation.ToolId,
+            "host",
+            "Read",
+            "Reads one host resource.",
+            "{\"type\":\"object\"}",
+            "{\"type\":\"object\"}",
+            Risk: ToolRiskLevel.SensitiveRead,
+            ExecutionTarget: ToolExecutionTarget.Host,
+            RequiresApproval: true);
+        var expiresAt = DateTimeOffset.UtcNow.AddHours(1);
+
+        await service.SaveGrantAsync(
+            CreateGrant(
+                "grant-child-broad",
+                invocation.AgentId,
+                parentGrantId: null,
+                rootGrantId: null,
+                allowedCallIds: null,
+                ToolRiskLevel.SensitiveRead,
+                expiresAt,
+                allowDelegation: false) with
+            {
+                ApprovalRequestId = "approval-broad"
+            },
+            ct: TestContext.CancellationToken);
+
+        var broad = await service.AuthorizeAsync(
+            invocation,
+            descriptor,
+            ct: TestContext.CancellationToken);
+        Assert.AreEqual(ToolAuthorizationDecision.NeedsApproval, broad.Decision);
+
+        await service.SaveGrantAsync(
+            CreateGrant(
+                "grant-child-direct",
+                invocation.AgentId,
+                parentGrantId: null,
+                rootGrantId: null,
+                [invocation.CallId],
+                ToolRiskLevel.SensitiveRead,
+                expiresAt,
+                allowDelegation: false) with
+            {
+                ApprovalRequestId = "approval-direct"
+            },
+            ct: TestContext.CancellationToken);
+
+        var direct = await service.AuthorizeAsync(
+            invocation,
+            descriptor,
+            ct: TestContext.CancellationToken);
+
+        Assert.AreEqual(ToolAuthorizationDecision.Granted, direct.Decision);
+        Assert.IsNotNull(direct.EffectivePermission);
+        Assert.AreEqual("grant-child-direct", direct.EffectivePermission.GrantId);
+        Assert.IsNotNull(direct.EffectivePermission.AllowedCallIds);
+        Assert.HasCount(1, direct.EffectivePermission.AllowedCallIds);
+        Assert.AreEqual(invocation.CallId, direct.EffectivePermission.AllowedCallIds[0]);
+    }
+
+    [TestMethod]
     public async Task ResolveAndExecuteAsync_NeedsPermissionRequest_IncludesWorkLineage()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");

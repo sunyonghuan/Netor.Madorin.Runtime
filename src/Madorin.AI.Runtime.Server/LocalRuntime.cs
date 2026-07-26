@@ -29,6 +29,7 @@ public sealed class LocalRuntime : IAsyncDisposable
         new BuiltinToolRegistry(),
         new JsonSchemaToolValidator());
     private readonly Func<NextTurnSelection, IRuntimeProviderAdapter> _providerResolver;
+    private readonly IToolConsentHandler? _toolConsentHandler;
     private readonly SessionMaintenanceAuditLog _maintenanceAudit;
     private readonly HashSet<IRuntimeProviderAdapter> _providers =
         new(ReferenceEqualityComparer.Instance);
@@ -49,6 +50,7 @@ public sealed class LocalRuntime : IAsyncDisposable
         _dataDirectory = options.DataDirectory;
         _databaseConnectionString = databaseConnectionString;
         _providerResolver = options.ProviderResolver;
+        _toolConsentHandler = options.ToolConsentHandler;
         _maintenanceAudit = new SessionMaintenanceAuditLog(options.DataDirectory);
         _workspaceLock = workspaceLock;
         _blobStore = new BlobStagingStore(
@@ -832,6 +834,7 @@ public sealed class LocalRuntime : IAsyncDisposable
                     _toolCatalogStore,
                     _toolCatalogStore.CaptureSnapshot(),
                     controlPeer: null,
+                    localToolConsentHandler: _toolConsentHandler,
                     credentialRefreshHandler: null,
                     providerFactory: providerId => ResolveProvider(
                         request.Selection,
@@ -923,6 +926,7 @@ public sealed class LocalRuntime : IAsyncDisposable
                     _toolCatalogStore,
                     _toolCatalogStore.CaptureSnapshot(),
                     controlPeer: null,
+                    localToolConsentHandler: _toolConsentHandler,
                     credentialRefreshHandler: null,
                     providerFactory: providerId => ResolveProvider(
                         effectiveSelection,

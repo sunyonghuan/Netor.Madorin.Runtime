@@ -26,6 +26,8 @@ public sealed class StandaloneDoctorStage7Tests
     [
         "runtime",
         "personal-config",
+        "workspace-config",
+        "effective-selection",
         "memory",
         "workspace",
         "data",
@@ -65,6 +67,15 @@ public sealed class StandaloneDoctorStage7Tests
                 checks.Select(static check => check.GetProperty("name").GetString()).ToArray());
             Assert.IsTrue(checks.All(static check =>
                 check.GetProperty("status").GetString() is not "error"));
+            var workspaceCheck = Assert.ContainsSingle(checks.Where(static check =>
+                check.GetProperty("name").GetString() == "workspace-config"));
+            Assert.AreEqual("skipped", workspaceCheck.GetProperty("status").GetString());
+            var selectionCheck = Assert.ContainsSingle(checks.Where(static check =>
+                check.GetProperty("name").GetString() == "effective-selection"));
+            Assert.Contains(
+                $"Agent {AgentId} [global]",
+                selectionCheck.GetProperty("detail").GetString()!,
+                StringComparison.Ordinal);
             var providerCheck = Assert.ContainsSingle(checks.Where(static check =>
                 check.GetProperty("name").GetString() == "provider"));
             var providerDetail = providerCheck.GetProperty("detail").GetString();
@@ -74,6 +85,48 @@ public sealed class StandaloneDoctorStage7Tests
             Assert.Contains("catalog-model-b", providerDetail, StringComparison.Ordinal);
             Assert.Contains("catalog-model-c", providerDetail, StringComparison.Ordinal);
             Assert.DoesNotContain("catalog-model-d", providerDetail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteDirectory(fixture.Root);
+        }
+    }
+
+    [TestMethod]
+    [Timeout(60_000, CooperativeCancellation = true)]
+    public async Task Doctor_InvalidWorkspaceConfiguration_ReportsWorkspaceCheckWithoutBody()
+    {
+        var fixture = await CreateFixtureAsync();
+        try
+        {
+            var path = Path.Combine(fixture.Workspace, ".madorin", "config.json");
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            await File.WriteAllTextAsync(
+                path,
+                "{\"apiKey\":\"workspace-secret-must-not-leak\"}",
+                Encoding.UTF8,
+                _testContext.CancellationToken);
+
+            var result = RunDoctor(fixture, "doctor", "--json");
+
+            Assert.AreEqual(ExitCodes.GeneralError, result.ExitCode, result.AllOutput);
+            Assert.DoesNotContain(
+                "workspace-secret-must-not-leak",
+                result.AllOutput,
+                StringComparison.Ordinal);
+            using var document = JsonDocument.Parse(result.Output);
+            var checks = document.RootElement
+                .GetProperty("data")
+                .GetProperty("checks")
+                .EnumerateArray()
+                .ToArray();
+            var workspaceCheck = Assert.ContainsSingle(checks.Where(static check =>
+                check.GetProperty("name").GetString() == "workspace-config"));
+            Assert.AreEqual("error", workspaceCheck.GetProperty("status").GetString());
+            Assert.Contains(path, workspaceCheck.GetProperty("detail").GetString()!, StringComparison.Ordinal);
+            var selectionCheck = Assert.ContainsSingle(checks.Where(static check =>
+                check.GetProperty("name").GetString() == "effective-selection"));
+            Assert.AreEqual("skipped", selectionCheck.GetProperty("status").GetString());
         }
         finally
         {

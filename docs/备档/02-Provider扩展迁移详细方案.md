@@ -922,4 +922,4 @@ Docs/未来策划/独立CLI/使用指南/02-安装与初始化.md
 | 协议 / 数据库 | 未修改 IPC Protocol Version 与 SQLite Schema |
 | 未关闭限制 | 6 项 External 需要显式开关和真实外部资源；Azure OpenAI 无真实资源成功证据，继续保持实验隐藏；Aliyun/OpenAI 图片与视频能力不在本批范围 |
 
-详细的分步骤测试数量、诊断语义和回退依据见[执行计划](../执行步骤/09-Provider扩展迁移.md)。
+详细的分步骤测试数量、诊断语义和回退依据见[执行计划](./执行步骤/09-Provider扩展迁移.md)。

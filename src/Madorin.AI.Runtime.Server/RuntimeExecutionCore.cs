@@ -60,6 +60,7 @@ internal sealed class RuntimeExecutionCore(
         MeetingInvocationRecord? resumedMeetingInvocation = null,
         ConversationRecordV1? resumedCanonicalMessage = null,
         RuntimeError? resumedMeetingFailure = null,
+        IToolConsentHandler? localToolConsentHandler = null,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
@@ -68,6 +69,12 @@ internal sealed class RuntimeExecutionCore(
         ArgumentNullException.ThrowIfNull(provider);
         ArgumentNullException.ThrowIfNull(toolCatalogStore);
         ArgumentNullException.ThrowIfNull(toolCatalogSnapshot);
+        if (controlPeer is not null && localToolConsentHandler is not null)
+        {
+            throw new ArgumentException(
+                "A Runtime execution cannot use both a control peer and a local tool consent handler.",
+                nameof(localToolConsentHandler));
+        }
 
         await using var repositoryConnection = await OpenDatabaseConnectionAsync(ct)
             .ConfigureAwait(false);
@@ -88,6 +95,12 @@ internal sealed class RuntimeExecutionCore(
         var reverseExecutor = controlPeer is null
             ? null
             : new ReverseRpcToolExecutor(controlPeer, _resultBlobStore);
+        var consentHandler = localToolConsentHandler
+            ?? (reverseExecutor is null
+                ? null
+                : new ReverseRpcToolConsentHandler(
+                    reverseExecutor.RequestPermissionAsync,
+                    reverseExecutor.RequestApprovalAsync));
         var executors = new List<IToolExecutor>
         {
             new BuiltinFsToolExecutor(),
@@ -123,8 +136,9 @@ internal sealed class RuntimeExecutionCore(
             toolGateway,
             authorizationService,
             toolCatalogSnapshot,
-            reverseExecutor is null ? null : reverseExecutor.RequestPermissionAsync,
-            reverseExecutor is null ? null : reverseExecutor.RequestApprovalAsync,
+            consentHandler,
+            localToolConsentHandler is null ? null : new BuiltinToolConsentScopeResolver(),
+            _workspaceRoot,
             toolStateStore);
         if (resumedMeetingHitlResponse is null && resumedMeetingInvocation is null)
         {
@@ -157,7 +171,8 @@ internal sealed class RuntimeExecutionCore(
                 reverseExecutor is null ? null : reverseExecutor.RequestPermissionAsync,
                 reverseExecutor is null ? null : reverseExecutor.RequestApprovalAsync,
                 toolStateStore,
-                isRunTimedOut),
+                isRunTimedOut,
+                toolConsentCoordinator),
 
             RuntimeMode.Meeting => new MeetingModeOrchestrator(
                 providerFactory: requestedProviderId =>

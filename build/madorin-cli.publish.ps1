@@ -9,14 +9,23 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$BuildDir = $PSScriptRoot
-$SolutionDir = (Resolve-Path (Join-Path $BuildDir '..')).Path
-$ProjectFile = Join-Path $SolutionDir 'Src\Madorin.Ai.Runtime\src\Madorin.AI.Runtime.Cli\Madorin.AI.Runtime.Cli.csproj'
+$BuildDir = [System.IO.Path]::GetFullPath($PSScriptRoot)
+$SolutionDir = [System.IO.Path]::GetFullPath((Join-Path $BuildDir '..'))
+$SolutionFile = Join-Path $SolutionDir 'Madorin.AI.Runtime.slnx'
+$ProjectFile = Join-Path $SolutionDir 'src\Madorin.AI.Runtime.Cli\Madorin.AI.Runtime.Cli.csproj'
 $BrandReleaseDirectoryName = 'Madorin-Cli'
-$OutputDir = Join-Path $SolutionDir (Join-Path 'Realases' $BrandReleaseDirectoryName)
-$ReleasesDir = Join-Path $SolutionDir 'Realases'
+$ReleasesDir = Join-Path $SolutionDir 'releases'
+$OutputDir = Join-Path $ReleasesDir $BrandReleaseDirectoryName
 $CliName = 'madorin-ai-cli'
 $PackageName = 'Madorin.Cli'
+
+if (-not (Test-Path -LiteralPath $SolutionFile -PathType Leaf)) {
+    throw "Solution file was not found: $SolutionFile"
+}
+
+if (-not (Test-Path -LiteralPath $ProjectFile -PathType Leaf)) {
+    throw "CLI project file was not found: $ProjectFile"
+}
 
 function Bump-ProjectVersion {
     $projectContent = Get-Content -Path $ProjectFile -Raw -Encoding UTF8
@@ -95,7 +104,16 @@ function Invoke-DotNetPublishWithRetry {
         Clear-ProjectReleaseCache -ProjectPath $ProjectPath
     }
 
-    $publishArgs = @('publish', $ProjectPath, '-c', 'Release', '-o', $OutputPath, '--disable-build-servers')
+    $publishArgs = @(
+        'publish',
+        $ProjectPath,
+        '-c', 'Release',
+        '-r', 'win-x64',
+        '--self-contained', 'true',
+        '-o', $OutputPath,
+        '--disable-build-servers',
+        '--nologo'
+    )
     if ($Rebuild) {
         $publishArgs += '-t:Rebuild;Publish'
     }

@@ -122,7 +122,7 @@ public sealed class BuiltinMemoryToolExecutor(
         return new ToolResult(invocation.CallId, invocation.ToolId, true, output);
     }
 
-    private static MemoryScope ReadScope(JsonElement arguments, bool allowEffective)
+    internal static MemoryScope ReadScope(JsonElement arguments, bool allowEffective)
     {
         var value = GetRequiredString(arguments, "scope");
         if (!Enum.TryParse<MemoryScope>(value, ignoreCase: true, out var scope)
@@ -134,7 +134,7 @@ public sealed class BuiltinMemoryToolExecutor(
         return scope;
     }
 
-    private static string GetRequiredString(JsonElement arguments, string propertyName)
+    internal static string GetRequiredString(JsonElement arguments, string propertyName)
     {
         if (!arguments.TryGetProperty(propertyName, out var property)
             || property.ValueKind != JsonValueKind.String)

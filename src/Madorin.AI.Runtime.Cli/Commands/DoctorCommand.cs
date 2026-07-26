@@ -80,11 +80,12 @@ internal static class DoctorCommand
             return ExitCodes.InvalidArguments;
         }
 
+        var workspace = parseResult.GetValue(workspaceOption);
         StandaloneRuntimeContext context;
         try
         {
             context = StandaloneRuntimeContext.Create(
-                parseResult.GetValue(workspaceOption),
+                workspace,
                 parseResult.GetValue(dataDirectoryOption),
                 configDirectory);
         }
@@ -95,12 +96,21 @@ internal static class DoctorCommand
         }
 
         var loader = new StandaloneConfigLoader(context.ConfigDirectory);
-        var checks = new List<DoctorCheck>(9)
+        var checks = new List<DoctorCheck>(11)
         {
             CheckRuntime()
         };
         var configInspection = await CheckPersonalConfigAsync(loader).ConfigureAwait(false);
         checks.Add(configInspection.Check);
+        if (workspace is not null)
+        {
+            checks.AddRange(await CheckWorkspaceConfigurationAsync(
+                    loader,
+                    context.WorkspaceRoot,
+                    configInspection.Valid)
+                .ConfigureAwait(false));
+        }
+
         checks.Add(await CheckMemoryAsync(
                 memoryUserHome,
                 context.WorkspaceRoot)
@@ -320,6 +330,74 @@ internal static class DoctorCommand
             or InvalidDataException)
         {
             return new DoctorCheck("memory", "error", ex.Message);
+        }
+    }
+
+    private static async Task<IReadOnlyList<DoctorCheck>> CheckWorkspaceConfigurationAsync(
+        StandaloneConfigLoader globalLoader,
+        string workspaceRoot,
+        bool globalConfigValid)
+    {
+        var workspaceLoader = new WorkspaceConfigLoader(workspaceRoot);
+        if (!globalConfigValid)
+        {
+            return
+            [
+                new DoctorCheck(
+                    "workspace-config",
+                    "skipped",
+                    $"Skipped '{workspaceLoader.ConfigPath}' because the global configuration is invalid."),
+                new DoctorCheck(
+                    "effective-selection",
+                    "skipped",
+                    "Skipped because the global configuration is invalid.")
+            ];
+        }
+
+        try
+        {
+            var resolver = new StandaloneConfigurationResolver(globalLoader);
+            var snapshot = await resolver.LoadAsync(workspaceRoot).ConfigureAwait(false);
+            var workspaceCheck = snapshot.WorkspaceConfigExists
+                ? new DoctorCheck(
+                    "workspace-config",
+                    "ok",
+                    $"Workspace configuration '{snapshot.WorkspaceConfigPath}' is valid.")
+                : new DoctorCheck(
+                    "workspace-config",
+                    "skipped",
+                    $"Workspace configuration '{snapshot.WorkspaceConfigPath}' is not configured.");
+            var selection = snapshot.EffectiveSelection;
+            return
+            [
+                workspaceCheck,
+                new DoctorCheck(
+                    "effective-selection",
+                    "ok",
+                    $"Agent {selection.Agent.Id} [{StandaloneConfigurationResolver.GetSourceName(selection.AgentSource)}], " +
+                    $"Provider {selection.Provider.Name} [{StandaloneConfigurationResolver.GetSourceName(selection.ProviderSource)}], " +
+                    $"Model {selection.Model} [{StandaloneConfigurationResolver.GetSourceName(selection.ModelSource)}].")
+            ];
+        }
+        catch (StandaloneConfigurationException ex)
+        {
+            var isWorkspaceFileError = ex.Code ==
+                StandaloneConfigurationResolver.WorkspaceConfigurationInvalidCode;
+            return
+            [
+                new DoctorCheck(
+                    "workspace-config",
+                    isWorkspaceFileError ? "error" : "ok",
+                    isWorkspaceFileError
+                        ? ex.Message
+                        : $"Workspace configuration '{workspaceLoader.ConfigPath}' is readable."),
+                new DoctorCheck(
+                    "effective-selection",
+                    isWorkspaceFileError ? "skipped" : "error",
+                    isWorkspaceFileError
+                        ? "Skipped because the workspace configuration is invalid."
+                        : ex.Message)
+            ];
         }
     }
 

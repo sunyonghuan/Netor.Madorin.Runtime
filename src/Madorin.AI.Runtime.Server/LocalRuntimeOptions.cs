@@ -1,6 +1,7 @@
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Services.Memory;
+using Madorin.AI.Runtime.Services.Tools;
 
 namespace Madorin.AI.Runtime.Server;
 
@@ -15,6 +16,9 @@ public sealed record LocalRuntimeOptions(
     public MemoryFileService? MemoryFiles { get; init; }
 
     public string? MemoryUserHome { get; init; }
+
+    /// <summary>Local interactive authority used by standalone Runtime executions.</summary>
+    public IToolConsentHandler? ToolConsentHandler { get; init; }
 
     public RuntimeLimits RuntimeLimits { get; init; } = new(
         MaxToolRounds: 8,

@@ -35,7 +35,8 @@ public sealed class ExpertModeOrchestrator(
     Func<ApprovalRequest, CancellationToken, Task<ApprovalResponse>>?
         approvalHandler = null,
     IToolStateStore? toolStateStore = null,
-    Func<bool>? isRunTimedOut = null) : IModeOrchestrator
+    Func<bool>? isRunTimedOut = null,
+    ToolConsentCoordinator? toolConsentCoordinator = null) : IModeOrchestrator
 {
     private const string ProjectionVersion = "expert-full-tail-v1";
     private readonly SqliteEventOutbox _outbox = outbox
@@ -63,6 +64,7 @@ public sealed class ExpertModeOrchestrator(
     private readonly Func<ToolPermissionRequest, CancellationToken, Task<ToolPermissionResponse>>?
         _toolPermissionHandler = toolPermissionHandler;
     private readonly Func<bool>? _isRunTimedOut = isRunTimedOut;
+    private readonly ToolConsentCoordinator? _toolConsentCoordinator = toolConsentCoordinator;
 
     public RuntimeMode Mode => RuntimeMode.Expert;
 
@@ -706,6 +708,14 @@ public sealed class ExpertModeOrchestrator(
         ToolCatalogSnapshot catalogSnapshot,
         CancellationToken ct)
     {
+        if (_toolConsentCoordinator is not null)
+        {
+            return await _toolConsentCoordinator.ResolveAndExecuteAsync(
+                invocation,
+                pendingResult,
+                ct).ConfigureAwait(false);
+        }
+
         if (_toolGateway is null || _toolAuthorizationService is null)
         {
             return FailedToolGatewayResult(

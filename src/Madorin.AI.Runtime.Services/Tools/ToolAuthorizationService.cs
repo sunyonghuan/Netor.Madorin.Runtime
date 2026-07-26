@@ -256,7 +256,10 @@ public sealed class ToolAuthorizationService(
         }
 
         if (invocation.ParentAgentId is not null
-            && contexts.Skip(1).All(context => context.AgentId is null))
+            && contexts.All(context => !string.Equals(
+                context.AgentId,
+                invocation.AgentId,
+                StringComparison.Ordinal)))
         {
             return Denied("delegation", "A child Agent requires an explicit delegated Grant.");
         }
@@ -377,8 +380,9 @@ public sealed class ToolAuthorizationService(
             ? grant.ParentGrantId is null
                 && (grant.AgentId is null
                     || string.Equals(grant.AgentId, invocation.AgentId, StringComparison.Ordinal))
-            : grant.ParentGrantId is not null
-                && string.Equals(grant.AgentId, invocation.AgentId, StringComparison.Ordinal);
+            : string.Equals(grant.AgentId, invocation.AgentId, StringComparison.Ordinal)
+                && (grant.ParentGrantId is not null
+                    || IsDirectCallBoundConsent(grant, invocation));
     }
 
     private static bool TryBuildGrantChain(
@@ -429,6 +433,7 @@ public sealed class ToolAuthorizationService(
 
         reversed.Reverse();
         if (invocation.ParentAgentId is not null
+            && !IsDirectCallBoundConsent(leaf, invocation)
             && (reversed.Count < 2
                 || !string.Equals(
                     reversed[^2].AgentId,
@@ -451,6 +456,13 @@ public sealed class ToolAuthorizationService(
         chain = reversed;
         return true;
     }
+
+    private static bool IsDirectCallBoundConsent(
+        ToolGrantState grant,
+        ToolInvocation invocation) =>
+        grant.ParentGrantId is null
+        && grant.ApprovalRequestId is not null
+        && grant.AllowedCallIds.Contains(invocation.CallId, StringComparer.Ordinal);
 
     private static ToolPermissionContext ToPermissionContext(ToolGrantState grant)
     {

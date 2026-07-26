@@ -5,10 +5,6 @@ namespace Madorin.AI.Runtime.Tools.Builtin;
 internal sealed class BuiltinFsPathPolicy
 {
     private static readonly char[] Separators = ['/', '\\'];
-
-    private readonly StringComparison _comparison = OperatingSystem.IsWindows()
-        ? StringComparison.OrdinalIgnoreCase
-        : StringComparison.Ordinal;
     private readonly string[] _readRoots;
     private readonly string[] _writeRoots;
     private readonly string _workspaceRoot;
@@ -84,27 +80,40 @@ internal sealed class BuiltinFsPathPolicy
     }
 
     public string GetTargetSummary(string path)
+        => GetRequestedTargetSummary(_workspaceRoot, path);
+
+    internal static string GetRequestedTargetSummary(string workspaceRoot, string path)
     {
-        var relative = Path.GetRelativePath(_workspaceRoot, path)
+        var relative = Path.GetRelativePath(workspaceRoot, path)
             .Replace(Path.DirectorySeparatorChar, '/');
         return string.Equals(relative, ".", StringComparison.Ordinal)
             ? "workspace:."
             : $"workspace:{relative}";
     }
 
-    private string Resolve(string path, string[] allowedRoots, string operation)
+    internal static string ResolveRequestedPath(string workspaceRoot, string path)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(workspaceRoot);
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        RejectRawPath(workspaceRoot);
+        var normalizedWorkspace = Path.GetFullPath(workspaceRoot);
+        RejectReservedPath(normalizedWorkspace);
+        EnsureNoLinks(normalizedWorkspace);
         RejectRawPath(path);
-
-        var lexicalPath = Path.GetFullPath(path, _workspaceRoot);
+        var lexicalPath = Path.GetFullPath(path, normalizedWorkspace);
         RejectReservedPath(lexicalPath);
-        if (!IsWithin(_workspaceRoot, lexicalPath))
+        if (!IsWithin(normalizedWorkspace, lexicalPath))
         {
             throw new UnauthorizedAccessException("The path is outside the workspace root.");
         }
 
         EnsureNoLinks(lexicalPath);
+        return lexicalPath;
+    }
+
+    private string Resolve(string path, string[] allowedRoots, string operation)
+    {
+        var lexicalPath = ResolveRequestedPath(_workspaceRoot, path);
 
         if (!allowedRoots.Any(root => IsWithin(root, lexicalPath)))
         {
@@ -206,14 +215,17 @@ internal sealed class BuiltinFsPathPolicy
         }
     }
 
-    private bool IsWithin(string root, string path)
+    private static bool IsWithin(string root, string path)
     {
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
         var relative = Path.GetRelativePath(root, path);
-        return string.Equals(relative, ".", _comparison)
+        return string.Equals(relative, ".", comparison)
             || (!Path.IsPathRooted(relative)
-                && !string.Equals(relative, "..", _comparison)
-                && !relative.StartsWith($"..{Path.DirectorySeparatorChar}", _comparison)
-                && !relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", _comparison));
+                && !string.Equals(relative, "..", comparison)
+                && !relative.StartsWith($"..{Path.DirectorySeparatorChar}", comparison)
+                && !relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", comparison));
     }
 
     private static void EnsureNoLinks(string path)

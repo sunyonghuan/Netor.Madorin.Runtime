@@ -110,7 +110,7 @@ public sealed partial class BuiltinFsToolExecutor
             && !permission.AllowOverwrite)
         {
             parent.Dispose();
-            throw new UnauthorizedAccessException("Overwriting this path is not permitted.");
+            throw new ToolPermissionRequiredException("Overwriting this path is not permitted.");
         }
 
         return new FsPreparedExecution(
@@ -145,7 +145,7 @@ public sealed partial class BuiltinFsToolExecutor
                 && !permission.AllowOverwrite)
             {
                 destination.Dispose();
-                throw new UnauthorizedAccessException(
+                throw new ToolPermissionRequiredException(
                     "Overwriting the copy destination is not permitted.");
             }
 
@@ -238,7 +238,8 @@ public sealed partial class BuiltinFsToolExecutor
     {
         if (!permission.AllowOverwrite)
         {
-            throw new UnauthorizedAccessException("Patching an existing file requires overwrite permission.");
+            throw new ToolPermissionRequiredException(
+                "Patching an existing file requires overwrite permission.");
         }
 
         var file = policy.PinReadFile(

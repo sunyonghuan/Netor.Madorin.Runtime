@@ -34,7 +34,7 @@
 - 允许一个宿主进程为不同 Runtime 实例传入不同的全局目录和远程地址。
 - 让专家、会议、工作模式及其子 Agent 都能在各自 Invocation 中获得一致的有效 Skills 集合。
 - 保持 Skills 来源协议与具体 MAF 版本解耦，远程能力上线时只增加内部适配器。
-- 保持普通工具的宿主执行和权限边界不变。
+- 保持普通工具的 Tool Gateway、权限权威和执行边界不变；宿主模式使用 Reverse RPC，独立交互 CLI 使用本地 Consent。
 - 提供最小但够用的列举、查看、校验和刷新命令。
 
 ### 2.2 非目标
@@ -106,7 +106,7 @@ MAF 新版本已经提供基于 MCP 的远程 Skills 来源，其主要形态是
 | Effective Skills Catalog | 按来源顺序合并、去重后，本次 Invocation 可见的 Skill 集合 |
 | MAF Skills Provider | 把有效 Skill 的摘要和按需加载工具提供给模型 |
 | Tool Catalog | 当前 Agent 可以请求的普通工具定义，由 Runtime 与宿主现有机制维护 |
-| Tool Grant | 宿主对具体普通工具调用的权限结果 |
+| Tool Grant | 宿主 Reverse RPC 或独立 CLI 本地 Consent 对具体普通工具调用的权限结果 |
 | AgentInvocation | 一次 Agent 执行边界，固定使用一个 Skills 快照和一个 Tool Catalog 快照 |
 
 Skill 与普通工具的关系必须保持为：
@@ -115,8 +115,8 @@ Skill 与普通工具的关系必须保持为：
 Skill 指令
   -> 模型决定调用某普通工具
   -> Runtime Tool Gateway
-  -> 宿主权限判断
-  -> 宿主执行工具
+  -> 宿主 Reverse RPC 或独立 CLI Consent 判断
+  -> 按工具所有权由 Runtime 或宿主执行
   -> Runtime 把结果交还 Agent
 ```
 
@@ -467,8 +467,8 @@ Skill 正文可以告诉模型使用文件、HTTP、MCP 或宿主业务工具，
 Skill 要求使用 tool-a
   -> tool-a 不在当前 Tool Catalog：模型无法调用，返回能力缺失诊断
   -> tool-a 在当前 Tool Catalog：进入现有权限申请和执行链
-  -> 宿主拒绝：把拒绝结果返回 Agent，Skill 不产生绕过路径
-  -> 宿主允许：由宿主执行并返回结果
+  -> 权限权威拒绝：把拒绝结果返回 Agent，Skill 不产生绕过路径
+  -> 权限权威允许：由对应工具所有者执行并返回结果
 ```
 
 `SKILL.md` 的 `allowed-tools` 字段只用于提示和校验：
@@ -480,7 +480,7 @@ Skill 要求使用 tool-a
 
 ### 11.3 Skill 脚本边界
 
-MAF 支持 `run_skill_script`，但它要求 Runtime 配置 `AgentFileSkillScriptRunner`，这会形成一条新的进程执行路径。当前系统已经确定普通工具由宿主权限和执行链控制，因此 V1 采用以下最小规则：
+MAF 支持 `run_skill_script`，但它要求 Runtime 配置 `AgentFileSkillScriptRunner`，这会形成一条新的进程执行路径。当前系统已经确定普通工具由统一 Tool Gateway、当前权限权威和执行链控制，因此 V1 采用以下最小规则：
 
 - 不配置文件型 Skill Script Runner。
 - 不向模型公布 `run_skill_script`。
@@ -804,7 +804,7 @@ Catalog 成功更新后发送 `skill.catalog.changed`，至少包含旧版本、
 4. 宿主模式不隐式读取个人 `~/.madorin/skills`。
 5. 工作区同名 Skill 稳定覆盖全局或远程 Skill。
 6. Agent 通过 MAF 渐进披露加载正文和资源，而不是在启动时注入全部内容。
-7. Skill 引用的普通工具仍由现有 Tool Catalog、权限和宿主反向 RPC 执行。
+7. Skill 引用的普通工具仍由现有 Tool Catalog 和统一 Consent 链执行；宿主模式使用 Reverse RPC，独立交互 CLI 使用本地 handler，非交互场景保持 fail closed。
 8. `allowed-tools` 无法创建工具或获得权限。
 9. V1 没有任何 Skill 脚本直接执行路径。
 10. 每个 Invocation 能查询实际使用的 Catalog 版本和有效 Skill 哈希。
@@ -822,7 +822,7 @@ Catalog 成功更新后发送 `skill.catalog.changed`，至少包含旧版本、
 - 禁止宿主模式擅自加载个人 `~/.madorin/skills`。
 - 禁止按文件系统未定义枚举顺序解决同名冲突。
 - 禁止把全部 Skill 正文预先注入每次系统提示词。
-- 禁止让 `allowed-tools` 绕过 Tool Catalog 或宿主审批。
+- 禁止让 `allowed-tools` 绕过 Tool Catalog、宿主审批或独立 CLI 本地 Consent。
 - 禁止直接采用 MAF 示例 Script Runner 在 Runtime 内启动任意子进程。
 - 禁止多个 Runtime 共用可变远程下载/解压目录或静态 Catalog。
 - 禁止把 MAF 类型写入公开协议、`Contracts` 或 `Core` 边界。

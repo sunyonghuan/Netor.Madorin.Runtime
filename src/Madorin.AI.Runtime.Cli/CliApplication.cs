@@ -8,6 +8,8 @@ namespace Madorin.AI.Runtime.Cli;
 
 public static class CliApplication
 {
+    private const string ConfigDirectoryEnvironmentVariable = "MADORIN_CONFIG_DIR";
+
     public static int Run(
         string[] args,
         TextWriter? output = null,
@@ -20,8 +22,10 @@ public static class CliApplication
         TextReader? input,
         TextWriter? error)
     {
+        var startupDirectory = Path.GetFullPath(Directory.GetCurrentDirectory());
+        var configDirectory = GetConfigDirectoryOverride();
         var showWelcome = args.Length == 0;
-        var normalizedArgs = NormalizeArgs(args);
+        var normalizedArgs = NormalizeArgs(args, startupDirectory);
         var commandOutput = output ?? Console.Out;
         var commandError = error ?? (output is null ? Console.Error : commandOutput);
         return Invoke(
@@ -29,9 +33,10 @@ public static class CliApplication
                 commandOutput,
                 input,
                 commandError,
+                configDirectory,
                 null,
-                null,
-                showWelcome: showWelcome),
+                showWelcome: showWelcome,
+                colorsEnabled: !RequestsNoColor(args) && !RequestsMachineOutput(args)),
             normalizedArgs,
             commandOutput,
             commandError);
@@ -60,8 +65,9 @@ public static class CliApplication
         IReplInterruptSource? replInterruptSource = null,
         Func<StandaloneConfig, string, IRuntimeProviderAdapter>? providerAdapterFactory = null)
     {
+        var startupDirectory = Path.GetFullPath(Directory.GetCurrentDirectory());
         var showWelcome = args.Length == 0;
-        var normalizedArgs = NormalizeArgs(args);
+        var normalizedArgs = NormalizeArgs(args, startupDirectory);
         return Invoke(
             CreateRootCommandCore(
                 output,
@@ -72,7 +78,8 @@ public static class CliApplication
                 memoryUserHome,
                 replInterruptSource,
                 providerAdapterFactory,
-                showWelcome),
+                showWelcome,
+                colorsEnabled: !RequestsNoColor(args) && !RequestsMachineOutput(args)),
             normalizedArgs,
             output,
             error ?? output);
@@ -88,7 +95,8 @@ public static class CliApplication
         string? memoryUserHome = null,
         IReplInterruptSource? replInterruptSource = null,
         Func<StandaloneConfig, string, IRuntimeProviderAdapter>? providerAdapterFactory = null,
-        bool showWelcome = false)
+        bool showWelcome = false,
+        bool colorsEnabled = true)
     {
         var rootCommand = new RootCommand(
             "Independent AI Runtime server, client, diagnostics, and maintenance CLI.");
@@ -121,7 +129,7 @@ public static class CliApplication
         var commandOutput = output ?? Console.Out;
         var commandError = error ?? (output is null ? Console.Error : commandOutput);
         var commandInput = input ?? Console.In;
-        var terminal = new CliTerminal(commandInput, commandOutput);
+        var terminal = new CliTerminal(commandInput, commandOutput, colorsEnabled);
         rootCommand.Subcommands.Add(ServiceCommands.CreateServe(
             jsonOption,
             workspaceOption,
@@ -152,6 +160,7 @@ public static class CliApplication
             providerAdapterFactory));
         rootCommand.Subcommands.Add(ConfigCommands.Create(
             jsonOption,
+            workspaceOption,
             terminal,
             commandOutput,
             configDirectory));
@@ -255,15 +264,27 @@ public static class CliApplication
         return false;
     }
 
+    private static bool RequestsNoColor(string[] args) => args.Any(static argument =>
+        argument.Equals("--no-color", StringComparison.OrdinalIgnoreCase)
+        || argument.Equals("--no-color=true", StringComparison.OrdinalIgnoreCase));
+
+    private static string? GetConfigDirectoryOverride()
+    {
+        var value = Environment.GetEnvironmentVariable(ConfigDirectoryEnvironmentVariable);
+        return string.IsNullOrWhiteSpace(value)
+            ? null
+            : Path.GetFullPath(value);
+    }
+
     private static bool IsMachineFormat(string value) =>
         value.Equals("json", StringComparison.OrdinalIgnoreCase)
         || value.Equals("jsonl", StringComparison.OrdinalIgnoreCase);
 
-    private static string[] NormalizeArgs(string[] args)
+    private static string[] NormalizeArgs(string[] args, string startupDirectory)
     {
         if (args.Length == 0)
         {
-            return ["run"];
+            return ["run", "--workspace", startupDirectory];
         }
 
         if (args is ["--version"])
@@ -275,13 +296,13 @@ public static class CliApplication
             && modeOption.Equals("--mode", StringComparison.OrdinalIgnoreCase)
             && modeValue.Equals("standalone", StringComparison.OrdinalIgnoreCase))
         {
-            return ["run"];
+            return ["run", "--workspace", startupDirectory];
         }
 
         if (args is [var inlineMode]
             && inlineMode.Equals("--mode=standalone", StringComparison.OrdinalIgnoreCase))
         {
-            return ["run"];
+            return ["run", "--workspace", startupDirectory];
         }
 
         return args;

@@ -10,6 +10,8 @@ using Madorin.AI.Runtime.Entities;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Server;
 using Madorin.AI.Runtime.Services.Memory;
+using Madorin.AI.Runtime.Services.Tools;
+using Madorin.AI.Runtime.Transport.Abstractions;
 
 namespace Madorin.AI.Runtime.EndToEnd.Tests;
 
@@ -364,6 +366,63 @@ public sealed class StandaloneLocalRuntimeTests
         }
     }
 
+    [TestMethod]
+    public async Task RunAsync_ControlPeerAndLocalConsentHandler_AreMutuallyExclusive()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var workspace = Path.Combine(root, "workspace");
+            var dataDirectory = Path.Combine(root, "data");
+            Directory.CreateDirectory(workspace);
+            Directory.CreateDirectory(dataDirectory);
+            var memoryFiles = new MemoryFileService(Path.Combine(root, "home"), workspace);
+            var limits = new RuntimeLimits();
+            await using var blobStore = new BlobStagingStore(
+                dataDirectory,
+                limits,
+                maxGlobalBlobBytes: 16 * 1024 * 1024);
+            var core = new RuntimeExecutionCore(
+                dataDirectory,
+                $"Data Source={Path.Combine(dataDirectory, "runtime.db")}",
+                "runtime-1",
+                workspace,
+                new AgentContextComposer(memoryFiles),
+                memoryFiles,
+                limits,
+                blobStore);
+            var catalogStore = new Madorin.AI.Runtime.Services.Tools.ToolCatalogStore(
+                new Madorin.AI.Runtime.Tools.Builtin.BuiltinToolRegistry(),
+                new JsonSchemaToolValidator());
+            var events = core.RunAsync(
+                "run-1",
+                "session-1",
+                new NewSessionRunRequest(
+                    "request-1",
+                    "turn-1",
+                    RuntimeMode.Expert,
+                    CreateSelection(),
+                    [new TextContentBlock("test")]),
+                new RecordingProvider(),
+                catalogStore,
+                catalogStore.CaptureSnapshot(),
+                controlPeer: new NoopDuplexRpcPeer(),
+                localToolConsentHandler: new DenyingConsentHandler(),
+                ct: _testContext.CancellationToken);
+            await using var enumerator = events.GetAsyncEnumerator(_testContext.CancellationToken);
+
+            var exception = await Assert.ThrowsExactlyAsync<ArgumentException>(
+                async () => await enumerator.MoveNextAsync());
+
+            Assert.Contains("both a control peer", exception.Message, StringComparison.Ordinal);
+            Assert.IsFalse(File.Exists(Path.Combine(dataDirectory, "runtime.db")));
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
     private static LocalRuntimeOptions CreateOptions(
         string workspace,
         string dataDirectory,
@@ -425,6 +484,65 @@ public sealed class StandaloneLocalRuntimeTests
         {
             Directory.Delete(path, recursive: true);
         }
+    }
+
+    private sealed class DenyingConsentHandler : IToolConsentHandler
+    {
+        public Task<ToolPermissionResponse> RequestPermissionAsync(
+            ToolPermissionConsentContext context,
+            CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            return Task.FromResult(new ToolPermissionResponse(
+                context.Request.CorrelationId ?? string.Empty,
+                context.Request.CallId,
+                ToolAuthorizationDecision.Denied));
+        }
+
+        public Task<ApprovalResponse> RequestApprovalAsync(
+            ToolApprovalConsentContext context,
+            CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            return Task.FromResult(new ApprovalResponse(
+                context.Request.CorrelationId,
+                context.Request.ApprovalRequestId,
+                ToolAuthorizationDecision.Denied));
+        }
+    }
+
+    private sealed class NoopDuplexRpcPeer : IDuplexRpcPeer
+    {
+        public Task Completion => Task.CompletedTask;
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+        public ValueTask<ReadOnlyMemory<byte>> SendAsync(
+            ReadOnlyMemory<byte> request,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(ReadOnlyMemory<byte>.Empty);
+        }
+
+        public void SetRequestHandler(
+            Func<JsonRpcRequest, CancellationToken, ValueTask<JsonRpcResponse>> handler)
+        {
+            ArgumentNullException.ThrowIfNull(handler);
+        }
+
+        public ValueTask<JsonRpcResponse> SendRequestAsync(
+            string method,
+            JsonElement? parameters = null,
+            CancellationToken ct = default) =>
+            ValueTask.FromException<JsonRpcResponse>(new NotSupportedException());
+
+        public ValueTask<JsonRpcResponse> SendRequestAsync(
+            string method,
+            JsonElement? parameters,
+            TimeSpan timeout,
+            CancellationToken ct = default) =>
+            ValueTask.FromException<JsonRpcResponse>(new NotSupportedException());
     }
 
     private sealed class RecordingProvider : IRuntimeProviderAdapter

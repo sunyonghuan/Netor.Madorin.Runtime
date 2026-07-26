@@ -957,7 +957,7 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
         var fixture = await CreateFixtureAsync();
         try
         {
-            await DowngradeToVersionThirteenAsync(fixture);
+            await DowngradeToVersionFourteenAsync(fixture);
             await using var workspaceLock = await WorkspaceWriteLock.AcquireAsync(
                 fixture.Workspace,
                 "migration-dry-run-lock-holder",
@@ -975,14 +975,14 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
             using var document = JsonDocument.Parse(output.ToString());
             Assert.AreEqual("db migrate", document.RootElement.GetProperty("data").GetProperty("command").GetString());
             Assert.AreEqual("dry-run", document.RootElement.GetProperty("data").GetProperty("status").GetString());
-            Assert.AreEqual(13, document.RootElement.GetProperty("data").GetProperty("fromVersion").GetInt32());
-            Assert.AreEqual(14, document.RootElement.GetProperty("data").GetProperty("targetVersion").GetInt32());
+            Assert.AreEqual(14, document.RootElement.GetProperty("data").GetProperty("fromVersion").GetInt32());
+            Assert.AreEqual(15, document.RootElement.GetProperty("data").GetProperty("targetVersion").GetInt32());
             var pendingVersions = document.RootElement.GetProperty("data").GetProperty("pendingVersions")
                 .EnumerateArray()
                 .Select(static value => value.GetInt32())
                 .ToArray();
             Assert.HasCount(1, pendingVersions);
-            Assert.AreEqual(14, pendingVersions[0]);
+            Assert.AreEqual(15, pendingVersions[0]);
             Assert.AreEqual(JsonValueKind.Null, document.RootElement.GetProperty("data").GetProperty("backupPath").ValueKind);
             AssertTreeEqual(before, await CaptureTreeAsync(fixture.Root));
         }
@@ -998,11 +998,11 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
         var fixture = await CreateFixtureAsync();
         try
         {
-            await DowngradeToVersionThirteenAsync(fixture);
+            await DowngradeToVersionFourteenAsync(fixture);
             var output = new StringWriter();
 
             var exitCode = Run(
-                ["db", "migrate", "--workspace", fixture.Workspace, "--data-dir", fixture.DataDirectory, "--to", "14", "--json"],
+                ["db", "migrate", "--workspace", fixture.Workspace, "--data-dir", fixture.DataDirectory, "--to", "15", "--json"],
                 output,
                 new StringReader(string.Empty),
                 fixture.ConfigDirectory);
@@ -1010,14 +1010,14 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
             Assert.AreEqual(ExitCodes.Success, exitCode, output.ToString());
             using var document = JsonDocument.Parse(output.ToString());
             Assert.AreEqual("migrated", document.RootElement.GetProperty("data").GetProperty("status").GetString());
-            Assert.AreEqual(13, document.RootElement.GetProperty("data").GetProperty("fromVersion").GetInt32());
-            Assert.AreEqual(14, document.RootElement.GetProperty("data").GetProperty("targetVersion").GetInt32());
+            Assert.AreEqual(14, document.RootElement.GetProperty("data").GetProperty("fromVersion").GetInt32());
+            Assert.AreEqual(15, document.RootElement.GetProperty("data").GetProperty("targetVersion").GetInt32());
             var appliedVersions = document.RootElement.GetProperty("data").GetProperty("appliedVersions")
                 .EnumerateArray()
                 .Select(static value => value.GetInt32())
                 .ToArray();
             Assert.HasCount(1, appliedVersions);
-            Assert.AreEqual(14, appliedVersions[0]);
+            Assert.AreEqual(15, appliedVersions[0]);
             var backupPath = document.RootElement.GetProperty("data").GetProperty("backupPath").GetString();
             Assert.IsNotNull(backupPath);
             Assert.StartsWith(
@@ -1026,12 +1026,12 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
                 StringComparison.Ordinal);
             Assert.IsTrue(File.Exists(Path.Combine(backupPath, "state.db")));
             Assert.AreEqual(
-                13L,
+                14L,
                 await ExecuteScalarFromDatabaseAsync(
                     Path.Combine(backupPath, "state.db"),
                     "SELECT MAX(version) FROM schema_versions;"));
             Assert.AreEqual(
-                14L,
+                15L,
                 await ExecuteScalarAsync(
                     fixture.DataDirectory,
                     "SELECT MAX(version) FROM schema_versions;",
@@ -1048,6 +1048,12 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
                     fixture.DataDirectory,
                     "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'title';",
                     fixture.SessionId));
+            Assert.AreEqual(
+                1L,
+                await ExecuteScalarAsync(
+                    fixture.DataDirectory,
+                    "SELECT COUNT(*) FROM pragma_table_info('tool_approvals') WHERE name = 'request_kind';",
+                    fixture.SessionId));
         }
         finally
         {
@@ -1061,7 +1067,7 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
         var fixture = await CreateFixtureAsync();
         try
         {
-            await DowngradeToVersionThirteenAsync(fixture);
+            await DowngradeToVersionFourteenAsync(fixture);
             await using var workspaceLock = await WorkspaceWriteLock.AcquireAsync(
                 fixture.Workspace,
                 "migration-lock-holder",
@@ -1092,7 +1098,7 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
         var fixture = await CreateFixtureAsync();
         try
         {
-            await DowngradeToVersionThirteenAsync(fixture);
+            await DowngradeToVersionFourteenAsync(fixture);
             await File.WriteAllTextAsync(
                 Path.Combine(fixture.DataDirectory, "backups"),
                 "blocks migration recovery point",
@@ -1112,7 +1118,7 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
             Assert.AreEqual(JsonValueKind.Null, document.RootElement.GetProperty("data").GetProperty("backupPath").ValueKind);
             AssertTreeEqual(before, await CaptureTreeAsync(fixture.Root));
             Assert.AreEqual(
-                13L,
+                14L,
                 await ExecuteScalarAsync(
                     fixture.DataDirectory,
                     "SELECT MAX(version) FROM schema_versions;",
@@ -1130,10 +1136,10 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
         var fixture = await CreateFixtureAsync();
         try
         {
-            await DowngradeToVersionThirteenAsync(fixture);
+            await DowngradeToVersionFourteenAsync(fixture);
             await ExecuteAsync(
                 fixture.DataDirectory,
-                "PRAGMA foreign_keys = OFF; DROP TABLE sessions; PRAGMA wal_checkpoint(TRUNCATE);",
+                "PRAGMA foreign_keys = OFF; DROP TABLE tool_approvals; PRAGMA wal_checkpoint(TRUNCATE);",
                 fixture.SessionId);
             var output = new StringWriter();
 
@@ -1153,12 +1159,12 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
             Assert.Contains("Recovery point retained", message);
             Assert.IsTrue(File.Exists(Path.Combine(backupPath, "state.db")));
             Assert.AreEqual(
-                13L,
+                14L,
                 await ExecuteScalarFromDatabaseAsync(
                     Path.Combine(backupPath, "state.db"),
                     "SELECT MAX(version) FROM schema_versions;"));
             Assert.AreEqual(
-                13L,
+                14L,
                 await ExecuteScalarAsync(
                     fixture.DataDirectory,
                     "SELECT MAX(version) FROM schema_versions;",
@@ -1244,8 +1250,8 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
             Assert.AreEqual(ExitCodes.Success, exitCode, output.ToString());
             using var document = JsonDocument.Parse(output.ToString());
             Assert.AreEqual("up-to-date", document.RootElement.GetProperty("data").GetProperty("status").GetString());
-            Assert.AreEqual(14, document.RootElement.GetProperty("data").GetProperty("fromVersion").GetInt32());
-            Assert.AreEqual(14, document.RootElement.GetProperty("data").GetProperty("targetVersion").GetInt32());
+            Assert.AreEqual(15, document.RootElement.GetProperty("data").GetProperty("fromVersion").GetInt32());
+            Assert.AreEqual(15, document.RootElement.GetProperty("data").GetProperty("targetVersion").GetInt32());
             Assert.IsEmpty(document.RootElement.GetProperty("data").GetProperty("appliedVersions").EnumerateArray());
             Assert.AreEqual(JsonValueKind.Null, document.RootElement.GetProperty("data").GetProperty("backupPath").ValueKind);
             Assert.IsFalse(Directory.Exists(Path.Combine(fixture.DataDirectory, "backups")));
@@ -1258,8 +1264,8 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
 
     [TestMethod]
     [DataRow(-1)]
-    [DataRow(13)]
-    [DataRow(15)]
+    [DataRow(14)]
+    [DataRow(16)]
     public async Task DbMigrate_InvalidTarget_ReturnsInvalidArgumentsWithoutWriting(int targetVersion)
     {
         var fixture = await CreateFixtureAsync();
@@ -1642,13 +1648,13 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
             Encoding.UTF8,
             TestContext.CancellationToken);
 
-    private async Task DowngradeToVersionThirteenAsync(DatabaseFixture fixture) =>
+    private async Task DowngradeToVersionFourteenAsync(DatabaseFixture fixture) =>
         await ExecuteAsync(
             fixture.DataDirectory,
             """
             PRAGMA foreign_keys = OFF;
-            ALTER TABLE sessions DROP COLUMN title;
-            DELETE FROM schema_versions WHERE version = 14;
+            ALTER TABLE tool_approvals DROP COLUMN request_kind;
+            DELETE FROM schema_versions WHERE version = 15;
             PRAGMA wal_checkpoint(TRUNCATE);
             """,
             fixture.SessionId);

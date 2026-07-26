@@ -23,6 +23,7 @@ madorin <command> [subcommand] [options]
 ── 诊断与信息 ──────────────────────────────────────────────────────
   version        显示程序版本、协议版本和构建信息
   doctor         检查配置、Provider 连通性和运行环境
+  config         初始化、编辑、查看和验证独立 CLI 配置
   providers      查看和管理 Provider 配置
 
 ── 会话管理 ────────────────────────────────────────────────────────
@@ -109,7 +110,7 @@ madorin version
 
 ```text
 madorin doctor
-  --workspace <path>       可选；检查指定工作区的 .madorin 数据
+  --workspace <path>       可选；检查指定工作区的选择配置与 .madorin 数据
   --provider <id>          可选；只检查指定 Provider
   --fix                    可选；尝试自动修复可修复的问题
                            注意：--fix 会修改数据库，执行前自动备份到 {data-dir}/backups/；
@@ -120,6 +121,7 @@ madorin doctor
   ✓ .NET 运行时版本
   ✓ Named Pipe 支持
   ✓ 工作区目录权限（读/写/创建）
+  ✓ 工作区配置 Schema、大小、引用和最终 Selection（仅显式 --workspace）
   ✓ .madorin 数据完整性（state.db schema + messages/ 文件）
   ✓ Provider 配置和 API Key 存在性
   ✓ Provider API 连通性（发送 ping 请求）
@@ -127,6 +129,32 @@ madorin doctor
   ✓ Blob 存储目录权限
   ! 警告：messages/ 中存在未被 state.db 引用的孤立文件
 ```
+
+---
+
+### `madorin config`
+
+全局配置固定为当前用户目录下的 `~/.madorin/config.json` 和 `agents/*.json`。工作区可选配置固定为 `<workspace>/.madorin/config.json`，只保存 `schemaVersion` 和 `selection.provider/model/agent`；不向父目录扫描，不自动创建，不允许凭据、Provider 地址或 Agent 正文。
+
+```text
+madorin config init                 交互创建全局配置和默认 Agent
+madorin config edit                 交互修改全局配置
+madorin config show                 显示脱敏的全局配置
+madorin config validate             验证全局配置
+madorin config show --workspace <path>
+madorin config validate --workspace <path>
+```
+
+不传 `--workspace` 时，`show/validate` 保持原有全局行为。工作区模式文本输出增加全局路径、工作区路径、存在状态及 Agent/Provider/Model 的最终值和来源；JSON 的 `data` 增加：
+
+```text
+globalConfigPath
+workspaceConfigPath
+workspaceConfigExists
+effectiveSelection.{agent,provider,model}.{value,source}
+```
+
+Agent 优先级为“命令行 > 工作区 > 全局”，Provider/Model 优先级为“命令行 > Agent 绑定 > 工作区 > 全局”。配置无效统一返回退出码 `2`，错误码为 `ConfigurationNotFound`、`ConfigurationInvalid`、`WorkspaceConfigurationInvalid`、`WorkspaceSelectionNotFound` 或 `SelectionNotFound`。所有文本、JSON、日志和异常均不得输出 API Key 或工作区 JSON 正文。
 
 ---
 
@@ -687,7 +715,7 @@ madorin ctl credential update
 以下选项适用于所有命令：
 
 ```text
---workspace <path>      工作区路径（多个命令需要时的全局覆盖）
+--workspace <path>      工作区路径（运行数据，以及独立 CLI 的可选工作区选择配置）
 --data-dir <path>       数据目录（覆盖 {workspace}/.madorin）
 --log-level <level>     Debug | Information | Warning | Error（默认 Warning）
 --no-color              禁用彩色输出

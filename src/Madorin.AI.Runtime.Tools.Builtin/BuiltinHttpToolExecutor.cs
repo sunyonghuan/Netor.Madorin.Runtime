@@ -77,10 +77,7 @@ public sealed class BuiltinHttpToolExecutor : IToolExecutor
 
         var method = ParseMethod(GetRequiredString(arguments, "method"));
         var url = GetRequiredString(arguments, "url");
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
-        {
-            throw new ArgumentException("Tool argument 'url' must be an absolute URI.");
-        }
+        var uri = ParseAndValidateRequestUri(url);
 
         var headers = ParseHeaders(arguments);
         var body = GetOptionalString(arguments, "body");
@@ -339,13 +336,7 @@ public sealed class BuiltinHttpToolExecutor : IToolExecutor
         NetworkPolicy policy,
         CancellationToken ct)
     {
-        if (!uri.IsAbsoluteUri
-            || string.IsNullOrWhiteSpace(uri.IdnHost)
-            || !string.IsNullOrEmpty(uri.UserInfo)
-            || uri.Scheme is not ("http" or "https"))
-        {
-            throw new UnauthorizedAccessException("The HTTP URI is not allowed.");
-        }
+        ValidateRequestUri(uri);
 
         var allowedSchemes = policy.AllowedSchemes ?? ["https"];
         if (!allowedSchemes.Contains(uri.Scheme, StringComparer.OrdinalIgnoreCase))
@@ -466,7 +457,7 @@ public sealed class BuiltinHttpToolExecutor : IToolExecutor
                 && ipv6[3] == 0xB8);
     }
 
-    private static Dictionary<string, string> ParseHeaders(JsonElement arguments)
+    internal static Dictionary<string, string> ParseHeaders(JsonElement arguments)
     {
         if (!arguments.TryGetProperty("headers", out var property))
         {
@@ -589,7 +580,7 @@ public sealed class BuiltinHttpToolExecutor : IToolExecutor
         return encoding.GetString(bytes);
     }
 
-    private static HttpMethod ParseMethod(string value) => value switch
+    internal static HttpMethod ParseMethod(string value) => value switch
     {
         "GET" => HttpMethod.Get,
         "HEAD" => HttpMethod.Head,
@@ -600,11 +591,11 @@ public sealed class BuiltinHttpToolExecutor : IToolExecutor
         _ => throw new ArgumentException($"HTTP method '{value}' is not supported.")
     };
 
-    private static string GetRequiredString(JsonElement arguments, string propertyName) =>
+    internal static string GetRequiredString(JsonElement arguments, string propertyName) =>
         GetOptionalString(arguments, propertyName)
         ?? throw new ArgumentException($"Tool argument '{propertyName}' must be a string.");
 
-    private static string? GetOptionalString(JsonElement arguments, string propertyName)
+    internal static string? GetOptionalString(JsonElement arguments, string propertyName)
     {
         if (!arguments.TryGetProperty(propertyName, out var property))
         {
@@ -617,6 +608,28 @@ public sealed class BuiltinHttpToolExecutor : IToolExecutor
         }
 
         return property.GetString();
+    }
+
+    internal static Uri ParseAndValidateRequestUri(string value)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri))
+        {
+            throw new ArgumentException("Tool argument 'url' must be an absolute URI.");
+        }
+
+        ValidateRequestUri(uri);
+        return uri;
+    }
+
+    private static void ValidateRequestUri(Uri uri)
+    {
+        if (!uri.IsAbsoluteUri
+            || string.IsNullOrWhiteSpace(uri.IdnHost)
+            || !string.IsNullOrEmpty(uri.UserInfo)
+            || uri.Scheme is not ("http" or "https"))
+        {
+            throw new UnauthorizedAccessException("The HTTP URI is not allowed.");
+        }
     }
 
     private sealed class PreparedHttpExecution(

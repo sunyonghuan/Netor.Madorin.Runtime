@@ -11,4 +11,5 @@ public sealed record ToolApprovalState(
     string? GrantId,
     string? Reason,
     DateTimeOffset RequestedAt,
-    DateTimeOffset? DecidedAt);
+    DateTimeOffset? DecidedAt,
+    string RequestKind = "approval");

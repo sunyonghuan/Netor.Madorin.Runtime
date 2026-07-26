@@ -59,6 +59,60 @@ public sealed class SqliteToolStateStoreTests
     }
 
     [TestMethod]
+    public async Task EnsureCreatedAsync_FromVersionFourteen_AddsRequestKindAndPreservesApproval()
+    {
+        await using var connection = await CreateDatabaseAsync();
+        await using (var setup = connection.CreateCommand())
+        {
+            setup.CommandText = """
+                INSERT INTO tool_approvals(
+                    approval_request_id,
+                    call_id,
+                    run_id,
+                    agent_id,
+                    tool_id,
+                    arguments_hash,
+                    decision,
+                    requested_at)
+                VALUES(
+                    'approval-v14',
+                    'call-v14',
+                    'run-v14',
+                    'agent-v14',
+                    'builtin.fs.read',
+                    'HASH-V14',
+                    'granted',
+                    '2026-07-22T00:00:00.0000000+00:00');
+                ALTER TABLE tool_approvals DROP COLUMN request_kind;
+                DELETE FROM schema_versions WHERE version = 15;
+                """;
+            await setup.ExecuteNonQueryAsync(TestContext.CancellationToken);
+        }
+
+        await SqliteSchema.EnsureCreatedAsync(connection, TestContext.CancellationToken);
+        await SqliteSchema.EnsureCreatedAsync(connection, TestContext.CancellationToken);
+
+        using var store = new SqliteToolIntentRepository(connection);
+        var approval = await store.GetApprovalAsync(
+            "approval-v14",
+            TestContext.CancellationToken);
+        Assert.IsNotNull(approval);
+        Assert.AreEqual("approval", approval.RequestKind);
+
+        await using var column = connection.CreateCommand();
+        column.CommandText = """
+            SELECT type, [notnull], dflt_value
+            FROM pragma_table_info('tool_approvals')
+            WHERE name = 'request_kind';
+            """;
+        await using var reader = await column.ExecuteReaderAsync(TestContext.CancellationToken);
+        Assert.IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        Assert.AreEqual("TEXT", reader.GetString(0));
+        Assert.AreEqual(1L, reader.GetInt64(1));
+        Assert.AreEqual("'approval'", reader.GetString(2));
+    }
+
+    [TestMethod]
     public async Task IntentLifecycle_SentThenCompleted_PersistsRecoveryMetadata()
     {
         await using var connection = await CreateDatabaseAsync();
@@ -203,6 +257,7 @@ public sealed class SqliteToolStateStoreTests
         Assert.IsNotNull(storedApproval);
         Assert.AreEqual("granted", storedApproval.Decision);
         Assert.AreEqual(child.GrantId, storedApproval.GrantId);
+        Assert.AreEqual("approval", storedApproval.RequestKind);
         Assert.AreEqual(
             approval.ApprovalRequestId,
             (await store.GetGrantAsync(child.GrantId, TestContext.CancellationToken))

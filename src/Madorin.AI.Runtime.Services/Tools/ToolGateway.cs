@@ -42,6 +42,36 @@ public sealed class ToolGateway(
         CancellationToken ct = default) =>
         ExecuteAsync(invocation, permission, _catalogStore.CaptureSnapshot(), ct);
 
+    internal Task<ToolGatewayResult> CompletePendingConsentAsync(
+        ToolInvocation invocation,
+        ToolIntentStatus status,
+        string errorCode,
+        string errorMessage,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(invocation);
+        if (status is not (ToolIntentStatus.Failed or ToolIntentStatus.Cancelled))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(status),
+                status,
+                "Pending consent can only end as Failed or Cancelled.");
+        }
+
+        return CompleteBeforeExecutionAsync(
+            invocation,
+            new ToolResult(
+                invocation.CallId,
+                invocation.ToolId,
+                Success: false,
+                Error: errorMessage),
+            ToolIntentStatus.Pending,
+            status,
+            errorCode,
+            ct,
+            tolerateMissingIntent: true);
+    }
+
     public async Task<ToolGatewayResult> ExecuteAsync(
         ToolInvocation invocation,
         ToolPermissionContext? permission,
@@ -152,6 +182,12 @@ public sealed class ToolGateway(
                     authorizedInvocation,
                     timeoutSource.Token)
                 .ConfigureAwait(false);
+        }
+        catch (ToolPermissionRequiredException ex)
+        {
+            return new ToolGatewayResult(
+                ToolGatewayResultKind.NeedsPermission,
+                Error: CreateError(RuntimeErrorCodes.ToolPermissionRequired, ex.Message));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -735,7 +771,8 @@ public sealed class ToolGateway(
         ToolIntentStatus expectedStatus,
         ToolIntentStatus status,
         string errorCode,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool tolerateMissingIntent = false)
     {
         var resultHash = GetResultHash(result);
         var eventName = status is ToolIntentStatus.Cancelled
@@ -761,9 +798,21 @@ public sealed class ToolGateway(
             if (!completed)
             {
                 var existing = await _stateStore.GetIntentAsync(invocation.CallId, ct)
-                    .ConfigureAwait(false)
-                    ?? throw new InvalidDataException(
+                    .ConfigureAwait(false);
+                if (existing is null)
+                {
+                    if (tolerateMissingIntent)
+                    {
+                        return new ToolGatewayResult(
+                            ToolGatewayResultKind.Failed,
+                            result,
+                            CreateError(errorCode, result.Error ?? "Tool consent failed."));
+                    }
+
+                    throw new InvalidDataException(
                         $"Tool intent '{invocation.CallId}' disappeared during preparation.");
+                }
+
                 return ToExistingResult(existing)
                     ?? Failed(
                         RuntimeErrorCodes.ToolCallInProgress,

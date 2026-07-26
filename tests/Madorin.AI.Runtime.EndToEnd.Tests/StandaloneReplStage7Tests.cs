@@ -158,6 +158,67 @@ public sealed class StandaloneReplStage7Tests
 
     [TestMethod]
     [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task Repl_ProviderAndAgentWithoutArguments_ListAndSelectByNumber()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var configDirectory = Path.Combine(root, "config");
+            var workspace = Path.Combine(root, "workspace");
+            await WriteConfigurationAsync(configDirectory, includeSecondProvider: true);
+            var providers = new ProviderSet(
+                new RecordingProvider("provider-one", ["model-one"]),
+                new RecordingProvider("provider-two", ["model-two", "model-two-alt"]));
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            var exitCode = CliApplication.RunForTests(
+                ["run", "--workspace", workspace],
+                output,
+                new StringReader(string.Join(
+                    Environment.NewLine,
+                    [
+                        "/provider",
+                        "2",
+                        "/agent",
+                        "2",
+                        "selected turn",
+                        "/exit",
+                        string.Empty
+                    ])),
+                configDirectory,
+                _ => providers.Resolve,
+                error: error);
+
+            Assert.AreEqual(ExitCodes.Success, exitCode, error.ToString());
+            Assert.IsEmpty(providers.ProviderOne.Requests);
+            var request = Assert.ContainsSingle(providers.ProviderTwo.Requests);
+            Assert.AreEqual("provider-two", request.ProviderId);
+            Assert.AreEqual("model-two", request.ModelId);
+            Assert.AreEqual("agent-two", request.AgentId);
+
+            var text = output.ToString();
+            Assert.Contains("Providers:", text, StringComparison.Ordinal);
+            Assert.Contains("1. provider-one - 1 model (current)", text, StringComparison.Ordinal);
+            Assert.Contains("2. provider-two - 2 models", text, StringComparison.Ordinal);
+            Assert.Contains("Select provider by number or ID", text, StringComparison.Ordinal);
+            Assert.Contains("Agents:", text, StringComparison.Ordinal);
+            Assert.Contains("1. agent-one - Agent One (current)", text, StringComparison.Ordinal);
+            Assert.Contains("2. agent-two - Agent Two", text, StringComparison.Ordinal);
+            Assert.Contains("Select agent by number or ID", text, StringComparison.Ordinal);
+            Assert.Contains(
+                "Next turn: provider-two/model-two (agent-two)",
+                text,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
     public async Task Repl_NewResumeListAndEof_PreservePersistedSessions()
     {
         var root = CreateTemporaryDirectory();

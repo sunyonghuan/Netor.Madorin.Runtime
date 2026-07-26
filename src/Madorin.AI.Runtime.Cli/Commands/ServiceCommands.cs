@@ -3,12 +3,14 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using Madorin.AI.Runtime.Cli.Config;
+using Madorin.AI.Runtime.Cli.Tools;
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Contracts.Serialization;
 using Madorin.AI.Runtime.Entities;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Server;
 using Madorin.AI.Runtime.Services.Memory;
+using StandaloneSelection = Madorin.AI.Runtime.Cli.Config.ResolvedStandaloneSelection;
 
 namespace Madorin.AI.Runtime.Cli.Commands;
 
@@ -309,74 +311,62 @@ internal static class ServiceCommands
             }
 
             var loader = new StandaloneConfigLoader(context.ConfigDirectory);
-            StandaloneConfig config;
-            IReadOnlyList<AgentConfigDocument> agentDocuments;
+            var resolver = new StandaloneConfigurationResolver(loader);
+            StandaloneConfigurationSnapshot configuration;
             try
             {
-                var loadedConfig = await loader.LoadAsync().ConfigureAwait(false);
-                if (loadedConfig is null && outputFormat is not RunOutputFormat.Text)
+                try
                 {
-                    RunOutputWriter.WriteCommandFailure(
-                        output,
-                        error,
-                        outputFormat,
-                        machineOutputRedirected,
-                        "ConfigurationNotFound",
-                        $"Configuration not found: {loader.ConfigPath}");
-                    return ExitCodes.InvalidArguments;
+                    configuration = await resolver.LoadAsync(context.WorkspaceRoot)
+                        .ConfigureAwait(false);
                 }
-
-                config = loadedConfig ?? await ConfigWizard.RunInitAsync(
-                        context.ConfigDirectory,
-                        terminal)
-                    .ConfigureAwait(false);
-                agentDocuments = await loader.LoadAgentDocumentsAsync().ConfigureAwait(false);
+                catch (StandaloneConfigurationException ex)
+                    when (ex.Code == StandaloneConfigurationResolver.ConfigurationNotFoundCode
+                        && outputFormat is RunOutputFormat.Text)
+                {
+                    _ = await ConfigWizard.RunInitAsync(
+                            context.ConfigDirectory,
+                            terminal)
+                        .ConfigureAwait(false);
+                    configuration = await resolver.LoadAsync(context.WorkspaceRoot)
+                        .ConfigureAwait(false);
+                }
             }
             catch (Exception ex) when (IsConfigurationException(ex))
             {
+                var code = ex is StandaloneConfigurationException configurationException
+                    ? configurationException.Code
+                    : StandaloneConfigurationResolver.ConfigurationInvalidCode;
                 RunOutputWriter.WriteCommandFailure(
                     output,
                     error,
                     outputFormat,
                     machineOutputRedirected,
-                    "ConfigurationError",
+                    code,
                     ex.Message);
                 return ExitCodes.InvalidArguments;
             }
 
-            var validationErrors = StandaloneConfigValidator.Validate(
-                config,
-                loader.ConfigPath,
-                agentDocuments);
-            if (validationErrors.Count > 0)
+            var config = configuration.GlobalConfig;
+            var agents = configuration.Agents;
+            StandaloneSelection selection;
+            try
             {
-                RunOutputWriter.WriteCommandFailure(
-                    output,
-                    error,
-                    outputFormat,
-                    machineOutputRedirected,
-                    "ConfigurationInvalid",
-                    RedactSecrets(string.Join(Environment.NewLine, validationErrors), config));
-                return ExitCodes.InvalidArguments;
-            }
-
-            var agents = agentDocuments.Select(static document => document.Agent).ToList();
-
-            if (!TryResolveSelection(
-                    config,
-                    agents,
+                selection = StandaloneConfigurationResolver.ResolveSelection(
+                    configuration,
                     parseResult.GetValue(providerOption),
                     parseResult.GetValue(modelOption),
-                    parseResult.GetValue(agentOption),
-                    out var selection))
+                    parseResult.GetValue(agentOption));
+            }
+            catch (StandaloneConfigurationException ex)
             {
                 RunOutputWriter.WriteCommandFailure(
                     output,
                     error,
                     outputFormat,
                     machineOutputRedirected,
-                    "SelectionNotFound",
-                    "The requested Provider, model, or Agent does not exist in the standalone configuration.");
+                    ex.Code,
+                    ex.Message);
                 return ExitCodes.InvalidArguments;
             }
 
@@ -421,6 +411,14 @@ internal static class ServiceCommands
                 var memoryFiles = new MemoryFileService(
                     Path.GetFullPath(resolvedMemoryUserHome),
                     context.WorkspaceRoot);
+                using var consentHandler = StandaloneToolConsentPolicy.IsInteractiveConsentEnabled(
+                        terminal,
+                        outputFormat is RunOutputFormat.Text,
+                        outputFile is not null)
+                    ? new StandaloneToolConsentHandler(
+                        terminal,
+                        new StandaloneToolGrantFactory())
+                    : null;
                 runtime = await LocalRuntime.StartAsync(
                         new LocalRuntimeOptions(
                             context.WorkspaceRoot,
@@ -429,7 +427,8 @@ internal static class ServiceCommands
                             context.RuntimeInstanceId,
                             providerResolver)
                         {
-                            MemoryFiles = memoryFiles
+                            MemoryFiles = memoryFiles,
+                            ToolConsentHandler = consentHandler
                         },
                         cts.Token)
                     .ConfigureAwait(false);
@@ -565,7 +564,7 @@ internal static class ServiceCommands
         if (showWelcome)
         {
             ReplWelcomeWriter.Write(
-                output,
+                terminal,
                 new ReplWelcomeSnapshot(
                     RuntimeVersionInfoProvider.Create().Version,
                     mode,
@@ -626,7 +625,11 @@ internal static class ServiceCommands
                     interruptState = ReplInterruptState.Idle;
                 }
 
-                terminal.Write($"madorin [{selection.Provider.Name}/{selection.Model}] > ");
+                terminal.Write("madorin", CliTextStyle.Prompt);
+                terminal.Write(" [", CliTextStyle.Muted);
+                terminal.Write($"{selection.Provider.Name}/{selection.Model}", CliTextStyle.Selected);
+                terminal.Write("] ", CliTextStyle.Muted);
+                terminal.Write("> ", CliTextStyle.Prompt);
 
                 var userInput = await terminal.ReadLineAsync(exitCts.Token).ConfigureAwait(false);
                 if (userInput is null)
@@ -820,38 +823,31 @@ internal static class ServiceCommands
                 case "/MODEL":
                     if (argument is null)
                     {
-                        await output.WriteLineAsync(
-                                $"Models for Provider '{selection.Provider.Name}':")
-                            .ConfigureAwait(false);
-                        for (var index = 0; index < selection.Provider.Models.Count; index++)
+                        if (selection.Provider.Models.Count == 0)
                         {
-                            var model = selection.Provider.Models[index];
-                            var currentMarker = model.Equals(
-                                selection.Model,
-                                StringComparison.Ordinal)
-                                ? " (current)"
-                                : string.Empty;
-                            await output.WriteLineAsync(
-                                    $"  {index + 1}. {model}{currentMarker}")
+                            await error.WriteLineAsync(
+                                    $"Provider '{selection.Provider.Name}' has no available models.")
                                 .ConfigureAwait(false);
-                        }
-
-                        terminal.Write("Select model by number or ID (Enter to cancel): ");
-                        argument = (await terminal.ReadLineAsync(ct).ConfigureAwait(false))?.Trim();
-                        if (string.IsNullOrEmpty(argument))
-                        {
                             return Current();
                         }
 
-                        if (int.TryParse(argument, out var modelNumber)
-                            && modelNumber >= 1
-                            && modelNumber <= selection.Provider.Models.Count)
+                        argument = await ReplSelectionMenu.PromptAsync(
+                                terminal,
+                                $"Models for Provider '{selection.Provider.Name}':",
+                                "model",
+                                selection.Provider.Models
+                                    .Select(static model => (model, (string?)null))
+                                    .ToArray(),
+                                selection.Model,
+                                ct)
+                            .ConfigureAwait(false);
+                        if (argument is null)
                         {
-                            argument = selection.Provider.Models[modelNumber - 1];
+                            return Current();
                         }
                     }
 
-                    if (!TryResolveSelection(
+                    if (!StandaloneConfigurationResolver.TryResolveGlobalSelection(
                             config,
                             agents,
                             selection.Provider.Name,
@@ -867,7 +863,7 @@ internal static class ServiceCommands
 
                     return await UpdateReplSelectionAsync(
                             runtime,
-                            output,
+                            terminal,
                             sessionId,
                             mode,
                             modelSelection,
@@ -880,9 +876,32 @@ internal static class ServiceCommands
                 case "/PROVIDER":
                     if (argument is null)
                     {
-                        await output.WriteLineAsync($"Provider: {selection.Provider.Name}")
+                        if (config.Providers.Count == 0)
+                        {
+                            await error.WriteLineAsync("No Providers are configured.")
+                                .ConfigureAwait(false);
+                            return Current();
+                        }
+
+                        argument = await ReplSelectionMenu.PromptAsync(
+                                terminal,
+                                "Providers:",
+                                "provider",
+                                config.Providers
+                                    .Select(static provider =>
+                                        (
+                                            provider.Name,
+                                            (string?)($"{provider.Models.Count} " +
+                                                (provider.Models.Count == 1 ? "model" : "models"))
+                                        ))
+                                    .ToArray(),
+                                selection.Provider.Name,
+                                ct)
                             .ConfigureAwait(false);
-                        return Current();
+                        if (argument is null)
+                        {
+                            return Current();
+                        }
                     }
 
                     var provider = config.Providers.FirstOrDefault(candidate =>
@@ -902,7 +921,7 @@ internal static class ServiceCommands
                             ? config.DefaultModel
                             : provider.Models.FirstOrDefault();
                     if (providerModel is null
-                        || !TryResolveSelection(
+                        || !StandaloneConfigurationResolver.TryResolveGlobalSelection(
                             config,
                             agents,
                             provider.Name,
@@ -918,7 +937,7 @@ internal static class ServiceCommands
 
                     return await UpdateReplSelectionAsync(
                             runtime,
-                            output,
+                            terminal,
                             sessionId,
                             mode,
                             providerSelection,
@@ -931,12 +950,30 @@ internal static class ServiceCommands
                 case "/AGENT":
                     if (argument is null)
                     {
-                        await output.WriteLineAsync($"Agent: {selection.Agent.Id}")
+                        if (agents.Count == 0)
+                        {
+                            await error.WriteLineAsync("No Agents are configured.")
+                                .ConfigureAwait(false);
+                            return Current();
+                        }
+
+                        argument = await ReplSelectionMenu.PromptAsync(
+                                terminal,
+                                "Agents:",
+                                "agent",
+                                agents
+                                    .Select(static agent => (agent.Id, (string?)agent.Name))
+                                    .ToArray(),
+                                selection.Agent.Id,
+                                ct)
                             .ConfigureAwait(false);
-                        return Current();
+                        if (argument is null)
+                        {
+                            return Current();
+                        }
                     }
 
-                    if (!TryResolveSelection(
+                    if (!StandaloneConfigurationResolver.TryResolveGlobalSelection(
                             config,
                             agents,
                             providerOverride: null,
@@ -952,7 +989,7 @@ internal static class ServiceCommands
 
                     return await UpdateReplSelectionAsync(
                             runtime,
-                            output,
+                            terminal,
                             sessionId,
                             mode,
                             agentSelection,
@@ -1060,7 +1097,7 @@ internal static class ServiceCommands
                     var savedSelection = await runtime.GetSessionSelectionAsync(argument, ct)
                         .ConfigureAwait(false);
                     if (savedSelection is null
-                        || !TryResolveSelection(
+                        || !StandaloneConfigurationResolver.TryResolveGlobalSelection(
                             config,
                             agents,
                             savedSelection.DefaultSelection.ProviderId,
@@ -1303,8 +1340,7 @@ internal static class ServiceCommands
                     return Current();
 
                 case "/HELP":
-                    var help = GetReplHelp(argument);
-                    if (help is null)
+                    if (!ReplHelpWriter.Write(terminal, argument))
                     {
                         await error.WriteLineAsync(
                                 $"Unknown REPL help topic '{argument}'. Use /help to list commands.")
@@ -1312,7 +1348,6 @@ internal static class ServiceCommands
                         return Current();
                     }
 
-                    await output.WriteLineAsync(help).ConfigureAwait(false);
                     return Current();
 
                 case "/MEMORY":
@@ -1341,41 +1376,9 @@ internal static class ServiceCommands
         }
     }
 
-    private static string? GetReplHelp(string? topic)
-    {
-        if (topic is null)
-        {
-            return "/model /provider /agent /memory /remember /mode /compact /context /session " +
-                "/new /resume /export /tools /history /clear /status /help /exit /quit";
-        }
-
-        return topic.TrimStart('/').ToUpperInvariant() switch
-        {
-            "MODEL" => "/model [modelId] - select or update the next-turn model.",
-            "PROVIDER" => "/provider [providerId] - show or update the next-turn Provider.",
-            "AGENT" => "/agent [agentId] - show or update the next-turn Agent.",
-            "MEMORY" => "/memory [global|project|effective] - show memory content and sources.",
-            "REMEMBER" => "/remember <global|project> - append one item after interactive approval.",
-            "MODE" => "/mode - show the immutable mode of the current REPL Session.",
-            "COMPACT" => "/compact - create or refresh the current Session context summary.",
-            "CONTEXT" => "/context - show CanonicalHistory and effective ContextProjection statistics.",
-            "SESSION" => "/session - show the current Session and next-turn selection.",
-            "NEW" => "/new - start a new Session on the next submitted turn.",
-            "RESUME" => "/resume [sessionId] - list resumable Sessions or switch to one.",
-            "EXPORT" => "/export [path] - write the current Session as Markdown.",
-            "TOOLS" => "/tools - show tools and their permission state.",
-            "HISTORY" => "/history [positive-count|all] - show recent canonical messages.",
-            "CLEAR" => "/clear - clear an attached interactive console without deleting history.",
-            "STATUS" => "/status - show Runtime, workspace, activity, memory, and tool counts.",
-            "HELP" => "/help [command] - show the command list or detailed command help.",
-            "EXIT" or "QUIT" => "/exit or /quit - save the current Session and leave the REPL.",
-            _ => null
-        };
-    }
-
     private static async Task<ReplCommandResult> UpdateReplSelectionAsync(
         LocalRuntime runtime,
-        TextWriter output,
+        ICliTerminal terminal,
         string? sessionId,
         RuntimeMode mode,
         StandaloneSelection selection,
@@ -1401,9 +1404,13 @@ internal static class ServiceCommands
                 .ConfigureAwait(false);
         }
 
-        await output.WriteLineAsync(
-                $"Next turn: {selection.Provider.Name}/{selection.Model} ({selection.Agent.Id})")
-            .ConfigureAwait(false);
+        terminal.Write("Next turn: ", CliTextStyle.Muted);
+        terminal.Write(
+            $"{selection.Provider.Name}/{selection.Model}",
+            CliTextStyle.Selected);
+        terminal.Write(" (");
+        terminal.Write(selection.Agent.Id, CliTextStyle.Selected);
+        terminal.WriteLine(")");
         return new ReplCommandResult(sessionId, selection, nextVersion, ExitCode: null);
     }
 
@@ -1670,7 +1677,7 @@ internal static class ServiceCommands
         IReadOnlyList<AgentConfig> agents,
         AgentConfig agent)
     {
-        if (TryResolveSelection(
+        if (StandaloneConfigurationResolver.TryResolveGlobalSelection(
                 config,
                 agents,
                 providerOverride: null,
@@ -1692,43 +1699,6 @@ internal static class ServiceCommands
             selection.Agent.SystemPrompt,
             ProviderId: selection.Provider.Name,
             ModelId: selection.Model);
-
-    private static bool TryResolveSelection(
-        StandaloneConfig config,
-        IReadOnlyList<AgentConfig> agents,
-        string? providerOverride,
-        string? modelOverride,
-        string? agentOverride,
-        out StandaloneSelection selection)
-    {
-        var agentId = agentOverride ?? config.DefaultAgent;
-        var agent = agents.FirstOrDefault(candidate =>
-            candidate.Id.Equals(agentId, StringComparison.Ordinal));
-        if (agent is null)
-        {
-            selection = default!;
-            return false;
-        }
-
-        var providerName = providerOverride ?? agent.Provider ?? config.DefaultProvider;
-        var provider = config.Providers.FirstOrDefault(candidate =>
-            candidate.Name.Equals(providerName, StringComparison.Ordinal));
-        if (provider is null)
-        {
-            selection = default!;
-            return false;
-        }
-
-        var model = modelOverride ?? agent.Model ?? config.DefaultModel;
-        if (!provider.Models.Contains(model, StringComparer.Ordinal))
-        {
-            selection = default!;
-            return false;
-        }
-
-        selection = new StandaloneSelection(provider, model, agent);
-        return true;
-    }
 
     private static bool TryResolveMode(string? value, out RuntimeMode mode)
     {
@@ -1828,17 +1798,16 @@ internal static class ServiceCommands
         Exiting
     }
 
-    private sealed record StandaloneSelection(
-        ProviderEntry Provider,
-        string Model,
-        AgentConfig Agent);
-
     private static bool IsConfigurationException(Exception exception) =>
         exception is ArgumentException
             or ConfigBusyException
             or FileNotFoundException
             or InvalidOperationException
-            or JsonException;
+            or IOException
+            or JsonException
+            or NotSupportedException
+            or StandaloneConfigurationException
+            or UnauthorizedAccessException;
 
     private static string RedactSecrets(string message, StandaloneConfig? config)
     {
