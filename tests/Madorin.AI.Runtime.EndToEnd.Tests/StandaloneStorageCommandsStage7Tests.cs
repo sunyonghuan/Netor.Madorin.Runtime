@@ -320,8 +320,16 @@ public sealed class StandaloneStorageCommandsStage7Tests
                        ordered[1].Path,
                        FileMode.Open,
                        FileAccess.Read,
-                       FileShare.Read))
+                       FileShare.None))
             {
+                if (OperatingSystem.IsMacOS())
+                {
+                    Assert.Inconclusive("FileStream.Lock is unsupported on macOS.");
+                }
+
+#pragma warning disable CA1416 // macOS is explicitly marked inconclusive above.
+                locked.Lock(0, locked.Length);
+#pragma warning restore CA1416
                 var exitCode = Run(
                     ["storage", "gc", "--workspace", fixture.Workspace, "--data-dir", fixture.DataDirectory, "--confirm", "--json"],
                     output,

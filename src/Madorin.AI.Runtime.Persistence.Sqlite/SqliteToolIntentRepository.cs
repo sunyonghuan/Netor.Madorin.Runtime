@@ -67,7 +67,9 @@ public sealed class SqliteToolIntentRepository(SqliteConnection connection) : IT
                created_at,
                revoked_at,
                revocation_reason,
-               approval_request_id
+               approval_request_id,
+               allowed_skill_script_keys,
+               skill_catalog_version
         FROM tool_grants
         """;
 
@@ -533,7 +535,9 @@ public sealed class SqliteToolIntentRepository(SqliteConnection connection) : IT
                     created_at,
                     revoked_at,
                     revocation_reason,
-                    approval_request_id)
+                    approval_request_id,
+                    allowed_skill_script_keys,
+                    skill_catalog_version)
                 VALUES(
                     $grantId,
                     $runId,
@@ -560,7 +564,9 @@ public sealed class SqliteToolIntentRepository(SqliteConnection connection) : IT
                     $createdAt,
                     $revokedAt,
                     $revocationReason,
-                    $approvalRequestId);
+                    $approvalRequestId,
+                    $allowedSkillScriptKeys,
+                    $skillCatalogVersion);
                 """;
             BindGrant(command, grant);
             if (await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false) == 1)
@@ -1109,6 +1115,12 @@ public sealed class SqliteToolIntentRepository(SqliteConnection connection) : IT
         command.Parameters.AddWithValue(
             "$approvalRequestId",
             DbValue(grant.ApprovalRequestId));
+        command.Parameters.AddWithValue(
+            "$allowedSkillScriptKeys",
+            SerializeStrings(grant.AllowedSkillScriptKeys ?? []));
+        command.Parameters.AddWithValue(
+            "$skillCatalogVersion",
+            DbValue(grant.SkillCatalogVersion));
     }
 
     private static ToolGrantState ReadGrant(SqliteDataReader reader) =>
@@ -1138,7 +1150,9 @@ public sealed class SqliteToolIntentRepository(SqliteConnection connection) : IT
             ParseTimestamp(reader.GetString(22)),
             reader.IsDBNull(23) ? null : ParseTimestamp(reader.GetString(23)),
             GetNullableString(reader, 24),
-            GetNullableString(reader, 25));
+            GetNullableString(reader, 25),
+            DeserializeStrings(GetNullableString(reader, 26) ?? "[]"),
+            GetNullableString(reader, 27));
 
     private static void ValidateIntentIdentity(ToolIntentState intent)
     {
@@ -1240,6 +1254,13 @@ public sealed class SqliteToolIntentRepository(SqliteConnection connection) : IT
         && string.Equals(
             first.ApprovalRequestId,
             second.ApprovalRequestId,
+            StringComparison.Ordinal)
+        && (first.AllowedSkillScriptKeys ?? []).SequenceEqual(
+            second.AllowedSkillScriptKeys ?? [],
+            StringComparer.Ordinal)
+        && string.Equals(
+            first.SkillCatalogVersion,
+            second.SkillCatalogVersion,
             StringComparison.Ordinal);
 
     private static string SerializeStrings(IEnumerable<string> values)

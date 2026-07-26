@@ -98,6 +98,7 @@ public sealed class KimiProviderAdapter : IRuntimeProviderAdapter
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        ProviderCapabilityValidator.ValidateSkillsSupport(Capabilities, request.Skills, ct);
 
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
             ct,
@@ -118,7 +119,12 @@ public sealed class KimiProviderAdapter : IRuntimeProviderAdapter
 
         string finishReason = "stop";
 
-        await foreach (var update in chatClient.GetStreamingResponseAsync(messages, options, effectiveCt)
+        await foreach (var update in MafSkillsAgentFactory.CreateResponseStream(
+                               chatClient,
+                               request,
+                               messages,
+                               options,
+                               effectiveCt)
                            .ConfigureAwait(false))
         {
             if (update.FinishReason is { } reason)

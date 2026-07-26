@@ -12,6 +12,7 @@ using Madorin.AI.Runtime.Persistence.Files;
 using Madorin.AI.Runtime.Persistence.Sqlite;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Services.Memory;
+using Madorin.AI.Runtime.Services.Skills;
 using Madorin.AI.Runtime.Services.Tools;
 using Madorin.AI.Runtime.Tools.Abstractions;
 using Microsoft.Data.Sqlite;
@@ -35,11 +36,14 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
     private readonly IToolStateStore? _toolStateStore;
     private readonly ToolGateway? _toolGateway;
     private readonly ToolCatalogSnapshot? _toolCatalogSnapshot;
+    private readonly Func<CancellationToken, Task<SkillCatalogSnapshot?>>? _skillCatalogSnapshotProvider;
     private readonly ToolConsentCoordinator? _toolConsentCoordinator;
     private readonly Func<ApprovalRequest, CancellationToken, Task<ApprovalResponse>>?
         _workflowApprovalHandler;
     private readonly Func<CredentialsRefreshRequestedEvent, CancellationToken, Task<bool>>?
         _credentialRefreshHandler;
+    private readonly Func<RuntimeSkillScriptInvocation, CancellationToken, Task<RuntimeSkillScriptResult>>?
+        _scriptInvoker;
     private readonly RuntimeLimits _runtimeLimits;
 
     public WorkModeOrchestrator(
@@ -60,7 +64,9 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         Func<ApprovalRequest, CancellationToken, Task<ApprovalResponse>>?
             workflowApprovalHandler = null,
         Func<CredentialsRefreshRequestedEvent, CancellationToken, Task<bool>>?
-            credentialRefreshHandler = null)
+            credentialRefreshHandler = null,
+        Func<CancellationToken, Task<SkillCatalogSnapshot?>>? skillCatalogSnapshotProvider = null,
+        Func<RuntimeSkillScriptInvocation, CancellationToken, Task<RuntimeSkillScriptResult>>? scriptInvoker = null)
     {
         _providerFactory = providerFactory ?? throw new ArgumentNullException(nameof(providerFactory));
         _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -78,6 +84,8 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 ? toolConsentCoordinator.RequestWorkflowApprovalAsync
                 : null);
         _credentialRefreshHandler = credentialRefreshHandler;
+        _skillCatalogSnapshotProvider = skillCatalogSnapshotProvider;
+        _scriptInvoker = scriptInvoker;
         _runtimeLimits = runtimeLimits ?? new RuntimeLimits(
             MaxToolRounds: 8,
             MaxToolCallsPerRound: 8,
@@ -159,8 +167,12 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 runId, runtimeInstanceId, replayInvocation.InvocationId, earlySequence++, ct)
                 .ConfigureAwait(false);
             await CompleteRunAsync(runId, ct).ConfigureAwait(false);
-            yield return await CreateCompletedEnvelopeAsync(
+            var replayCompleted = await CreateCompletedEnvelopeAsync(
                 runId, sessionId, runtimeInstanceId, earlySequence, ct).ConfigureAwait(false);
+            if (replayCompleted is not null)
+            {
+                yield return replayCompleted;
+            }
             yield break;
         }
 
@@ -564,8 +576,12 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         await _workRepo.UpdateSessionStatusAsync(
             sessionId, WorkSessionStatus.Completed, ct).ConfigureAwait(false);
         await CompleteRunAsync(runId, ct).ConfigureAwait(false);
-        yield return await CreateCompletedEnvelopeAsync(
+        var completed = await CreateCompletedEnvelopeAsync(
             runId, sessionId, runtimeInstanceId, runSequence, ct).ConfigureAwait(false);
+        if (completed is not null)
+        {
+            yield return completed;
+        }
     }
 
     private async Task CompleteRunAsync(string runId, CancellationToken ct)
@@ -595,21 +611,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
 
                     break;
                 case RunStatus.Persisting:
-                    try
-                    {
-                        await _sessionRepo.TransitionRunToTerminalAsync(
-                            runId,
-                            RunStatus.Persisting,
-                            RunStatus.Completed,
-                            terminalText: null,
-                            ct).ConfigureAwait(false);
-                        return;
-                    }
-                    catch (InvalidOperationException)
-                    {
-                    }
-
-                    break;
+                    return;
                 default:
                     throw new InvalidOperationException(
                         $"Work run '{runId}' cannot complete from {current}.");
@@ -980,11 +982,36 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             runtimeInstanceId, runId, runSequence, MessageTypes.RunAccepted,
             new RunAcceptedEvent(sessionId, runId), RuntimeJsonContext.Default.RunAcceptedEvent, ct);
 
-    private Task<RuntimeEventEnvelope> CreateCompletedEnvelopeAsync(
-        string runId, string sessionId, string runtimeInstanceId, long runSequence, CancellationToken ct) =>
-        CreateEnvelopeAsync(
-            runtimeInstanceId, runId, runSequence, MessageTypes.RunCompleted,
-            new RunCompletedEvent(runId, sessionId), RuntimeJsonContext.Default.RunCompletedEvent, ct);
+    private async Task<RuntimeEventEnvelope?> CreateCompletedEnvelopeAsync(
+        string runId,
+        string sessionId,
+        string runtimeInstanceId,
+        long runSequence,
+        CancellationToken ct)
+    {
+        var value = new RunCompletedEvent(runId, sessionId);
+        var payload = JsonSerializer.SerializeToElement(
+            value,
+            RuntimeJsonContext.Default.RunCompletedEvent);
+        var gsn = await _sessionRepo.TryCommitTerminalRunAsync(
+            runId,
+            RunStatus.Completed,
+            null,
+            null,
+            MessageTypes.RunCompleted,
+            payload.GetRawText(),
+            ct).ConfigureAwait(false);
+        return gsn is null
+            ? null
+            : new RuntimeEventEnvelope(
+                runtimeInstanceId,
+                gsn.Value,
+                runId,
+                runSequence,
+                MessageTypes.RunCompleted,
+                DateTimeOffset.UtcNow,
+                payload);
+    }
 
     private Task<RuntimeEventEnvelope> CreateStatusEnvelopeAsync(
         string runtimeInstanceId,
@@ -997,7 +1024,21 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             runId,
             runSequence,
             MessageTypes.RunStatusChanged,
-            new RunStatusChangedEvent(runId, status.ToString()),
+            new RunStatusChangedEvent(runId, status.ToString())
+            {
+                Mode = RuntimeMode.Work,
+                UpdatedAt = DateTimeOffset.UtcNow,
+                Phase = status switch
+                {
+                    RunStatus.Accepted or RunStatus.Preparing => "preparing",
+                    RunStatus.Running => "running",
+                    RunStatus.WaitingForTool => "waiting-for-tool",
+                    RunStatus.WaitingForApproval => "waiting-for-approval",
+                    RunStatus.WaitingForCredentials => "waiting-for-credentials",
+                    RunStatus.Persisting => "persisting",
+                    _ => "terminal"
+                }
+            },
             RuntimeJsonContext.Default.RunStatusChangedEvent,
             ct);
 
@@ -1127,7 +1168,8 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 tools,
                 IsIdempotent: !hasIrreversibleToolSideEffects,
                 HasIrreversibleToolSideEffects: hasIrreversibleToolSideEffects,
-                CancellationToken: ct);
+                CancellationToken: ct,
+                Skills: CreateSkillsContext(request));
 
             List<ContentBlock> assistantContent;
             RuntimeError? failure;
@@ -1686,6 +1728,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             ];
         }
 
+        var skillCatalogSnapshot = await CaptureSkillCatalogSnapshotAsync(ct).ConfigureAwait(false);
         var snapshot = new InvocationSnapshot(
             invocationId,
             agent.AgentId,
@@ -1700,7 +1743,12 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             parentInvocationId,
             workStepId,
             workPlanVersion,
-            projectionSnapshot);
+            projectionSnapshot,
+            SkillCatalogVersion: skillCatalogSnapshot?.Version,
+            SkillNames: skillCatalogSnapshot?.Skills.Select(static skill => skill.Name).ToArray(),
+            SkillContentHashes: skillCatalogSnapshot?.Skills.Select(static skill => skill.ContentHash).ToArray(),
+            SkillSourceIds: skillCatalogSnapshot?.Skills.Select(static skill => skill.SourceId).ToArray(),
+            SkillMaterializedPaths: skillCatalogSnapshot?.Skills.Select(static skill => skill.MaterializedPath).ToArray());
 
         return new AgentInvocationRequest(
             invocationId,
@@ -1862,6 +1910,32 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
 
     private static string ComputeHash(string value) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+
+    private Task<SkillCatalogSnapshot?> CaptureSkillCatalogSnapshotAsync(CancellationToken ct) =>
+        _skillCatalogSnapshotProvider?.Invoke(ct)
+        ?? Task.FromResult<SkillCatalogSnapshot?>(null);
+
+    private SkillsInvocationContext? CreateSkillsContext(AgentInvocationRequest request)
+    {
+        var snapshot = request.Snapshot;
+        return string.IsNullOrWhiteSpace(snapshot.SkillCatalogVersion)
+            ? null
+            : new SkillsInvocationContext(
+                snapshot.SkillCatalogVersion,
+                snapshot.SkillNames ?? [],
+                snapshot.SkillContentHashes ?? [],
+                snapshot.SkillSourceIds ?? [],
+                snapshot.SkillMaterializedPaths,
+                _scriptInvoker,
+                request.RunId,
+                request.SessionId,
+                request.AgentId,
+                request.InvocationId,
+                request.ParentAgentId,
+                snapshot.ParentInvocationId,
+                snapshot.WorkStepId,
+                snapshot.WorkPlanVersion);
+    }
 
 
 }

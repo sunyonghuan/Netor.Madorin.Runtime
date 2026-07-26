@@ -101,6 +101,64 @@ public sealed class StandaloneReplStage7Tests
 
     [TestMethod]
     [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task Repl_SkillCommands_ListShowAndRefreshWithoutInvokingProvider()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var configDirectory = Path.Combine(root, "config");
+            var workspace = Path.Combine(root, "workspace");
+            await WriteConfigurationAsync(configDirectory, includeSecondProvider: false);
+            var skillDirectory = Path.Combine(
+                workspace,
+                ".madorin",
+                "skills",
+                "repl-demo");
+            Directory.CreateDirectory(skillDirectory);
+            await File.WriteAllTextAsync(
+                Path.Combine(skillDirectory, "SKILL.md"),
+                "---\nname: repl-demo\ndescription: REPL Skill\n---\nREPL demo body.\n",
+                _testContext.CancellationToken);
+            var provider = new RecordingProvider("provider-one", ["model-one"]);
+            var providers = new ProviderSet(
+                provider,
+                new RecordingProvider("provider-two", ["model-two"]));
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            var exitCode = CliApplication.RunForTests(
+                ["run", "--workspace", workspace],
+                output,
+                new StringReader(string.Join(
+                    Environment.NewLine,
+                    [
+                        "/skill list",
+                        "/skill show repl-demo",
+                        "/skill refresh",
+                        "/help skill",
+                        "/exit",
+                        string.Empty
+                    ])),
+                configDirectory,
+                _ => providers.Resolve,
+                error: error);
+
+            Assert.AreEqual(ExitCodes.Success, exitCode, error.ToString());
+            Assert.IsEmpty(provider.Requests);
+            Assert.Contains("repl-demo\tworkspace\tREPL Skill", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("Name: repl-demo", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("REPL demo body.", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("/skill <list|show <name>|refresh>", output.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("Unknown REPL command", error.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
     public async Task Repl_ModelWithoutArgument_PromptsAndSwitchesNextTurnModel()
     {
         var root = CreateTemporaryDirectory();

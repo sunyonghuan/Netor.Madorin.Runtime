@@ -120,6 +120,7 @@ public static class StorageMaintenanceService
                     var source = Path.Combine(plan.BlobDirectory, blobId + ".blob");
                     var destination = Path.Combine(recoveryBlobDirectory, blobId + ".blob");
                     var length = new FileInfo(source).Length;
+                    EnsureMoveSourceAvailable(source);
                     File.Move(source, destination, overwrite: false);
                     collectedBlobIds.Add(blobId);
                     collectedBytes = checked(collectedBytes + length);
@@ -543,6 +544,24 @@ public static class StorageMaintenanceService
 
             throw;
         }
+    }
+
+    private static void EnsureMoveSourceAvailable(string path)
+    {
+        using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.ReadWrite,
+            FileShare.ReadWrite | FileShare.Delete);
+        if (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS())
+        {
+            return;
+        }
+
+#pragma warning disable CA1416 // macOS is excluded above because Lock is unsupported there.
+        stream.Lock(0, 1);
+        stream.Unlock(0, 1);
+#pragma warning restore CA1416
     }
 
     private static async Task<DatabaseSnapshot> OpenDatabaseSnapshotAsync(

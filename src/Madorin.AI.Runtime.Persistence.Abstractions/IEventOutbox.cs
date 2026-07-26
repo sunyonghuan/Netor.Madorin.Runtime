@@ -43,4 +43,8 @@ public sealed record OutboxEntry(
     string RunId,
     long RunSequence,
     string MessageType,
-    string PayloadJson);
+    string PayloadJson)
+{
+    /// <summary>Original persisted creation time used for deterministic replay.</summary>
+    public DateTimeOffset? CreatedAt { get; init; }
+}

@@ -67,6 +67,19 @@ internal sealed class StandaloneToolGrantFactory(TimeProvider? timeProvider = nu
         }
 
         var grantId = $"standalone-{Guid.NewGuid():N}";
+        string[]? scriptKeys = null;
+        string? skillCatalogVersion = null;
+        if (string.Equals(descriptor.ToolId, SkillScriptAuthorization.ToolId, StringComparison.Ordinal)
+            && SkillScriptAuthorization.TryReadScope(
+                invocation.ArgumentsJson,
+                out var skillName,
+                out var scriptHash,
+                out var interpreter,
+                out skillCatalogVersion))
+        {
+            scriptKeys = [SkillScriptAuthorization.CreateKey(skillName, scriptHash, interpreter)];
+        }
+
         return new ToolGrant(
             grantId,
             invocation.RunId,
@@ -91,6 +104,8 @@ internal sealed class StandaloneToolGrantFactory(TimeProvider? timeProvider = nu
             AgentId: invocation.AgentId,
             ParentGrantId: null,
             RootGrantId: grantId,
-            DelegationChain: []);
+            DelegationChain: [],
+            AllowedSkillScriptKeys: scriptKeys,
+            SkillCatalogVersion: skillCatalogVersion);
     }
 }

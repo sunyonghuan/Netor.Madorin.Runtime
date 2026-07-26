@@ -19,6 +19,8 @@ public static class ProviderCapabilityValidator
             request.ModelId,
             models);
 
+        ValidateSkillsSupport(capabilities, request.Skills, ct);
+
         if (request.Tools is { Length: > 0 } && !capabilities.ToolCalling)
         {
             throw CreateCapabilityException("tool_calling");
@@ -33,6 +35,18 @@ public static class ProviderCapabilityValidator
             capabilities,
             [.. request.Messages.SelectMany(static message => message.Content)],
             ct);
+    }
+
+    public static void ValidateSkillsSupport(
+        ProviderCapabilities capabilities,
+        SkillsInvocationContext? skills,
+        CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (skills is not null && !capabilities.ToolCalling)
+        {
+            throw CreateSkillsUnsupportedException();
+        }
     }
 
     public static Task ValidateAsync(
@@ -109,6 +123,18 @@ public static class ProviderCapabilityValidator
             ProviderDetails: null,
             DiagnosticId: Guid.NewGuid().ToString("N"));
 
+        return new RuntimeProviderException(error);
+    }
+
+    private static RuntimeProviderException CreateSkillsUnsupportedException()
+    {
+        var error = new RuntimeError(
+            RuntimeErrorCodes.SkillsNotSupportedByProvider,
+            "capability",
+            "The selected Provider does not support Skills because Tool Calling is unavailable.",
+            IsRetryable: false,
+            ProviderDetails: null,
+            DiagnosticId: Guid.NewGuid().ToString("N"));
         return new RuntimeProviderException(error);
     }
 }

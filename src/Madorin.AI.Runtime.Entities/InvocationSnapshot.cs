@@ -14,7 +14,12 @@ public sealed record InvocationSnapshot(
     string? ParentInvocationId = null,
     string? WorkStepId = null,
     string? WorkPlanVersion = null,
-    ContextProjectionSnapshot? ContextProjection = null);
+    ContextProjectionSnapshot? ContextProjection = null,
+    string? SkillCatalogVersion = null,
+    string[]? SkillNames = null,
+    string[]? SkillContentHashes = null,
+    string[]? SkillSourceIds = null,
+    string[]? SkillMaterializedPaths = null);
 
 /// <summary>Immutable context-projection decision captured for one Invocation.</summary>
 public sealed record ContextProjectionSnapshot(

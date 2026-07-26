@@ -5,4 +5,5 @@ public sealed record InitializeRequest(
     string ClientVersion,
     IReadOnlyList<string> SupportedProtocolVersions,
     RuntimeCapabilities ExpectedCapabilities,
-    long LastConfirmedGsn);
+    long LastConfirmedGsn,
+    IReadOnlyList<SkillSourceDescriptor>? SkillSources = null);

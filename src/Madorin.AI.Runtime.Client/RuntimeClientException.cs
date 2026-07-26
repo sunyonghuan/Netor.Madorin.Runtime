@@ -36,13 +36,62 @@ public sealed class RuntimeClientStartupException : RuntimeClientException
 }
 
 /// <summary>Raised when the named-pipe connection to the Runtime fails.</summary>
-public sealed class RuntimeClientConnectionException : RuntimeClientException
+public class RuntimeClientConnectionException : RuntimeClientException
 {
     /// <summary>Creates a new instance.</summary>
     public RuntimeClientConnectionException(string message) : base(message) { }
 
     /// <summary>Creates a new instance wrapping an inner error.</summary>
     public RuntimeClientConnectionException(string message, Exception innerException) : base(message, innerException) { }
+}
+
+/// <summary>Raised when an owned Runtime process has been confirmed to exit.</summary>
+public sealed class RuntimeProcessExitedException : RuntimeClientConnectionException
+{
+    /// <summary>Creates a process-exit failure with a standard diagnostic message.</summary>
+    public RuntimeProcessExitedException(
+        string instanceId,
+        int processId,
+        int exitCode,
+        DateTimeOffset exitedAt,
+        long lastConfirmedGsn)
+        : this(
+            $"The owned Runtime process '{instanceId}' exited with code {exitCode}.",
+            instanceId,
+            processId,
+            exitCode,
+            exitedAt,
+            lastConfirmedGsn)
+    {
+    }
+
+    public RuntimeProcessExitedException(
+        string message,
+        string instanceId,
+        int processId,
+        int exitCode,
+        DateTimeOffset exitedAt,
+        long lastConfirmedGsn,
+        Exception? innerException = null)
+        : base(message, innerException ?? new InvalidOperationException(message))
+    {
+        InstanceId = instanceId;
+        ProcessId = processId;
+        ExitCode = exitCode;
+        ExitedAt = exitedAt;
+        LastConfirmedGsn = lastConfirmedGsn;
+        IsRetryable = false;
+    }
+
+    public string InstanceId { get; }
+
+    public int ProcessId { get; }
+
+    public int ExitCode { get; }
+
+    public DateTimeOffset ExitedAt { get; }
+
+    public long LastConfirmedGsn { get; }
 }
 
 /// <summary>Raised when the handshake or protocol negotiation fails.</summary>

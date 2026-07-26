@@ -13,4 +13,6 @@ public sealed record RuntimeCapabilities(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     bool? ToolCatalog = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    bool? ToolPermissions = null);
+    bool? ToolPermissions = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    SkillsCapabilities? Skills = null);

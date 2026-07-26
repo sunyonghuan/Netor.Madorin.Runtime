@@ -4,10 +4,12 @@ using Madorin.AI.Runtime.Entities;
 using Madorin.AI.Runtime.Persistence.Abstractions;
 using Microsoft.Data.Sqlite;
 
+using Madorin.AI.Runtime.Contracts;
+
 namespace Madorin.AI.Runtime.Persistence.Sqlite;
 
 /// <summary>SQLite persistence for Session and Run lifecycle metadata.</summary>
-public sealed class SqliteSessionRepository(SqliteConnection conn) : ISessionRepository
+public sealed class SqliteSessionRepository : ISessionRepository
 {
     private const string CompletedWorkStepStatus = "completed";
     private const string FailedWorkStepStatus = "failed";
@@ -16,8 +18,21 @@ public sealed class SqliteSessionRepository(SqliteConnection conn) : ISessionRep
     private const string RunningWorkStepStatus = "running";
     private const string SucceededToolIntentStatus = "succeeded";
 
-    private readonly SqliteConnection _connection = conn
-        ?? throw new ArgumentNullException(nameof(conn));
+    private readonly SqliteConnection _connection;
+    private readonly SqliteSessionRepositoryOptions _options;
+
+    public SqliteSessionRepository(SqliteConnection conn)
+        : this(conn, options: null)
+    {
+    }
+
+    public SqliteSessionRepository(
+        SqliteConnection conn,
+        SqliteSessionRepositoryOptions? options)
+    {
+        _connection = conn ?? throw new ArgumentNullException(nameof(conn));
+        _options = options ?? new SqliteSessionRepositoryOptions();
+    }
 
     public SqliteConnection Connection => _connection;
 
@@ -131,9 +146,11 @@ public sealed class SqliteSessionRepository(SqliteConnection conn) : ISessionRep
             command.Transaction = transaction;
             command.CommandText = """
                 INSERT INTO runs(
-                    run_id, session_id, status, run_sequence, created_at, updated_at)
+                    run_id, session_id, status, run_sequence, created_at, updated_at,
+                    phase, last_run_sequence)
                 VALUES(
-                    $runId, $sessionId, $status, $runSequence, $createdAt, $updatedAt);
+                    $runId, $sessionId, $status, $runSequence, $createdAt, $updatedAt,
+                    $phase, 0);
                 INSERT INTO run_idempotency(
                     key, run_id, session_id, expires_at, request_hash)
                 VALUES($key, $runId, $sessionId, $expiresAt, $requestHash);
@@ -147,6 +164,7 @@ public sealed class SqliteSessionRepository(SqliteConnection conn) : ISessionRep
             command.Parameters.AddWithValue("$runSequence", runSequence);
             command.Parameters.AddWithValue("$createdAt", nowText);
             command.Parameters.AddWithValue("$updatedAt", nowText);
+            command.Parameters.AddWithValue("$phase", "preparing");
             command.Parameters.AddWithValue("$key", runIdempotencyKey);
             command.Parameters.AddWithValue("$expiresAt", FormatTimestamp(now + keyRetention));
             command.Parameters.AddWithValue("$requestHash", (object?)requestHash ?? DBNull.Value);
@@ -173,6 +191,225 @@ public sealed class SqliteSessionRepository(SqliteConnection conn) : ISessionRep
 
         return Enum.Parse<RunStatus>(statusText, ignoreCase: false);
     }
+
+    public async Task UpdateRunProgressAsync(
+        string runId,
+        RunStatus status,
+        string? phase,
+        string? currentStep,
+        long? completedUnits,
+        long? totalUnits,
+        long? lastRunSequence,
+        string? errorJson,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(runId);
+        ValidateProgress(phase, completedUnits, totalUnits);
+        if (lastRunSequence is < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(lastRunSequence));
+        }
+
+        var updatedAt = FormatTimestamp(DateTimeOffset.UtcNow);
+        await using var command = _connection.CreateCommand();
+        command.CommandText = """
+            UPDATE runs
+            SET status = $status,
+                phase = $phase,
+                current_step = $currentStep,
+                completed_units = $completedUnits,
+                total_units = $totalUnits,
+                last_run_sequence = CASE
+                    WHEN $lastRunSequence IS NULL THEN last_run_sequence
+                    WHEN $lastRunSequence > last_run_sequence THEN $lastRunSequence
+                    ELSE last_run_sequence
+                END,
+                error_json = COALESCE($errorJson, error_json),
+                updated_at = $updatedAt
+            WHERE run_id = $runId;
+            """;
+        command.Parameters.AddWithValue("$status", status.ToString());
+        command.Parameters.AddWithValue("$phase", (object?)phase ?? DBNull.Value);
+        command.Parameters.AddWithValue("$currentStep", (object?)currentStep ?? DBNull.Value);
+        command.Parameters.AddWithValue("$completedUnits", (object?)completedUnits ?? DBNull.Value);
+        command.Parameters.AddWithValue("$totalUnits", (object?)totalUnits ?? DBNull.Value);
+        command.Parameters.AddWithValue("$lastRunSequence", (object?)lastRunSequence ?? DBNull.Value);
+        command.Parameters.AddWithValue("$errorJson", (object?)errorJson ?? DBNull.Value);
+        command.Parameters.AddWithValue("$updatedAt", updatedAt);
+        command.Parameters.AddWithValue("$runId", runId);
+        if (await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false) != 1)
+        {
+            throw new KeyNotFoundException($"Run '{runId}' was not found.");
+        }
+    }
+
+    public async Task<long?> TryCommitTerminalRunAsync(
+        string runId,
+        RunStatus terminalStatus,
+        string? terminalText,
+        string? errorJson,
+        string messageType,
+        string payloadJson,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(runId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(messageType);
+        ArgumentNullException.ThrowIfNull(payloadJson);
+        if (!Madorin.AI.Runtime.Core.RunStateMachine.IsTerminal(terminalStatus))
+        {
+            throw new ArgumentException("The target Run status must be terminal.", nameof(terminalStatus));
+        }
+
+        await InjectFailureAsync(
+            SqliteSessionRepositoryFailurePoint.BeforeTerminalTransaction,
+            ct).ConfigureAwait(false);
+        using var transaction = _connection.BeginTransaction(deferred: false);
+        RunStatus current;
+        await using (var statusCommand = _connection.CreateCommand())
+        {
+            statusCommand.Transaction = transaction;
+            statusCommand.CommandText = "SELECT status FROM runs WHERE run_id = $runId;";
+            statusCommand.Parameters.AddWithValue("$runId", runId);
+            if (await statusCommand.ExecuteScalarAsync(ct).ConfigureAwait(false) is not string statusText)
+            {
+                throw new KeyNotFoundException($"Run '{runId}' was not found.");
+            }
+
+            current = Enum.Parse<RunStatus>(statusText, ignoreCase: false);
+        }
+
+        var currentIsTerminal = Madorin.AI.Runtime.Core.RunStateMachine.IsTerminal(current);
+        if (currentIsTerminal && current != terminalStatus)
+        {
+            transaction.Commit();
+            return null;
+        }
+
+        if (currentIsTerminal)
+        {
+            await using var existingEventCommand = _connection.CreateCommand();
+            existingEventCommand.Transaction = transaction;
+            existingEventCommand.CommandText = """
+                SELECT 1
+                FROM event_outbox
+                WHERE run_id = $runId AND message_type = $messageType
+                LIMIT 1;
+                """;
+            existingEventCommand.Parameters.AddWithValue("$runId", runId);
+            existingEventCommand.Parameters.AddWithValue("$messageType", messageType);
+            if (await existingEventCommand.ExecuteScalarAsync(ct).ConfigureAwait(false) is not null)
+            {
+                transaction.Commit();
+                return null;
+            }
+        }
+
+        if (!currentIsTerminal
+            && !Madorin.AI.Runtime.Core.RunStateMachine.CanTransition(current, terminalStatus)
+            && !(terminalStatus == RunStatus.Failed && current == RunStatus.Accepted))
+        {
+            throw new InvalidOperationException(
+                $"Run status cannot transition from {current} to terminal state {terminalStatus}.");
+        }
+
+        long runSequence;
+        await using (var sequenceCommand = _connection.CreateCommand())
+        {
+            sequenceCommand.Transaction = transaction;
+            sequenceCommand.CommandText = """
+                SELECT COALESCE(MAX(run_sequence), -1) + 1
+                FROM event_outbox
+                WHERE run_id = $runId;
+                """;
+            sequenceCommand.Parameters.AddWithValue("$runId", runId);
+            runSequence = Convert.ToInt64(
+                await sequenceCommand.ExecuteScalarAsync(ct).ConfigureAwait(false),
+                CultureInfo.InvariantCulture);
+        }
+
+        var updatedAt = FormatTimestamp(DateTimeOffset.UtcNow);
+        await using (var runCommand = _connection.CreateCommand())
+        {
+            runCommand.Transaction = transaction;
+            runCommand.CommandText = """
+                UPDATE runs
+                SET status = $status,
+                    phase = 'terminal',
+                    terminal_text = COALESCE($terminalText, terminal_text),
+                    error_json = COALESCE($errorJson, error_json),
+                    last_run_sequence = $runSequence,
+                    updated_at = $updatedAt
+                WHERE run_id = $runId
+                  AND status = $currentStatus;
+                """;
+            runCommand.Parameters.AddWithValue("$status", terminalStatus.ToString());
+            runCommand.Parameters.AddWithValue("$terminalText", (object?)terminalText ?? DBNull.Value);
+            runCommand.Parameters.AddWithValue("$errorJson", (object?)errorJson ?? DBNull.Value);
+            runCommand.Parameters.AddWithValue("$runSequence", runSequence);
+            runCommand.Parameters.AddWithValue("$updatedAt", updatedAt);
+            runCommand.Parameters.AddWithValue("$runId", runId);
+            runCommand.Parameters.AddWithValue("$currentStatus", current.ToString());
+            if (await runCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false) != 1)
+            {
+                transaction.Rollback();
+                return null;
+            }
+        }
+
+        long gsn;
+        await using (var gsnUpdate = _connection.CreateCommand())
+        {
+            gsnUpdate.Transaction = transaction;
+            gsnUpdate.CommandText = """
+                UPDATE gsn_sequence
+                SET next_gsn = next_gsn + 1
+                WHERE id = 1;
+                """;
+            if (await gsnUpdate.ExecuteNonQueryAsync(ct).ConfigureAwait(false) != 1)
+            {
+                throw new InvalidDataException("The GSN sequence seed row is missing.");
+            }
+        }
+
+        await using (var gsnSelect = _connection.CreateCommand())
+        {
+            gsnSelect.Transaction = transaction;
+            gsnSelect.CommandText = "SELECT next_gsn - 1 FROM gsn_sequence WHERE id = 1;";
+            gsn = Convert.ToInt64(
+                await gsnSelect.ExecuteScalarAsync(ct).ConfigureAwait(false),
+                CultureInfo.InvariantCulture);
+        }
+
+        await using (var outboxCommand = _connection.CreateCommand())
+        {
+            outboxCommand.Transaction = transaction;
+            outboxCommand.CommandText = """
+                INSERT INTO event_outbox(
+                    gsn, run_id, run_sequence, message_type, payload, status, created_at)
+                VALUES($gsn, $runId, $runSequence, $messageType, $payload, 'pending', $createdAt);
+                """;
+            outboxCommand.Parameters.AddWithValue("$gsn", gsn);
+            outboxCommand.Parameters.AddWithValue("$runId", runId);
+            outboxCommand.Parameters.AddWithValue("$runSequence", runSequence);
+            outboxCommand.Parameters.AddWithValue("$messageType", messageType);
+            outboxCommand.Parameters.AddWithValue("$payload", payloadJson);
+            outboxCommand.Parameters.AddWithValue("$createdAt", updatedAt);
+            await outboxCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
+
+        await InjectFailureAsync(
+            SqliteSessionRepositoryFailurePoint.BeforeTerminalCommit,
+            ct).ConfigureAwait(false);
+        transaction.Commit();
+        return gsn;
+    }
+
+    private ValueTask InjectFailureAsync(
+        SqliteSessionRepositoryFailurePoint point,
+        CancellationToken ct) =>
+        _options.FailureInjector is { } injector
+            ? injector(point, ct)
+            : ValueTask.CompletedTask;
 
     public async Task TransitionRunStatusAsync(
         string runId,
@@ -247,9 +484,13 @@ public sealed class SqliteSessionRepository(SqliteConnection conn) : ISessionRep
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         await using var command = _connection.CreateCommand();
         command.CommandText = """
-            SELECT run_id, session_id, status, terminal_text
+            SELECT runs.run_id, runs.session_id, runs.status, runs.terminal_text,
+                   sessions.mode, runs.phase, runs.current_step,
+                   runs.completed_units, runs.total_units, runs.created_at,
+                   runs.updated_at, runs.last_run_sequence, runs.error_json
             FROM runs
-            WHERE run_id = $runId;
+            INNER JOIN sessions ON sessions.session_id = runs.session_id
+            WHERE runs.run_id = $runId;
             """;
         command.Parameters.AddWithValue("$runId", runId);
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
@@ -262,7 +503,71 @@ public sealed class SqliteSessionRepository(SqliteConnection conn) : ISessionRep
             reader.GetString(0),
             reader.GetString(1),
             Enum.Parse<RunStatus>(reader.GetString(2), ignoreCase: false),
-            reader.IsDBNull(3) ? null : reader.GetString(3));
+            reader.IsDBNull(3) ? null : reader.GetString(3))
+        {
+            Mode = Enum.Parse<RuntimeMode>(reader.GetString(4), ignoreCase: false),
+            Phase = reader.IsDBNull(5) ? null : reader.GetString(5),
+            CurrentStep = reader.IsDBNull(6) ? null : reader.GetString(6),
+            CompletedUnits = reader.IsDBNull(7) ? null : reader.GetInt64(7),
+            TotalUnits = reader.IsDBNull(8) ? null : reader.GetInt64(8),
+            CreatedAt = ParseTimestamp(reader.GetString(9)),
+            UpdatedAt = ParseTimestamp(reader.GetString(10)),
+            LastRunSequence = reader.GetInt64(11),
+            ErrorJson = reader.IsDBNull(12) ? null : reader.GetString(12)
+        };
+    }
+
+    public async Task<IReadOnlyList<RunSnapshot>> ListRunSnapshotsAsync(
+        string? sessionId = null,
+        bool nonTerminalOnly = false,
+        CancellationToken ct = default)
+    {
+        if (sessionId is not null)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        }
+
+        await using var command = _connection.CreateCommand();
+        command.CommandText = """
+            SELECT runs.run_id, runs.session_id, runs.status, runs.terminal_text,
+                   sessions.mode, runs.phase, runs.current_step,
+                   runs.completed_units, runs.total_units, runs.created_at,
+                   runs.updated_at, runs.last_run_sequence, runs.error_json
+            FROM runs
+            INNER JOIN sessions ON sessions.session_id = runs.session_id
+            WHERE ($sessionId IS NULL OR runs.session_id = $sessionId)
+              AND ($nonTerminalOnly = 0 OR runs.status NOT IN ($completed, $failed, $cancelled, $interrupted))
+            ORDER BY runs.updated_at, runs.run_id;
+            """;
+        command.Parameters.AddWithValue("$sessionId", (object?)sessionId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$nonTerminalOnly", nonTerminalOnly ? 1 : 0);
+        command.Parameters.AddWithValue("$completed", RunStatus.Completed.ToString());
+        command.Parameters.AddWithValue("$failed", RunStatus.Failed.ToString());
+        command.Parameters.AddWithValue("$cancelled", RunStatus.Cancelled.ToString());
+        command.Parameters.AddWithValue("$interrupted", RunStatus.Interrupted.ToString());
+        var snapshots = new List<RunSnapshot>();
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            snapshots.Add(new RunSnapshot(
+                reader.GetString(0),
+                reader.GetString(1),
+                Enum.Parse<RunStatus>(reader.GetString(2), ignoreCase: false),
+                reader.IsDBNull(3) ? null : reader.GetString(3))
+            {
+                Mode = Enum.Parse<RuntimeMode>(reader.GetString(4), ignoreCase: false),
+                Phase = reader.IsDBNull(5) ? null : reader.GetString(5),
+                CurrentStep = reader.IsDBNull(6) ? null : reader.GetString(6),
+                CompletedUnits = reader.IsDBNull(7) ? null : reader.GetInt64(7),
+                TotalUnits = reader.IsDBNull(8) ? null : reader.GetInt64(8),
+                CreatedAt = ParseTimestamp(reader.GetString(9)),
+                UpdatedAt = ParseTimestamp(reader.GetString(10)),
+                LastRunSequence = reader.GetInt64(11),
+                ErrorJson = reader.IsDBNull(12) ? null : reader.GetString(12)
+            });
+        }
+
+        return snapshots;
     }
 
     public async Task MarkInterruptedAsync(CancellationToken ct = default)
@@ -274,6 +579,7 @@ public sealed class SqliteSessionRepository(SqliteConnection conn) : ISessionRep
         runCommand.CommandText = """
             UPDATE runs
             SET status = $interrupted,
+                phase = 'terminal',
                 updated_at = $updatedAt
             WHERE status NOT IN (
                 $completed, $failed, $cancelled, $interrupted, $waitingForApproval);
@@ -1857,13 +2163,61 @@ public sealed class SqliteSessionRepository(SqliteConnection conn) : ISessionRep
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(keyRetention, TimeSpan.Zero);
     }
 
+    private static void ValidateProgress(
+        string? phase,
+        long? completedUnits,
+        long? totalUnits)
+    {
+        if (phase is not null
+            && phase is not "preparing"
+            and not "running"
+            and not "waiting-for-tool"
+            and not "waiting-for-approval"
+            and not "waiting-for-credentials"
+            and not "persisting"
+            and not "terminal")
+        {
+            throw new ArgumentException($"Unsupported Run phase '{phase}'.", nameof(phase));
+        }
+
+        if (completedUnits is < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(completedUnits));
+        }
+
+        if (totalUnits is < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(totalUnits));
+        }
+
+        if (completedUnits is { } completed
+            && totalUnits is { } total
+            && completed > total)
+        {
+            throw new ArgumentException(
+                "CompletedUnits cannot exceed TotalUnits.",
+                nameof(completedUnits));
+        }
+    }
+
     private static string FormatTimestamp(DateTimeOffset value) =>
         value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
 
-    private static DateTimeOffset ParseTimestamp(string value) =>
-        DateTimeOffset.ParseExact(
+    private static DateTimeOffset ParseTimestamp(string value)
+    {
+        if (DateTimeOffset.TryParseExact(
+                value,
+                "O",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.RoundtripKind,
+                out var exact))
+        {
+            return exact;
+        }
+
+        return DateTimeOffset.Parse(
             value,
-            "O",
             CultureInfo.InvariantCulture,
-            DateTimeStyles.RoundtripKind);
+            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
+    }
 }

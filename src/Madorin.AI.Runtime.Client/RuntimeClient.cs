@@ -32,9 +32,14 @@ public sealed class RuntimeClient : IRuntimeClient
     private Task? _heartbeatTask;
     private int _heartbeatIntervalSeconds;
     private Process? _ownedProcess;
+    private Task? _ownedProcessMonitorTask;
+    private CancellationTokenSource? _ownedProcessMonitorCancellation;
     private RuntimeInstanceBinding? _instanceBinding;
     private bool _forceOwnedProcessShutdown;
+    private Exception? _terminalFailure;
     private int _disposed;
+    private readonly TaskCompletionSource<object?> _completion =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public RuntimeClient(RuntimeClientOptions options)
     {
@@ -428,6 +433,8 @@ public sealed class RuntimeClient : IRuntimeClient
 
     public RuntimeClientState State { get; private set; }
 
+    public Task Completion => _completion.Task;
+
     public DateTimeOffset? LastConnectedAt { get; private set; }
 
     public int ConsecutiveFailures { get; private set; }
@@ -599,6 +606,15 @@ public sealed class RuntimeClient : IRuntimeClient
             {
                 throw;
             }
+            catch (OperationCanceledException) when (connectToken.IsCancellationRequested)
+            {
+                throw new RuntimeClientConnectionException(
+                    "The Runtime connection timed out during initialization.",
+                    new TimeoutException("The Runtime connection timed out during initialization."))
+                {
+                    IsRetryable = true
+                };
+            }
             catch (Exception ex) when (ex is IOException or TimeoutException)
             {
                 throw new RuntimeClientConnectionException(
@@ -682,6 +698,15 @@ public sealed class RuntimeClient : IRuntimeClient
                 _eventPipeName,
                 _ownedProcess is not null);
             State = RuntimeClientState.Connected;
+            if (_ownedProcess is not null && _ownedProcessMonitorTask is null)
+            {
+                _ownedProcessMonitorCancellation = new CancellationTokenSource();
+                _ownedProcessMonitorTask = Task.Run(
+                    () => ObserveOwnedProcessExitAsync(
+                        _ownedProcess,
+                        _ownedProcessMonitorCancellation.Token),
+                    CancellationToken.None);
+            }
             if (startHeartbeat && _options.EnableBackgroundHeartbeat)
             {
                 _lifecycleCancellation ??= new CancellationTokenSource();
@@ -690,12 +715,25 @@ public sealed class RuntimeClient : IRuntimeClient
                     CancellationToken.None);
             }
         }
-        catch
+        catch (Exception ex)
         {
             ConsecutiveFailures++;
             State = RuntimeClientState.Faulted;
             _instanceBinding = null;
             await DisposeTransportAsync().ConfigureAwait(false);
+
+            if (ex is OperationCanceledException
+                && !cancellationToken.IsCancellationRequested
+                && connectTimeout?.IsCancellationRequested == true)
+            {
+                throw new RuntimeClientConnectionException(
+                    "The Runtime connection attempt exceeded its timeout.",
+                    new TimeoutException("The Runtime connection attempt timed out.", ex))
+                {
+                    IsRetryable = true
+                };
+            }
+
             throw;
         }
     }
@@ -705,6 +743,7 @@ public sealed class RuntimeClient : IRuntimeClient
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(eventReplayCursor);
+        ThrowIfTerminalFailure();
         if (State != RuntimeClientState.Connected || _eventChannel is null)
         {
             throw new InvalidOperationException("The Runtime client is not connected.");
@@ -735,6 +774,7 @@ public sealed class RuntimeClient : IRuntimeClient
                 or EndOfStreamException
                 or ObjectDisposedException)
             {
+                ThrowIfTerminalFailure();
                 await ReconnectEventChannelAsync(cancellationToken).ConfigureAwait(false);
                 continue;
             }
@@ -762,6 +802,7 @@ public sealed class RuntimeClient : IRuntimeClient
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        ThrowIfTerminalFailure();
         if (State != RuntimeClientState.Connected || _controlChannel is null)
         {
             throw new InvalidOperationException("The Runtime client is not connected.");
@@ -790,6 +831,7 @@ public sealed class RuntimeClient : IRuntimeClient
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        ThrowIfTerminalFailure();
         if (State != RuntimeClientState.Connected || _controlChannel is null)
         {
             throw new InvalidOperationException("The Runtime client is not connected.");
@@ -914,6 +956,7 @@ public sealed class RuntimeClient : IRuntimeClient
         CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(lastConfirmedGsn);
+        ThrowIfTerminalFailure();
         if (State != RuntimeClientState.Connected || _controlChannel is null)
         {
             throw new InvalidOperationException("The Runtime client is not connected.");
@@ -952,6 +995,7 @@ public sealed class RuntimeClient : IRuntimeClient
             ArgumentException.ThrowIfNullOrWhiteSpace(reason);
         }
 
+        ThrowIfTerminalFailure();
         if (State != RuntimeClientState.Connected || _controlChannel is null)
         {
             throw new InvalidOperationException("The Runtime client is not connected.");
@@ -975,6 +1019,7 @@ public sealed class RuntimeClient : IRuntimeClient
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
+        ThrowIfTerminalFailure();
         if (State != RuntimeClientState.Connected || _controlChannel is null)
         {
             throw new InvalidOperationException("The Runtime client is not connected.");
@@ -1001,6 +1046,22 @@ public sealed class RuntimeClient : IRuntimeClient
             new RuntimeStatusParameters(),
             RuntimeJsonContext.Default.RuntimeStatusResult,
             cancellationToken).ConfigureAwait(false);
+
+    public ValueTask<SkillCatalogSummary> GetSkillCatalogAsync(
+        CancellationToken cancellationToken = default) =>
+        SendControlRequestAsync(
+            MessageTypes.SkillCatalogGet,
+            new SkillCatalogQueryRequest(),
+            RuntimeJsonContext.Default.SkillCatalogSummary,
+            cancellationToken);
+
+    public ValueTask<SkillCatalogSummary> RefreshSkillCatalogAsync(
+        CancellationToken cancellationToken = default) =>
+        SendControlRequestAsync(
+            MessageTypes.SkillCatalogRefresh,
+            new SkillCatalogRefreshRequest(),
+            RuntimeJsonContext.Default.SkillCatalogSummary,
+            cancellationToken);
 
     public async ValueTask<RunListResult> ListRunsAsync(
         RunListParameters parameters,
@@ -1141,6 +1202,7 @@ public sealed class RuntimeClient : IRuntimeClient
         CancellationToken cancellationToken)
         where TParameters : notnull
     {
+        ThrowIfTerminalFailure();
         var controlChannel = _controlChannel;
         if (State != RuntimeClientState.Connected || controlChannel is null)
         {
@@ -1163,8 +1225,9 @@ public sealed class RuntimeClient : IRuntimeClient
         {
             throw;
         }
-        catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+        catch (Exception ex) when (ex is IOException or EndOfStreamException or ObjectDisposedException)
         {
+            ThrowIfTerminalFailure();
             throw new RuntimeClientConnectionException(
                 $"The Runtime connection closed while sending '{method}'.",
                 ex)
@@ -1188,6 +1251,7 @@ public sealed class RuntimeClient : IRuntimeClient
         ArgumentException.ThrowIfNullOrWhiteSpace(parameters.RunId);
         ArgumentException.ThrowIfNullOrWhiteSpace(parameters.ProviderId);
         ArgumentException.ThrowIfNullOrWhiteSpace(parameters.Credential);
+        ThrowIfTerminalFailure();
         if (State != RuntimeClientState.Connected || _controlChannel is null)
         {
             throw new InvalidOperationException("The Runtime client is not connected.");
@@ -1205,6 +1269,7 @@ public sealed class RuntimeClient : IRuntimeClient
 
     public async ValueTask HeartbeatAsync(CancellationToken cancellationToken = default)
     {
+        ThrowIfTerminalFailure();
         var controlChannel = _controlChannel;
         if (State != RuntimeClientState.Connected || controlChannel is null)
         {
@@ -1256,10 +1321,49 @@ public sealed class RuntimeClient : IRuntimeClient
         {
             try
             {
+                if (_ownedProcessMonitorCancellation is not null)
+                {
+                    try
+                    {
+                        await _ownedProcessMonitorCancellation.CancelAsync()
+                            .ConfigureAwait(false);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+
+                if (_ownedProcessMonitorTask is not null)
+                {
+                    try
+                    {
+                        await _ownedProcessMonitorTask.ConfigureAwait(false);
+                    }
+                    catch (Exception)
+                    {
+                        // Dispose is best-effort; Completion remains the lifecycle source of truth.
+                    }
+
+                    _ownedProcessMonitorTask = null;
+                }
+
                 await DisposeOwnedProcessAsync().ConfigureAwait(false);
             }
             finally
             {
+                if (_ownedProcessMonitorCancellation is not null)
+                {
+                    try
+                    {
+                        _ownedProcessMonitorCancellation.Dispose();
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                    }
+
+                    _ownedProcessMonitorCancellation = null;
+                }
+
                 State = RuntimeClientState.Closed;
                 _instanceBinding = null;
                 _stateGate.Dispose();
@@ -1267,7 +1371,113 @@ public sealed class RuntimeClient : IRuntimeClient
                 _lifecycleCancellation?.Dispose();
                 _lifecycleCancellation = null;
                 _heartbeatTask = null;
+                _completion.TrySetResult(null);
             }
+        }
+    }
+
+    private async Task ObserveOwnedProcessExitAsync(
+        Process? process,
+        CancellationToken cancellationToken)
+    {
+        if (process is null)
+        {
+            return;
+        }
+
+        var processId = process.Id;
+        try
+        {
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                return;
+            }
+
+            var exitCode = process.ExitCode;
+            var failure = new RuntimeProcessExitedException(
+                $"The owned Runtime process '{_options.RuntimeInstanceId}' exited with code {exitCode}.",
+                _options.RuntimeInstanceId ?? _runtimeInstanceId ?? string.Empty,
+                processId,
+                exitCode,
+                DateTimeOffset.UtcNow,
+                Interlocked.Read(ref _lastConfirmedGsn));
+            await FailClientAsync(failure).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex) when (Volatile.Read(ref _disposed) == 0)
+        {
+            await FailClientAsync(new RuntimeClientConnectionException(
+                "The owned Runtime process monitor failed.",
+                ex)
+                {
+                    IsRetryable = false
+                }).ConfigureAwait(false);
+        }
+    }
+
+    private async Task FailClientAsync(Exception failure)
+    {
+        failure = NormalizeLifecycleFailure(failure);
+        if (Interlocked.CompareExchange(ref _terminalFailure, failure, null) is not null)
+        {
+            return;
+        }
+
+        State = RuntimeClientState.Faulted;
+        _instanceBinding = null;
+        _completion.TrySetException(failure);
+        if (_lifecycleCancellation is not null)
+        {
+            try
+            {
+                await _lifecycleCancellation.CancelAsync().ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+            }
+        }
+
+        try
+        {
+            await DisposeTransportAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            // The original lifecycle failure is the observable error.
+        }
+    }
+
+    private Exception NormalizeLifecycleFailure(Exception failure)
+    {
+        if (failure is RuntimeProcessExitedException)
+        {
+            return failure;
+        }
+
+        var process = _ownedProcess;
+        if (process is null || !HasExited(process))
+        {
+            return failure;
+        }
+
+        try
+        {
+            var exitCode = process.ExitCode;
+            return new RuntimeProcessExitedException(
+                $"The owned Runtime process '{_options.RuntimeInstanceId}' exited with code {exitCode}.",
+                _options.RuntimeInstanceId ?? _runtimeInstanceId ?? string.Empty,
+                process.Id,
+                exitCode,
+                DateTimeOffset.UtcNow,
+                Interlocked.Read(ref _lastConfirmedGsn),
+                failure);
+        }
+        catch (InvalidOperationException)
+        {
+            return failure;
         }
     }
 
@@ -1346,9 +1556,12 @@ public sealed class RuntimeClient : IRuntimeClient
                 break;
             }
             catch (Exception ex) when (ex is IOException
+                or EndOfStreamException
                 or InvalidDataException
                 or InvalidOperationException
-                or ObjectDisposedException)
+                or ObjectDisposedException
+                or RuntimeClientException
+                or TimeoutException)
             {
                 ConsecutiveFailures++;
                 try
@@ -1359,15 +1572,19 @@ public sealed class RuntimeClient : IRuntimeClient
                 {
                     break;
                 }
-                catch (Exception reconnectError) when (reconnectError is RuntimeClientConnectionException
-                    or IOException
-                    or InvalidDataException
-                    or InvalidOperationException
-                    or TimeoutException)
+                catch (Exception reconnectError) when (reconnectError is not OperationCanceledException)
                 {
-                    State = RuntimeClientState.Faulted;
+                    await FailClientAsync(reconnectError).ConfigureAwait(false);
                 }
             }
+        }
+    }
+
+    private void ThrowIfTerminalFailure()
+    {
+        if (Volatile.Read(ref _terminalFailure) is { } failure)
+        {
+            throw failure;
         }
     }
 
@@ -1555,7 +1772,8 @@ public sealed class RuntimeClient : IRuntimeClient
                 _runtimeInstanceId,
                 StringComparison.Ordinal)
                 ? Interlocked.Read(ref _lastConfirmedGsn)
-                : 0);
+                : 0,
+            _options.SkillSources ?? []);
         var parameters = JsonSerializer.SerializeToElement(
             request,
             RuntimeJsonContext.Default.InitializeRequest);

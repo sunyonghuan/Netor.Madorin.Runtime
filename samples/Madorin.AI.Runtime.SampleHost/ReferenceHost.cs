@@ -109,6 +109,13 @@ internal static class ReferenceHost
         int index)
     {
         var callbacks = new ReferenceHostCallbacks(endpoint.Workspace);
+        var supplementalSkillsDirectory = Path.Combine(
+            endpoint.Workspace,
+            ".madorin",
+            "host-skills");
+        SkillSourceDescriptor[] skillSources = Directory.Exists(supplementalSkillsDirectory)
+            ? [new($"reference-host-{index}", SkillSourceKind.Directory, supplementalSkillsDirectory)]
+            : [];
         var client = new RuntimeClient(
             new RuntimeClientOptions(
                 endpoint.PipeName,
@@ -120,8 +127,14 @@ internal static class ReferenceHost
                 Capabilities: new RuntimeCapabilities(
                     ReverseRpc: true,
                     ToolCatalog: true,
-                    ToolPermissions: true),
-                HostCallbacks: callbacks.CreateConfiguration()));
+                    ToolPermissions: true,
+                    Skills: new SkillsCapabilities(
+                        SourceKinds: ["directory"],
+                        ResourcesSupported: true,
+                        ScriptsSupported: true,
+                        HotRefreshSupported: true)),
+                HostCallbacks: callbacks.CreateConfiguration(),
+                SkillSources: skillSources));
         return new RuntimeHandle(
             index,
             endpoint,
@@ -134,6 +147,8 @@ internal static class ReferenceHost
         RuntimeHandle[] handles,
         CancellationToken cancellationToken)
     {
+        await Task.WhenAll(handles.Select(handle =>
+            InspectSkillsAsync(handle, cancellationToken)));
         await Task.WhenAll(handles.Select(handle => handle.Client
             .ReplaceToolCatalogAsync(CreateToolCatalog(), cancellationToken)
             .AsTask()));
@@ -149,68 +164,102 @@ internal static class ReferenceHost
                 runIds[index],
                 eventReplayCursor: 0,
                 cancellationToken)));
+        foreach (var capture in captures.Where(static capture => capture.AwaitingConfirmation))
+        {
+            WriteLine(
+                $"WAITING|{capture.RunId}|{capture.LastGsn.ToString(System.Globalization.CultureInfo.InvariantCulture)}|"
+                + (capture.FailureMessage ?? "connection requires confirmation"));
+        }
+
         var failedCapture = captures.FirstOrDefault(static capture =>
-            capture.Terminal.MessageType != MessageTypes.RunCompleted);
+            !capture.AwaitingConfirmation
+            && capture.Terminal?.MessageType != MessageTypes.RunCompleted);
         if (failedCapture is not null)
         {
             throw new InvalidOperationException(
                 $"Reference Run '{failedCapture.RunId}' ended with "
-                + $"'{failedCapture.Terminal.MessageType}': "
-                + failedCapture.Terminal.Payload.GetRawText());
+                + $"'{failedCapture.Terminal?.MessageType}': "
+                + (failedCapture.Terminal?.Payload.GetRawText() ?? "no terminal event"));
         }
 
         var expert = handles[0];
-        var updatedSelection = CreateExpertSelection(
-            selectionVersion: 2,
-            "Selection updated by the reference host.");
-        var persistedSelection = await expert.Client.UpdateSessionSelectionAsync(
-            new SessionSelectionUpdateParameters(
-                captures[0].SessionId,
-                ExpectedSelectionVersion: 1,
-                updatedSelection),
-            cancellationToken);
-        if (persistedSelection.SelectionVersion != updatedSelection.SelectionVersion)
+        var updatedSelection = expert.LastSnapshot is not null
+            && !captures[0].AwaitingConfirmation
+            ? CreateExpertSelection(
+                selectionVersion: 2,
+                "Selection updated by the reference host.")
+            : expert.InitialSelection;
+        RunCapture cancelled;
+        if (!captures[0].AwaitingConfirmation)
         {
-            throw new InvalidDataException(
-                "The Runtime did not apply the reference host Selection update.");
-        }
+            var persistedSelection = await expert.Client.UpdateSessionSelectionAsync(
+                new SessionSelectionUpdateParameters(
+                    captures[0].SessionId,
+                    ExpectedSelectionVersion: 1,
+                    updatedSelection),
+                cancellationToken);
+            if (persistedSelection.SelectionVersion != updatedSelection.SelectionVersion)
+            {
+                throw new InvalidDataException(
+                    "The Runtime did not apply the reference host Selection update.");
+            }
 
-        var queriedResult = await expert.Callbacks.QueryKnownResultAsync(
-            "reference-permission-call",
-            cancellationToken);
-        if (queriedResult.Status is not ToolCallStatus.Succeeded)
-        {
-            throw new InvalidDataException(
-                "The reference host could not query its durable tool result by callId.");
-        }
+            var queriedResult = await expert.Callbacks.QueryKnownResultAsync(
+                "reference-permission-call",
+                cancellationToken);
+            if (queriedResult.Status is not ToolCallStatus.Succeeded)
+            {
+                throw new InvalidDataException(
+                    "The reference host could not query its durable tool result by callId.");
+            }
 
-        var cancelRunId = await expert.Client.StartNewSessionRunAsync(
-            new NewSessionRunRequest(
-                $"reference-cancel-session-{Guid.NewGuid():N}",
-                $"reference-cancel-run-{Guid.NewGuid():N}",
-                RuntimeMode.Expert,
-                expert.InitialSelection,
-                [new TextContentBlock("Cancel the reference run.")]),
-            cancellationToken);
-        if (!await expert.Client.CancelRunAsync(
+            var cancelRunId = await expert.Client.StartNewSessionRunAsync(
+                new NewSessionRunRequest(
+                    $"reference-cancel-session-{Guid.NewGuid():N}",
+                    $"reference-cancel-run-{Guid.NewGuid():N}",
+                    RuntimeMode.Expert,
+                    expert.InitialSelection,
+                    [new TextContentBlock("Cancel the reference run.")]),
+                cancellationToken);
+            if (!await expert.Client.CancelRunAsync(
+                    cancelRunId,
+                    "reference-host cancellation demonstration",
+                    cancellationToken))
+            {
+                throw new InvalidOperationException(
+                    $"Runtime did not accept cancellation for Run '{cancelRunId}'.");
+            }
+
+            cancelled = await CaptureRunAsync(
+                expert,
                 cancelRunId,
-                "reference-host cancellation demonstration",
-                cancellationToken))
-        {
-            throw new InvalidOperationException(
-                $"Runtime did not accept cancellation for Run '{cancelRunId}'.");
+                captures[0].LastGsn,
+                cancellationToken);
         }
-
-        var cancelled = await CaptureRunAsync(
-            expert,
-            cancelRunId,
-            captures[0].LastGsn,
-            cancellationToken);
+        else
+        {
+            cancelled = captures[0];
+        }
         var currentSelections = handles.Select(static handle => handle.InitialSelection).ToArray();
-        currentSelections[0] = updatedSelection;
+        if (!captures[0].AwaitingConfirmation)
+        {
+            currentSelections[0] = updatedSelection;
+        }
         var state = new DemoState(handles, captures, currentSelections, cancelled);
         WriteDemo(state);
         return state;
+    }
+
+    private static async Task InspectSkillsAsync(
+        RuntimeHandle handle,
+        CancellationToken cancellationToken)
+    {
+        var current = await handle.Client.GetSkillCatalogAsync(cancellationToken);
+        var refreshed = await handle.Client.RefreshSkillCatalogAsync(cancellationToken);
+        WriteLine(
+            $"SKILLS|{handle.Endpoint.RuntimeInstanceId}|"
+            + $"{current.CatalogVersion}|{refreshed.CatalogVersion}|"
+            + $"{refreshed.SkillCount}|{string.Join(',', refreshed.Sources.Select(static source => source.SourceId))}");
     }
 
     private static async Task<int> RunCommandLoopAsync(
@@ -259,6 +308,21 @@ internal static class ReferenceHost
             handle.Client,
             () => handle.Client.ResumeSessionAsync(previous.SessionId, timeout.Token),
             timeout.Token);
+        var eventCursor = Math.Max(state.LastGsns[index], resume.LastGsn);
+        var originalRun = await handle.Client.QueryRunAsync(previous.RunId, timeout.Token);
+        var sessionRuns = await handle.Client.ListRunsAsync(
+            new RunListParameters(previous.SessionId),
+            timeout.Token);
+        var nonTerminalRuns = sessionRuns.Runs
+            .Where(static run => run.Status is not (
+                RunStatus.Completed
+                or RunStatus.Failed
+                or RunStatus.Cancelled
+                or RunStatus.Interrupted))
+            .ToArray();
+        WriteLine(
+            $"RECOVER_STATE|{index}|{previous.RunId}|{originalRun.Status}|"
+            + $"{nonTerminalRuns.Length}|{eventCursor.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
         var rehydrated = await handle.Client.RehydrateSessionAsync(
             new SessionRehydrateParameters(
                 previous.SessionId,
@@ -279,12 +343,12 @@ internal static class ReferenceHost
         var terminal = await CaptureRunAsync(
             handle,
             runId,
-            Math.Max(state.LastGsns[index], resume.LastGsn),
+            eventCursor,
             timeout.Token);
         state.LastGsns[index] = terminal.LastGsn;
         WriteLine(
             $"OK|recover|{index}|{previous.SessionId}|{rehydrated.Status}|"
-            + $"{rehydrated.Mismatched.Length}|{runId}|{terminal.Terminal.MessageType}|"
+            + $"{rehydrated.Mismatched.Length}|{runId}|{GetTerminalType(terminal)}|"
             + terminal.LastGsn.ToString(System.Globalization.CultureInfo.InvariantCulture));
     }
 
@@ -314,58 +378,87 @@ internal static class ReferenceHost
     {
         var lastGsn = eventReplayCursor;
         long lastRunSequence = -1;
-        await foreach (var envelope in handle.Client.ReadEventsAsync(
-            eventReplayCursor,
-            cancellationToken))
+        try
         {
-            if (!string.Equals(
-                envelope.RuntimeInstanceId,
-                handle.Endpoint.RuntimeInstanceId,
-                StringComparison.Ordinal))
+            await foreach (var envelope in handle.Client.ReadEventsAsync(
+                eventReplayCursor,
+                cancellationToken))
             {
-                throw new InvalidDataException(
-                    $"Runtime {handle.Index} received an event from another instance.");
-            }
-
-            if (envelope.Gsn <= lastGsn)
-            {
-                throw new InvalidDataException(
-                    $"Runtime {handle.Index} emitted non-monotonic GSN {envelope.Gsn}.");
-            }
-
-            if (string.Equals(envelope.RunId, runId, StringComparison.Ordinal))
-            {
-                if (envelope.RunSequence <= lastRunSequence)
+                if (!string.Equals(
+                    envelope.RuntimeInstanceId,
+                    handle.Endpoint.RuntimeInstanceId,
+                    StringComparison.Ordinal))
                 {
                     throw new InvalidDataException(
-                        $"Run '{runId}' emitted non-monotonic sequence {envelope.RunSequence}.");
+                        $"Runtime {handle.Index} received an event from another instance.");
                 }
 
-                lastRunSequence = envelope.RunSequence;
+                if (envelope.Gsn <= lastGsn)
+                {
+                    throw new InvalidDataException(
+                        $"Runtime {handle.Index} emitted non-monotonic GSN {envelope.Gsn}.");
+                }
+
+                if (string.Equals(envelope.RunId, runId, StringComparison.Ordinal))
+                {
+                    if (envelope.RunSequence <= lastRunSequence)
+                    {
+                        throw new InvalidDataException(
+                            $"Run '{runId}' emitted non-monotonic sequence {envelope.RunSequence}.");
+                    }
+
+                    lastRunSequence = envelope.RunSequence;
+                }
+
+                WriteLine(
+                    $"EVENT|{handle.Index}|{envelope.RuntimeInstanceId}|{envelope.RunId}|"
+                    + $"{envelope.Gsn.ToString(System.Globalization.CultureInfo.InvariantCulture)}|"
+                    + $"{envelope.RunSequence.ToString(System.Globalization.CultureInfo.InvariantCulture)}|"
+                    + envelope.MessageType);
+                await handle.Client.AcknowledgeEventsAsync(envelope.Gsn, cancellationToken);
+                lastGsn = envelope.Gsn;
+                if (string.Equals(envelope.RunId, runId, StringComparison.Ordinal)
+                    && envelope.MessageType is MessageTypes.RunCompleted
+                        or MessageTypes.RunFailed
+                        or MessageTypes.RunCancelled)
+                {
+                    var run = await handle.Client.QueryRunAsync(runId, cancellationToken);
+                    var capture = new RunCapture(
+                        run.SessionId,
+                        runId,
+                        envelope,
+                        lastGsn,
+                        run,
+                        AwaitingConfirmation: false,
+                        FailureMessage: null);
+                    handle.RecordSnapshot(capture);
+                    return capture;
+                }
             }
 
-            WriteLine(
-                $"EVENT|{handle.Index}|{envelope.RuntimeInstanceId}|{envelope.RunId}|"
-                + $"{envelope.Gsn.ToString(System.Globalization.CultureInfo.InvariantCulture)}|"
-                + $"{envelope.RunSequence.ToString(System.Globalization.CultureInfo.InvariantCulture)}|"
-                + envelope.MessageType);
-            await handle.Client.AcknowledgeEventsAsync(envelope.Gsn, cancellationToken);
-            lastGsn = envelope.Gsn;
-            if (string.Equals(envelope.RunId, runId, StringComparison.Ordinal)
-                && envelope.MessageType is MessageTypes.RunCompleted
-                    or MessageTypes.RunFailed
-                    or MessageTypes.RunCancelled)
-            {
-                var run = await handle.Client.QueryRunAsync(runId, cancellationToken);
-                return new RunCapture(
-                    run.SessionId,
-                    runId,
-                    envelope,
-                    lastGsn);
-            }
+            throw new EndOfStreamException($"Run '{runId}' ended without a terminal event.");
         }
-
-        throw new EndOfStreamException($"Run '{runId}' ended without a terminal event.");
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is RuntimeClientConnectionException
+            or IOException
+            or EndOfStreamException
+            or InvalidDataException
+            or TimeoutException
+            or ObjectDisposedException)
+        {
+            handle.MarkAwaitingConfirmation(runId, lastGsn, ex);
+            return new RunCapture(
+                handle.LastSnapshot?.SessionId ?? string.Empty,
+                runId,
+                Terminal: null,
+                LastGsn: lastGsn,
+                Snapshot: handle.LastSnapshot,
+                AwaitingConfirmation: true,
+                FailureMessage: ex.Message);
+        }
     }
 
     private static NewSessionRunRequest CreateRunRequest(
@@ -519,9 +612,9 @@ internal static class ReferenceHost
             $"DEMO|{state.Captures[0].SessionId}|{state.Captures[1].SessionId}|"
             + $"{state.Captures[2].SessionId}|{state.Captures[0].RunId}|"
             + $"{state.Captures[1].RunId}|{state.Captures[2].RunId}|"
-            + $"{state.Cancelled.RunId}|{state.Captures[0].Terminal.MessageType}|"
-            + $"{state.Captures[1].Terminal.MessageType}|{state.Captures[2].Terminal.MessageType}|"
-            + $"{state.Cancelled.Terminal.MessageType}|{state.Captures[0].LastGsn}|"
+            + $"{state.Cancelled.RunId}|{GetTerminalType(state.Captures[0])}|"
+            + $"{GetTerminalType(state.Captures[1])}|{GetTerminalType(state.Captures[2])}|"
+            + $"{GetTerminalType(state.Cancelled)}|{state.Captures[0].LastGsn}|"
             + $"{state.Captures[1].LastGsn}|{state.Captures[2].LastGsn}|"
             + $"{state.Cancelled.LastGsn}|{state.CurrentSelections[0].SelectionVersion}|"
             + $"{expertCallbacks.PermissionCount}|{expertCallbacks.ApprovalCount}|"
@@ -536,6 +629,9 @@ internal static class ReferenceHost
         }
     }
 
+    private static string GetTerminalType(RunCapture capture) =>
+        capture.Terminal?.MessageType ?? "awaiting-confirmation";
+
     private static JsonElement ParseElement(string json)
     {
         using var document = JsonDocument.Parse(json);
@@ -547,13 +643,44 @@ internal static class ReferenceHost
         ReferenceHostConfiguration.RuntimeEndpoint Endpoint,
         RuntimeClient Client,
         ReferenceHostCallbacks Callbacks,
-        NextTurnSelection InitialSelection);
+        NextTurnSelection InitialSelection)
+    {
+        private readonly object _stateGate = new();
+
+        public RunQueryResult? LastSnapshot { get; private set; }
+
+        public bool AwaitingConfirmation { get; private set; }
+
+        public string? LastFailureMessage { get; private set; }
+
+        public void RecordSnapshot(RunCapture capture)
+        {
+            lock (_stateGate)
+            {
+                LastSnapshot = capture.Snapshot;
+                AwaitingConfirmation = false;
+                LastFailureMessage = null;
+            }
+        }
+
+        public void MarkAwaitingConfirmation(string runId, long lastGsn, Exception exception)
+        {
+            lock (_stateGate)
+            {
+                AwaitingConfirmation = true;
+                LastFailureMessage = exception.Message;
+            }
+        }
+    }
 
     private sealed record RunCapture(
         string SessionId,
         string RunId,
-        RuntimeEventEnvelope Terminal,
-        long LastGsn);
+        RuntimeEventEnvelope? Terminal,
+        long LastGsn,
+        RunQueryResult? Snapshot,
+        bool AwaitingConfirmation,
+        string? FailureMessage);
 
     private sealed class DemoState(
         RuntimeHandle[] handles,

@@ -175,6 +175,11 @@ public static class CliApplication
             commandInput,
             commandOutput,
             memoryUserHome));
+        rootCommand.Subcommands.Add(SkillsCommands.Create(
+            jsonOption,
+            workspaceOption,
+            dataDirectoryOption,
+            commandOutput));
         rootCommand.Subcommands.Add(SessionCommands.Create(
             jsonOption,
             workspaceOption,

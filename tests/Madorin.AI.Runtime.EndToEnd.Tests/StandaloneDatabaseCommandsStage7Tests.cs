@@ -824,6 +824,14 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
                        FileAccess.Read,
                        FileShare.None))
             {
+                if (OperatingSystem.IsMacOS())
+                {
+                    Assert.Inconclusive("FileStream.Lock is unsupported on macOS.");
+                }
+
+#pragma warning disable CA1416 // macOS is explicitly marked inconclusive above.
+                lockedReport.Lock(0, lockedReport.Length);
+#pragma warning restore CA1416
                 var exitCode = Run(
                     ["db", "rebuild", "--workspace", fixture.Workspace, "--data-dir", fixture.DataDirectory, "--confirm", "--json"],
                     output,
@@ -957,7 +965,7 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
         var fixture = await CreateFixtureAsync();
         try
         {
-            await DowngradeToVersionFourteenAsync(fixture);
+            await DowngradeToVersionFifteenAsync(fixture);
             await using var workspaceLock = await WorkspaceWriteLock.AcquireAsync(
                 fixture.Workspace,
                 "migration-dry-run-lock-holder",
@@ -975,14 +983,14 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
             using var document = JsonDocument.Parse(output.ToString());
             Assert.AreEqual("db migrate", document.RootElement.GetProperty("data").GetProperty("command").GetString());
             Assert.AreEqual("dry-run", document.RootElement.GetProperty("data").GetProperty("status").GetString());
-            Assert.AreEqual(14, document.RootElement.GetProperty("data").GetProperty("fromVersion").GetInt32());
-            Assert.AreEqual(15, document.RootElement.GetProperty("data").GetProperty("targetVersion").GetInt32());
+            Assert.AreEqual(15, document.RootElement.GetProperty("data").GetProperty("fromVersion").GetInt32());
+            Assert.AreEqual(16, document.RootElement.GetProperty("data").GetProperty("targetVersion").GetInt32());
             var pendingVersions = document.RootElement.GetProperty("data").GetProperty("pendingVersions")
                 .EnumerateArray()
                 .Select(static value => value.GetInt32())
                 .ToArray();
             Assert.HasCount(1, pendingVersions);
-            Assert.AreEqual(15, pendingVersions[0]);
+            Assert.AreEqual(16, pendingVersions[0]);
             Assert.AreEqual(JsonValueKind.Null, document.RootElement.GetProperty("data").GetProperty("backupPath").ValueKind);
             AssertTreeEqual(before, await CaptureTreeAsync(fixture.Root));
         }
@@ -998,11 +1006,11 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
         var fixture = await CreateFixtureAsync();
         try
         {
-            await DowngradeToVersionFourteenAsync(fixture);
+            await DowngradeToVersionFifteenAsync(fixture);
             var output = new StringWriter();
 
             var exitCode = Run(
-                ["db", "migrate", "--workspace", fixture.Workspace, "--data-dir", fixture.DataDirectory, "--to", "15", "--json"],
+                ["db", "migrate", "--workspace", fixture.Workspace, "--data-dir", fixture.DataDirectory, "--to", "16", "--json"],
                 output,
                 new StringReader(string.Empty),
                 fixture.ConfigDirectory);
@@ -1010,14 +1018,14 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
             Assert.AreEqual(ExitCodes.Success, exitCode, output.ToString());
             using var document = JsonDocument.Parse(output.ToString());
             Assert.AreEqual("migrated", document.RootElement.GetProperty("data").GetProperty("status").GetString());
-            Assert.AreEqual(14, document.RootElement.GetProperty("data").GetProperty("fromVersion").GetInt32());
-            Assert.AreEqual(15, document.RootElement.GetProperty("data").GetProperty("targetVersion").GetInt32());
+            Assert.AreEqual(15, document.RootElement.GetProperty("data").GetProperty("fromVersion").GetInt32());
+            Assert.AreEqual(16, document.RootElement.GetProperty("data").GetProperty("targetVersion").GetInt32());
             var appliedVersions = document.RootElement.GetProperty("data").GetProperty("appliedVersions")
                 .EnumerateArray()
                 .Select(static value => value.GetInt32())
                 .ToArray();
             Assert.HasCount(1, appliedVersions);
-            Assert.AreEqual(15, appliedVersions[0]);
+            Assert.AreEqual(16, appliedVersions[0]);
             var backupPath = document.RootElement.GetProperty("data").GetProperty("backupPath").GetString();
             Assert.IsNotNull(backupPath);
             Assert.StartsWith(
@@ -1026,12 +1034,12 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
                 StringComparison.Ordinal);
             Assert.IsTrue(File.Exists(Path.Combine(backupPath, "state.db")));
             Assert.AreEqual(
-                14L,
+                15L,
                 await ExecuteScalarFromDatabaseAsync(
                     Path.Combine(backupPath, "state.db"),
                     "SELECT MAX(version) FROM schema_versions;"));
             Assert.AreEqual(
-                15L,
+                16L,
                 await ExecuteScalarAsync(
                     fixture.DataDirectory,
                     "SELECT MAX(version) FROM schema_versions;",
@@ -1067,7 +1075,7 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
         var fixture = await CreateFixtureAsync();
         try
         {
-            await DowngradeToVersionFourteenAsync(fixture);
+            await DowngradeToVersionFifteenAsync(fixture);
             await using var workspaceLock = await WorkspaceWriteLock.AcquireAsync(
                 fixture.Workspace,
                 "migration-lock-holder",
@@ -1098,7 +1106,7 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
         var fixture = await CreateFixtureAsync();
         try
         {
-            await DowngradeToVersionFourteenAsync(fixture);
+            await DowngradeToVersionFifteenAsync(fixture);
             await File.WriteAllTextAsync(
                 Path.Combine(fixture.DataDirectory, "backups"),
                 "blocks migration recovery point",
@@ -1118,7 +1126,7 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
             Assert.AreEqual(JsonValueKind.Null, document.RootElement.GetProperty("data").GetProperty("backupPath").ValueKind);
             AssertTreeEqual(before, await CaptureTreeAsync(fixture.Root));
             Assert.AreEqual(
-                14L,
+                15L,
                 await ExecuteScalarAsync(
                     fixture.DataDirectory,
                     "SELECT MAX(version) FROM schema_versions;",
@@ -1136,10 +1144,10 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
         var fixture = await CreateFixtureAsync();
         try
         {
-            await DowngradeToVersionFourteenAsync(fixture);
+            await DowngradeToVersionFifteenAsync(fixture);
             await ExecuteAsync(
                 fixture.DataDirectory,
-                "PRAGMA foreign_keys = OFF; DROP TABLE tool_approvals; PRAGMA wal_checkpoint(TRUNCATE);",
+                "PRAGMA foreign_keys = OFF; DROP TABLE runs; PRAGMA wal_checkpoint(TRUNCATE);",
                 fixture.SessionId);
             var output = new StringWriter();
 
@@ -1159,12 +1167,12 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
             Assert.Contains("Recovery point retained", message);
             Assert.IsTrue(File.Exists(Path.Combine(backupPath, "state.db")));
             Assert.AreEqual(
-                14L,
+                15L,
                 await ExecuteScalarFromDatabaseAsync(
                     Path.Combine(backupPath, "state.db"),
                     "SELECT MAX(version) FROM schema_versions;"));
             Assert.AreEqual(
-                14L,
+                15L,
                 await ExecuteScalarAsync(
                     fixture.DataDirectory,
                     "SELECT MAX(version) FROM schema_versions;",
@@ -1250,8 +1258,8 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
             Assert.AreEqual(ExitCodes.Success, exitCode, output.ToString());
             using var document = JsonDocument.Parse(output.ToString());
             Assert.AreEqual("up-to-date", document.RootElement.GetProperty("data").GetProperty("status").GetString());
-            Assert.AreEqual(15, document.RootElement.GetProperty("data").GetProperty("fromVersion").GetInt32());
-            Assert.AreEqual(15, document.RootElement.GetProperty("data").GetProperty("targetVersion").GetInt32());
+            Assert.AreEqual(16, document.RootElement.GetProperty("data").GetProperty("fromVersion").GetInt32());
+            Assert.AreEqual(16, document.RootElement.GetProperty("data").GetProperty("targetVersion").GetInt32());
             Assert.IsEmpty(document.RootElement.GetProperty("data").GetProperty("appliedVersions").EnumerateArray());
             Assert.AreEqual(JsonValueKind.Null, document.RootElement.GetProperty("data").GetProperty("backupPath").ValueKind);
             Assert.IsFalse(Directory.Exists(Path.Combine(fixture.DataDirectory, "backups")));
@@ -1264,8 +1272,8 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
 
     [TestMethod]
     [DataRow(-1)]
-    [DataRow(14)]
-    [DataRow(16)]
+    [DataRow(15)]
+    [DataRow(17)]
     public async Task DbMigrate_InvalidTarget_ReturnsInvalidArgumentsWithoutWriting(int targetVersion)
     {
         var fixture = await CreateFixtureAsync();
@@ -1648,13 +1656,19 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
             Encoding.UTF8,
             TestContext.CancellationToken);
 
-    private async Task DowngradeToVersionFourteenAsync(DatabaseFixture fixture) =>
+    private async Task DowngradeToVersionFifteenAsync(DatabaseFixture fixture) =>
         await ExecuteAsync(
             fixture.DataDirectory,
             """
             PRAGMA foreign_keys = OFF;
-            ALTER TABLE tool_approvals DROP COLUMN request_kind;
-            DELETE FROM schema_versions WHERE version = 15;
+            DROP INDEX IF EXISTS idx_runs_progress;
+            ALTER TABLE runs DROP COLUMN phase;
+            ALTER TABLE runs DROP COLUMN current_step;
+            ALTER TABLE runs DROP COLUMN completed_units;
+            ALTER TABLE runs DROP COLUMN total_units;
+            ALTER TABLE runs DROP COLUMN last_run_sequence;
+            ALTER TABLE runs DROP COLUMN error_json;
+            DELETE FROM schema_versions WHERE version = 16;
             PRAGMA wal_checkpoint(TRUNCATE);
             """,
             fixture.SessionId);

@@ -34,4 +34,8 @@ public sealed record ToolGrant(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string[]? DelegationChain = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    string? ApprovalRequestId = null);
+    string? ApprovalRequestId = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string[]? AllowedSkillScriptKeys = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? SkillCatalogVersion = null);

@@ -1,0 +1,15 @@
+{
+  "$schema": "madorin.ai.runtime.protocol-snapshot/v1",
+  "protocolVersion": "1.1",
+  "messageType": "run.stage.changed",
+  "payload": {
+    "runId": "run-event",
+    "status": "Persisting",
+    "mode": "Expert",
+    "phase": "persisting",
+    "currentStep": "expert:finalizing",
+    "completedUnits": 8,
+    "totalUnits": 8,
+    "updatedAt": "2026-07-26T02:03:04+00:00"
+  }
+}

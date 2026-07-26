@@ -19,6 +19,7 @@ internal static class ReplHelpWriter
         new(["RESUME"], "/resume", "[sessionId]", "list resumable Sessions or switch to one."),
         new(["EXPORT"], "/export", "[path]", "write the current Session as Markdown."),
         new(["TOOLS"], "/tools", null, "show tools and their permission state."),
+        new(["SKILL"], "/skill", "<list|show <name>|refresh>", "inspect or refresh the local Skill catalog."),
         new(["HISTORY"], "/history", "[positive-count|all]", "show recent canonical messages."),
         new(["CLEAR"], "/clear", null, "clear an attached interactive console without deleting history."),
         new(["STATUS"], "/status", null, "show Runtime, workspace, activity, memory, and tool counts."),

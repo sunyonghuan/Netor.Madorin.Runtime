@@ -23,6 +23,7 @@ public sealed class FramedControlChannel : IDuplexRpcPeer
     private TaskCompletionSource<ReadOnlyMemory<byte>>? _pendingBlobResponse;
     private long _nextId;
     private long _nextRequestTaskId;
+    private Exception? _terminalError;
     private int _disposed;
 
     public FramedControlChannel(NamedPipeTransport transport)
@@ -128,7 +129,7 @@ public sealed class FramedControlChannel : IDuplexRpcPeer
             return;
         }
 
-        _lifetime.Cancel();
+        TryCancelLifetime();
         var disposedError = new ObjectDisposedException(nameof(FramedControlChannel));
         CompletePending(disposedError);
         Volatile.Read(ref _pendingBlobResponse)?.TrySetException(disposedError);
@@ -139,9 +140,14 @@ public sealed class FramedControlChannel : IDuplexRpcPeer
         }
 
         await ObserveCompletionAsync(_receivePump).ConfigureAwait(false);
-        var requestTasks = _requestTasks.Values.ToArray();
-        if (requestTasks.Length > 0)
+        while (true)
         {
+            var requestTasks = _requestTasks.Values.ToArray();
+            if (requestTasks.Length == 0)
+            {
+                break;
+            }
+
             await Task.WhenAll(requestTasks.Select(ObserveRequestCompletionAsync))
                 .ConfigureAwait(false);
         }
@@ -245,6 +251,7 @@ public sealed class FramedControlChannel : IDuplexRpcPeer
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
+            terminalError = Volatile.Read(ref _terminalError);
         }
         catch (Exception ex) when (ex is IOException
             or InvalidDataException
@@ -255,6 +262,7 @@ public sealed class FramedControlChannel : IDuplexRpcPeer
         }
         finally
         {
+            terminalError ??= Volatile.Read(ref _terminalError);
             CompletePending(terminalError ?? new OperationCanceledException(ct));
             Volatile.Read(ref _pendingBlobResponse)?.TrySetException(
                 terminalError ?? new OperationCanceledException(ct));
@@ -309,14 +317,12 @@ public sealed class FramedControlChannel : IDuplexRpcPeer
             {
                 return;
             }
-            catch (Exception ex) when (ex is ArgumentException
-                or InvalidOperationException
-                or JsonException)
+            catch (Exception)
             {
                 response = new JsonRpcResponse(
                     "2.0",
                     request.Id,
-                    Error: new JsonRpcError(-32603, ex.Message));
+                    Error: new JsonRpcError(-32603, "Internal error."));
             }
         }
 
@@ -328,16 +334,28 @@ public sealed class FramedControlChannel : IDuplexRpcPeer
 
     private async Task HandleBlobRequestAsync(ReadOnlyMemory<byte> frame, CancellationToken ct)
     {
-        var handler = Volatile.Read(ref _blobRequestHandler)
-            ?? throw new InvalidOperationException("No Blob request handler is registered.");
-        var response = await handler(frame, ct).ConfigureAwait(false);
-        if (!BlobFrameProtocol.IsBlobFrame(response)
-            || !BlobFrameProtocol.Decode(response).IsResponse)
+        try
         {
-            throw new InvalidDataException("The Blob handler returned an invalid response frame.");
-        }
+            var handler = Volatile.Read(ref _blobRequestHandler)
+                ?? throw new InvalidOperationException("No Blob request handler is registered.");
+            var response = await handler(frame, ct).ConfigureAwait(false);
+            if (!BlobFrameProtocol.IsBlobFrame(response)
+                || !BlobFrameProtocol.Decode(response).IsResponse)
+            {
+                throw new InvalidDataException("The Blob handler returned an invalid response frame.");
+            }
 
-        await SendFrameAsync(response, ct).ConfigureAwait(false);
+            await SendFrameAsync(response, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            FailChannel(ex);
+            throw;
+        }
     }
 
     private async Task SendFrameAsync(ReadOnlyMemory<byte> frame, CancellationToken ct)
@@ -390,10 +408,7 @@ public sealed class FramedControlChannel : IDuplexRpcPeer
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
         {
         }
-        catch (Exception ex) when (ex is IOException
-            or InvalidDataException
-            or InvalidOperationException
-            or ObjectDisposedException)
+        catch (Exception)
         {
         }
         finally
@@ -408,10 +423,7 @@ public sealed class FramedControlChannel : IDuplexRpcPeer
         {
             await task.ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
-        {
-        }
-        catch (ObjectDisposedException)
+        catch (Exception)
         {
         }
     }
@@ -425,10 +437,34 @@ public sealed class FramedControlChannel : IDuplexRpcPeer
         catch (OperationCanceledException)
         {
         }
-        catch (Exception ex) when (ex is IOException
-            or InvalidDataException
-            or InvalidOperationException
-            or ObjectDisposedException)
+        catch (Exception)
+        {
+        }
+    }
+
+    private void FailChannel(Exception error)
+    {
+        ArgumentNullException.ThrowIfNull(error);
+        if (Interlocked.CompareExchange(ref _terminalError, error, null) is not null)
+        {
+            return;
+        }
+
+        TryCancelLifetime();
+        CompletePending(error);
+        Volatile.Read(ref _pendingBlobResponse)?.TrySetException(error);
+    }
+
+    private void TryCancelLifetime()
+    {
+        try
+        {
+            _lifetime.Cancel(throwOnFirstException: false);
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        catch (AggregateException)
         {
         }
     }

@@ -28,4 +28,7 @@ public sealed record LocalRuntimeOptions(
     public long MaxGlobalBlobBytes { get; init; } = 8L * 1024 * 1024 * 1024;
 
     public TimeSpan WorkspaceLockTimeout { get; init; } = TimeSpan.Zero;
+
+    /// <summary>Additional host Skill directories, appended after automatic sources.</summary>
+    public IReadOnlyList<SkillSourceDescriptor>? SkillSources { get; init; }
 }

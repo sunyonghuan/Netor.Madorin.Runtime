@@ -1,12 +1,12 @@
 # Madorin AI Runtime Skills 加载与调用方案
 
-> 文档状态：专项策划，待拆分到执行步骤
+> 文档状态：V1 修订方案与实现基线，已拆分到[阶段 5A 执行步骤](../执行步骤/05A-Skills加载与调用.md)
 >
 > 适用范围：`Madorin.AI.Runtime` 独立 CLI、Runtime Server、Client SDK 和宿主集成
 >
 > 前置文档：[总体方案](../README.md) · [架构修订 V1](./02-架构修订-V1.md) · [实现框架参考](./03-实现框架参考.md) · [CLI 命令规范](../命令规范/04-CLI命令规范.md)
 >
-> 本文只确定方案和后续执行要求，不表示 Skills 能力已经实现，也不修改当前执行进度。
+> 本文同时记录已落地的协议、Catalog、MAF 注入和脚本授权边界；最终发布门禁仍以阶段 5A 和阶段 8 的验证结果为准。
 
 ---
 
@@ -16,13 +16,13 @@
 
 1. Agent 的实际构建和执行发生在 `Madorin.AI.Runtime` 内，Skills 也由 Runtime 加载并注入 Agent。
 2. 独立启动 `madorin` 时，自动加载用户全局目录 `~/.madorin/skills/` 和当前工作区 `<workspace>/.madorin/skills/`。
-3. 宿主启动 Runtime 时，工作区 Skills 仍由 Runtime 根据绑定工作区自动定位；宿主只需传入额外的全局 Skills 目录和远程 Skills 地址。
+3. 宿主启动 Runtime 时，来源顺序固定为“绑定工作区 → Runtime OS 用户全局目录 → `skillSources[]` 补充来源”；宿主只传入补充来源。
 4. 宿主是来源信任的权威方。宿主传入的所有 Skills 来源均视为已信任，Runtime 不再建立白名单、签名审批、信任等级或人工确认流程。
 5. 独立 CLI 中由用户配置或显式传入的 Skills 来源同样视为用户已信任，不重复询问。
 6. Runtime 只负责来源格式校验、加载、合并、缓存隔离、错误报告和必要的文件/资源边界，不判断 Skill 内容是否“可信”。
 7. 当前本地使用的 MAF 版本先实现文件型 Skills；公开契约现在就预留远程来源，后续升级到支持远程 Skills 的 MAF 版本时不改变宿主协议。
 8. 普通工具仍由现有 Tool Catalog、权限申请和宿主反向 RPC 执行。Skill 只是告诉模型何时、如何使用能力，不能替代或扩张工具目录。
-9. 工作区来源优先于全局来源；宿主传入多个同层级来源时按宿主给出的数组顺序处理。
+9. 来源按“工作区 → Runtime OS 用户全局 → 宿主数组顺序”前者优先合并；宿主补充来源不能覆盖前两个自动来源。
 10. 每次 `AgentInvocation` 使用不可变的 Skills 快照，目录或远程来源变化只影响下一次 Invocation，不改变正在执行的模型调用。
 
 ## 2. 目标与非目标
@@ -45,7 +45,7 @@
 - 不根据聊天内容自动生成、修改或安装 Skill。
 - 不把 Skill 当作普通 Function Tool 注册，也不把 Skill 正文一次性塞入系统提示词。
 - 不让 `allowed-tools` 或 Skill 正文自动授予任何普通工具权限。
-- 当前阶段不实现任意 Skill 脚本的直接执行；脚本能力见第 11 节的明确边界。
+- V1 支持声明脚本的执行，但每个脚本内容哈希首次执行必须经过统一 Tool Gateway 的 Consent/Grant；来源信任不等于脚本自动获准。
 
 ## 3. MAF 能力基线
 
@@ -69,7 +69,7 @@ MAF 不会把每个 Skill 的完整正文都预先放进提示词。`AgentSkills
 ```text
 load_skill
 read_skill_resource
-run_skill_script    仅存在可执行脚本并配置 Script Runner 时出现
+run_skill_script    Skill 声明脚本且 Runtime 提供统一内部脚本回调时出现
 ```
 
 对应流程：
@@ -80,10 +80,11 @@ Agent 构建
   -> 模型判断需要某个 Skill
   -> load_skill 读取完整 SKILL.md 指令
   -> 必要时 read_skill_resource 读取引用资料
-  -> 模型依据 Skill 指令调用已经存在的普通工具
+  -> 必要时 run_skill_script
+  -> Runtime 将脚本调用转换为 builtin.skill.script.run，再进入 Tool Gateway/Consent/Grant/审计
 ```
 
-`load_skill` 和 `read_skill_resource` 是 MAF 的上下文读取操作，由 Runtime 内部 Skills Provider 完成；它们不是宿主业务工具，也不需要宿主再次读取相同文件。它们的调用应进入 Invocation 诊断记录，但不得混入宿主 Tool Catalog。
+`load_skill` 和 `read_skill_resource` 是 MAF 的上下文读取操作，由 Runtime 内部 Skills Provider 完成；它们不是宿主业务工具，也不需要宿主再次读取相同文件。脚本回调只产生内部 `builtin.skill.script.run` 调用，内部 descriptor 不进入 Provider 公共 Tool Catalog，但会进入 Tool Gateway、Consent、Grant、Invocation 和审计链。
 
 ### 3.3 远程 Skills 的后续 MAF 能力
 
@@ -151,13 +152,14 @@ Skill 文件
 
 ```text
 Runtime 自动来源：<workspace>/.madorin/skills/
-宿主传入来源：  skillSources[]，元素可以是 directory 或 mcp
+Runtime OS 用户全局：~/.madorin/skills/
+宿主补充来源：    skillSources[]，元素可以是 directory 或 mcp
 ```
 
 - Runtime 从已经绑定的规范化工作区自动推导工作区目录，宿主不重复传入该路径。
 - `skillSources[]` 允许为空、一个或多个，目录和远程地址可以按宿主期望的优先级排列在同一数组内。
 - `directory` 元素代表宿主希望该 Runtime 实例加载的额外全局目录；`mcp` 元素代表以后由 Runtime 本地连接和加载的远程 Skills 地址。
-- 宿主模式不得隐式加载 `~/.madorin/skills/`；宿主若需要该目录，必须把它作为一个 `directory` 元素显式传入。
+- 宿主模式同样自动加载 Runtime 进程所属 OS 用户的 `~/.madorin/skills/`；宿主 `skillSources[]` 只补充来源，不能覆盖自动来源。
 - 每个 Runtime 实例只使用自身初始化请求中的来源，不读取其他 Runtime 实例的来源状态。
 
 ### 5.3 为什么来源通过初始化协议传递
@@ -220,7 +222,7 @@ skillSources[]
 工作区路径已经是 Runtime 实例的强绑定信息，因此协议不让宿主再次传 `<workspace>/.madorin/skills`。Runtime 在内部把工作区来源插入有效来源序列的第一位：
 
 ```text
-effectiveSources = [workspaceSource] + initialize.skillSources
+effectiveSources = [workspaceSource, userGlobalSource] + initialize.skillSources
 ```
 
 独立 CLI 没有宿主初始化请求时：
@@ -243,7 +245,7 @@ skills.scriptsSupported
 skills.hotRefreshSupported
 ```
 
-当前实现只完成目录来源时，应返回 `sourceKinds = [directory]`。Client SDK 在发送 `mcp` 来源前可以先检查能力；如果仍发送当前版本不支持的来源，Runtime 返回明确的 `SkillSourceKindNotSupported`，不能静默丢弃。该错误表达的是软件版本能力不足，不是 Runtime 否定宿主的信任决定。
+当前 V1 实现返回 `sourceKinds = [directory]`，并声明目录、资源、脚本和刷新能力可用。Client SDK 在发送 `mcp` 来源前可以先检查能力；如果仍发送当前版本不支持的来源，Runtime 返回明确的 `SkillSourceKindNotSupported`，不能静默丢弃。该错误表达的是软件版本能力不足，不是 Runtime 否定宿主的信任决定。
 
 升级到带 `Microsoft.Agents.AI.Mcp` 的 MAF 后，把 `mcp` 加入能力集合，既有宿主请求形状保持不变。
 
@@ -346,9 +348,10 @@ Runtime 采用“越靠前优先”的单一规则，不再另建权重系统。
 
 ```text
 1. <workspace>/.madorin/skills
-2. initialize.skillSources[0]
-3. initialize.skillSources[1]
-4. ...
+2. Runtime OS 用户 ~/.madorin/skills
+3. initialize.skillSources[0]
+4. initialize.skillSources[1]
+5. ...
 ```
 
 因此：
@@ -480,14 +483,15 @@ Skill 要求使用 tool-a
 
 ### 11.3 Skill 脚本边界
 
-MAF 支持 `run_skill_script`，但它要求 Runtime 配置 `AgentFileSkillScriptRunner`，这会形成一条新的进程执行路径。当前系统已经确定普通工具由统一 Tool Gateway、当前权限权威和执行链控制，因此 V1 采用以下最小规则：
+MAF 的 `run_skill_script` 在 V1 纳入能力，但关闭 MAF 自带的独立 Script Approval。Runtime 提供 `AgentFileSkillScriptRunner` 回调，回调只生成内部 `builtin.skill.script.run`，随后复用统一 Tool Gateway、Consent、Grant、Invocation 和审计链。
 
-- 不配置文件型 Skill Script Runner。
-- 不向模型公布 `run_skill_script`。
-- 包含 `scripts/` 的 Skill 仍可加载其正文和资源，但校验结果提示 `scriptsUnsupported`。
-- Skill 需要执行能力时，应在正文中调用宿主已经提供的普通工具。
+- Provider 的公共 Tool Catalog 不展示 `builtin.skill.script.run`；Gateway 使用追加内部 descriptor 的固定授权快照。
+- descriptor 固定为高风险、需要审批、非幂等；脚本以 Runtime OS 用户权限在绑定工作区运行。
+- Grant 绑定 Skill 名称、脚本内容 SHA-256、解释器和 Skill Catalog 版本；同一 Run 仅复用完全相同的键，脚本或解释器变化必须重新授权。
+- 支持 `.ps1`、`.sh`、`.py`、`.js`、`.cs`、`.csx` 的固定解释器映射；解释器不存在返回 `SkillScriptInterpreterUnavailable`，不得拼接 Shell 命令。
+- 脚本路径始终指向 Catalog 的 Runtime 实例隔离物化副本；源目录变化不会污染已经开始的 Invocation。
 
-这不是对 Skill 来源的信任判断，而是避免在 Runtime 内新增第二套工具执行器。以后确实需要 Skill 自带脚本时，必须单独决定脚本由宿主执行还是进入统一 Tool Gateway；在该决策完成前不得直接启用 MAF 示例中的子进程 Script Runner。
+来源信任与脚本授权是两件事：来源可直接进入 Catalog，但每个新脚本哈希首次执行仍需通过现有授权链。
 
 ## 12. Runtime 内部接入方式
 
@@ -621,7 +625,7 @@ madorin skill refresh
 
 - `list` 显示名称、描述、来源、状态和是否被覆盖，不输出完整正文。
 - `show` 显示解析后的 Frontmatter、来源、正文和资源清单，不执行脚本。
-- `validate` 检查目录、Frontmatter、同名冲突、资源边界、当前工具缺失和脚本不支持提示。
+- `validate` 检查目录、Frontmatter、同名冲突、资源边界、脚本扩展名、解释器可用性和普通工具依赖；只报告问题，不执行脚本。
 - `refresh` 让当前独立 CLI 实例立即重建 Catalog；交互会话后续 Invocation 使用新版本。
 
 V1 不提供 `skill install`、`skill remove`、`skill update`、`skill search` 或图形化管理。用户直接维护两个约定目录即可。
@@ -664,7 +668,9 @@ skill.catalog.refresh
 | `SkillDefinitionInvalid` | `SKILL.md` 或 Frontmatter 无效 | 跳过该 Skill，其他有效 Skill 继续加载 |
 | `SkillDuplicateInSource` | 同一来源内名称重复 | 该冲突名称不生效并报告具体条目 |
 | `SkillResourceBlocked` | 资源越界、类型不允许或超过技术限制 | 拒绝该资源，不影响 Skill 正文 |
-| `SkillScriptUnsupported` | Skill 含脚本但当前不支持执行 | Skill 可加载，脚本不注册为工具 |
+| `SkillScriptUnsupported` | Skill 未声明该脚本或扩展名不在 V1 集合 | 拒绝该脚本调用，正文和资源仍可用 |
+| `SkillScriptInterpreterUnavailable` | 固定解释器不存在或解释器映射不匹配 | 拒绝执行并保留结构化诊断，不回退到 Shell |
+| `SkillScriptAuthorizationRequired` | 当前 Run 尚无该 Skill/哈希/解释器的 Grant | 进入 Consent；非交互模式 fail closed |
 | `SkillToolUnavailable` | `allowed-tools` 或正文所需工具不在当前目录 | 校验提示；不能自动补充工具 |
 | `SkillRefreshFailed` | 已运行实例刷新失败 | 保持旧版本，下一 Invocation 继续使用旧 Catalog |
 
@@ -706,7 +712,7 @@ Catalog 成功更新后发送 `skill.catalog.changed`，至少包含旧版本、
 - 在 `Core` 中定义框架无关的来源、有效条目和 Invocation 快照。
 - 固定独立 CLI 与宿主模式的来源解析规则。
 - 实现工作区与一个或多个全局目录的发现、合并和同名覆盖。
-- 接入当前 MAF `AgentSkillsProvider`，只启用 Skill 正文和资源读取。
+- 接入共享 MAF `AgentSkillsProvider`，启用正文、资源和 `run_skill_script`；脚本回调统一转入 Runtime Gateway。
 
 出口条件：独立 CLI 与 Fake Host 能得到相同的有效 Catalog；工作区同名覆盖全局；模型可以按需调用 `load_skill` 和 `read_skill_resource`。
 
@@ -715,7 +721,7 @@ Catalog 成功更新后发送 `skill.catalog.changed`，至少包含旧版本、
 - 把 `skillCatalogVersion` 写入 `InvocationSnapshot`。
 - 在专家、会议、工作模式的每个 Agent 构建点注入 Skills Provider。
 - 验证 Skill 引用的普通工具仍走现有 Tool Gateway 和宿主反向 RPC。
-- 固定 `allowed-tools` 不授权和 Script Runner 不启用的行为。
+- 固定 `allowed-tools` 不授权和脚本首次哈希必须 Consent/Grant 的行为。
 - 完成本地目录监听、下一 Invocation 生效和多 Run 快照隔离。
 
 出口条件：当前 Invocation 不受目录变化影响；下一 Invocation 使用新版本；会议参与者和工作子 Agent 不串用快照或工具权限。
@@ -724,7 +730,7 @@ Catalog 成功更新后发送 `skill.catalog.changed`，至少包含旧版本、
 
 - 完成 `skill list/show/validate/refresh` 和交互斜杠命令。
 - Client SDK 支持宿主传入有序来源数组、查询 Catalog 和刷新内容。
-- SampleHost 演示显式全局目录传入，不隐式依赖用户 `~/.madorin`。
+- SampleHost 演示宿主补充目录传入，并明确 Runtime 仍自动读取其 OS 用户全局目录；补充来源不能覆盖自动来源。
 - 完成多宿主、多 Runtime、多工作区并发验证。
 - 把 Skills 能力加入 `doctor` 和发布诊断包。
 
@@ -745,9 +751,9 @@ Catalog 成功更新后发送 `skill.catalog.changed`，至少包含旧版本、
 
 ### 17.5 与现有执行步骤的映射
 
-本文后续需要拆入现有阶段，而不是单独打乱阶段顺序：
+为避免重开已经归档的阶段，以下横切要求现统一收敛到[阶段 5A：Skills 加载与调用](../执行步骤/05A-Skills加载与调用.md)。阶段 5A 复用既有协议、持久化、三模式和 Client SDK 接入点，在阶段 5 主链可用后执行，并必须在阶段 8 发布验收前完成：
 
-| 执行阶段 | 应补充的 Skills 内容 |
+| 原执行阶段 | 阶段 5A 复用和回归的接入面 |
 | --- | --- |
 | 阶段 1 | 来源 DTO、能力协商、错误码和协议快照 |
 | 阶段 2 | 初始化绑定、实例隔离和刷新消息 |
@@ -758,7 +764,7 @@ Catalog 成功更新后发送 `skill.catalog.changed`，至少包含旧版本、
 | 阶段 7 | CLI 命令、Client SDK、SampleHost 和宿主来源传入 |
 | 阶段 8 | 本地、远程预留、多实例、安全边界和 AOT 验收 |
 
-当前只新增策划，不把上述内容标记为完成，也不改动现有 `11 / 912` 的执行进度。正式实施前应把任务拆成可计数检查项并重新统计总数。
+上述内容已拆为阶段 5A 的 112 个可计数检查项，覆盖 Catalog 物化隔离、六类脚本解释器、授权键和内部 descriptor 审计；当前完成数以阶段文档和自动化测试为准，不能由文档编辑直接宣称完成。
 
 ## 18. 测试矩阵
 
@@ -781,7 +787,10 @@ Catalog 成功更新后发送 `skill.catalog.changed`，至少包含旧版本、
 | 工具允许 | Skill 调用宿主工具且获批 | 经过现有反向 RPC 并返回结果 |
 | 工具拒绝 | 宿主拒绝 Skill 引发的普通工具调用 | Agent 收到拒绝，不能绕过 |
 | `allowed-tools` | Skill 声明宿主未授权工具 | 不产生自动 Grant |
-| 脚本 | Skill 目录包含脚本 | 不出现 `run_skill_script`，校验给出提示 |
+| 脚本发现 | Skill 目录包含 `.ps1/.sh/.py/.js/.cs/.csx` | `run_skill_script` 仅在声明脚本存在时出现，校验报告解释器状态 |
+| 脚本执行 | 首次执行某个 Skill/哈希/解释器 | 生成 `builtin.skill.script.run`，进入 Consent/Grant/审计 |
+| 脚本授权复用 | 同一 Run 重复执行相同哈希 | 复用 Grant；脚本内容或解释器变化后重新授权 |
+| 脚本隔离 | 刷新期间执行旧 Invocation | 使用旧物化副本，源目录变化不污染执行 |
 | 快照 | Invocation 运行中修改 Skill | 当前 Invocation 不变，下一 Invocation 更新 |
 | 多 Run | 同实例并发多个 Run 后刷新 | 各 Invocation 保持自己的 Catalog 版本 |
 | 多实例 | 两个 Runtime 读取同一全局目录 | 可并发读取，版本和监听器不串线 |
@@ -799,14 +808,14 @@ Catalog 成功更新后发送 `skill.catalog.changed`，至少包含旧版本、
 满足以下条件后，Skills V1 本地能力才可视为完成：
 
 1. `madorin` 直接启动可以自动加载用户全局和工作区两个目录。
-2. 宿主只传额外来源，Runtime 自动补充绑定工作区来源。
+2. 宿主只传额外来源，Runtime 自动补充绑定工作区和 Runtime OS 用户全局来源。
 3. 宿主来源不经过 Runtime 信任审批，并严格按数组顺序参与合并。
-4. 宿主模式不隐式读取个人 `~/.madorin/skills`。
+4. 宿主模式自动读取 Runtime OS 用户的 `~/.madorin/skills`，宿主补充来源不能覆盖它。
 5. 工作区同名 Skill 稳定覆盖全局或远程 Skill。
 6. Agent 通过 MAF 渐进披露加载正文和资源，而不是在启动时注入全部内容。
 7. Skill 引用的普通工具仍由现有 Tool Catalog 和统一 Consent 链执行；宿主模式使用 Reverse RPC，独立交互 CLI 使用本地 handler，非交互场景保持 fail closed。
 8. `allowed-tools` 无法创建工具或获得权限。
-9. V1 没有任何 Skill 脚本直接执行路径。
+9. Skill 脚本只通过内部 `builtin.skill.script.run` 进入统一 Gateway；不存在绕过授权的直接执行路径。
 10. 每个 Invocation 能查询实际使用的 Catalog 版本和有效 Skill 哈希。
 11. 本地变化只影响下一 Invocation，当前流不被热替换。
 12. 专家、会议和工作模式使用同一规则，子 Agent 不共享可变 Provider 状态。
@@ -819,11 +828,11 @@ Catalog 成功更新后发送 `skill.catalog.changed`，至少包含旧版本、
 - 禁止 Runtime 对宿主传入的 Skill 来源再做信任审批或要求签名。
 - 禁止把宿主来源数组拼接成单个命令行字符串传递。
 - 禁止宿主重复传入工作区 Skills 路径并覆盖 Runtime 的工作区绑定。
-- 禁止宿主模式擅自加载个人 `~/.madorin/skills`。
+- 禁止宿主绕过固定自动来源顺序或以补充来源覆盖 Runtime OS 用户的 `~/.madorin/skills`。
 - 禁止按文件系统未定义枚举顺序解决同名冲突。
 - 禁止把全部 Skill 正文预先注入每次系统提示词。
 - 禁止让 `allowed-tools` 绕过 Tool Catalog、宿主审批或独立 CLI 本地 Consent。
-- 禁止直接采用 MAF 示例 Script Runner 在 Runtime 内启动任意子进程。
+- 禁止直接采用 MAF 自带 Script Approval 或绕过 Gateway 启动任意子进程；脚本必须由 Runtime 固定解释器和内部 descriptor 执行。
 - 禁止多个 Runtime 共用可变远程下载/解压目录或静态 Catalog。
 - 禁止把 MAF 类型写入公开协议、`Contracts` 或 `Core` 边界。
 - 禁止远程版本尚未接入时静默忽略宿主传入的远程地址。

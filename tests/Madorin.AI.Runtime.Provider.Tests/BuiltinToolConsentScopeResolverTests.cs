@@ -1,4 +1,5 @@
 using Madorin.AI.Runtime.Contracts;
+using Madorin.AI.Runtime.Services.Skills;
 using Madorin.AI.Runtime.Tools.Abstractions;
 using Madorin.AI.Runtime.Tools.Builtin;
 
@@ -123,6 +124,29 @@ public sealed class BuiltinToolConsentScopeResolverTests
 
         Assert.IsFalse(resolution.IsSuccess);
         Assert.IsNull(resolution.Scope);
+    }
+
+    [TestMethod]
+    public void Resolve_SkillScript_OnlyAllowsRuntimeInterpreterEnvironment()
+    {
+        var invocation = CreateInvocation(
+            SkillScriptToolDefinition.Descriptor.ToolId,
+            """{"skillName":"demo","script":"scripts/run.cs","scriptHash":"ABC","interpreter":"dotnet","catalogVersion":"v-1"}""");
+
+        var resolution = new BuiltinToolConsentScopeResolver().Resolve(
+            invocation,
+            SkillScriptToolDefinition.Descriptor,
+            _workspace);
+
+        Assert.IsTrue(resolution.IsSuccess, resolution.Error);
+        Assert.IsNotNull(resolution.Scope);
+        CollectionAssert.AreEquivalent(
+            SkillScriptEnvironmentPolicy.InheritedVariableNames.ToArray(),
+            resolution.Scope.AllowedEnvironmentVariables);
+        Assert.DoesNotContain(
+            "OPENAI_API_KEY",
+            resolution.Scope.AllowedEnvironmentVariables,
+            StringComparer.OrdinalIgnoreCase);
     }
 
     [TestMethod]

@@ -5,7 +5,6 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Contracts.Serialization;
@@ -202,6 +201,7 @@ public sealed class OpenAIProviderAdapter :
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        ProviderCapabilityValidator.ValidateSkillsSupport(Capabilities, request.Skills, ct);
 
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
             ct,
@@ -233,7 +233,7 @@ public sealed class OpenAIProviderAdapter :
             yield return adjustment;
         }
 
-        IAsyncEnumerator<AgentResponseUpdate>? enumerator = null;
+        IAsyncEnumerator<MafProviderResponseUpdate>? enumerator = null;
         try
         {
             var messages = await ConvertMessagesAsync(
@@ -265,7 +265,7 @@ public sealed class OpenAIProviderAdapter :
 
         while (true)
         {
-            AgentResponseUpdate update;
+            MafProviderResponseUpdate update;
             try
             {
                 if (!await responseEnumerator.MoveNextAsync().ConfigureAwait(false))
@@ -323,7 +323,7 @@ public sealed class OpenAIProviderAdapter :
         yield return new InvocationCompletedProviderEvent(request.InvocationId, finishReason!);
     }
 
-    private IAsyncEnumerable<AgentResponseUpdate> CreateResponseStream(
+    private IAsyncEnumerable<MafProviderResponseUpdate> CreateResponseStream(
         RuntimeProviderRequest request,
         ChatMessage[] messages,
         CancellationToken ct)
@@ -334,14 +334,12 @@ public sealed class OpenAIProviderAdapter :
                 ?? throw new InvalidOperationException("The OpenAI chat client factory returned null."));
         var options = CreateChatOptions(request);
 
-        var agent = chatClient.AsAIAgent(new ChatClientAgentOptions
-        {
-            Id = request.AgentId,
-            ChatOptions = options,
-            UseProvidedChatClientAsIs = true
-        });
-
-        return agent.RunStreamingAsync(messages, cancellationToken: ct);
+        return MafSkillsAgentFactory.CreateResponseStream(
+            chatClient,
+            request,
+            messages,
+            options,
+            ct);
     }
 
     private static ChatOptions CreateChatOptions(RuntimeProviderRequest request)
@@ -515,7 +513,7 @@ public sealed class OpenAIProviderAdapter :
 
     private static IEnumerable<RuntimeProviderEvent> MapUpdate(
         RuntimeProviderRequest request,
-        AgentResponseUpdate update)
+        MafProviderResponseUpdate update)
     {
         foreach (var content in update.Contents)
         {

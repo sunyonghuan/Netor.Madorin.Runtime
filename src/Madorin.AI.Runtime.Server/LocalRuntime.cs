@@ -12,6 +12,7 @@ using Madorin.AI.Runtime.Persistence.Files;
 using Madorin.AI.Runtime.Persistence.Sqlite;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Services.Memory;
+using Madorin.AI.Runtime.Services.Skills;
 using Madorin.AI.Runtime.Services.Tools;
 using Madorin.AI.Runtime.Tools.Abstractions;
 using Madorin.AI.Runtime.Tools.Builtin;
@@ -38,6 +39,7 @@ public sealed class LocalRuntime : IAsyncDisposable
     private readonly ConcurrentDictionary<string, NextTurnSelection> _sessionSelections =
         new(StringComparer.Ordinal);
     private readonly WorkspaceWriteLock _workspaceLock;
+    private readonly SkillCatalogService _skillCatalog;
     private int _disposed;
 
     private LocalRuntime(
@@ -45,7 +47,8 @@ public sealed class LocalRuntime : IAsyncDisposable
         WorkspaceWriteLock workspaceLock,
         string databaseConnectionString,
         AgentContextComposer agentContextComposer,
-        MemoryFileService memoryFiles)
+        MemoryFileService memoryFiles,
+        SkillCatalogService skillCatalog)
     {
         _dataDirectory = options.DataDirectory;
         _databaseConnectionString = databaseConnectionString;
@@ -53,6 +56,7 @@ public sealed class LocalRuntime : IAsyncDisposable
         _toolConsentHandler = options.ToolConsentHandler;
         _maintenanceAudit = new SessionMaintenanceAuditLog(options.DataDirectory);
         _workspaceLock = workspaceLock;
+        _skillCatalog = skillCatalog;
         _blobStore = new BlobStagingStore(
             options.DataDirectory,
             options.RuntimeLimits,
@@ -125,6 +129,7 @@ public sealed class LocalRuntime : IAsyncDisposable
                 normalized.WorkspaceLockTimeout,
                 ct)
             .ConfigureAwait(false);
+        SkillCatalogService? skillCatalog = null;
         try
         {
             Directory.CreateDirectory(normalized.LogDirectory);
@@ -145,15 +150,27 @@ public sealed class LocalRuntime : IAsyncDisposable
 
             var contextComposer = new AgentContextComposer(
                 memoryFiles);
+            skillCatalog = new SkillCatalogService(
+                normalized.WorkspaceRoot,
+                normalized.DataDirectory,
+                normalized.RuntimeInstanceId,
+                normalized.SkillSources);
+            await skillCatalog.InitializeAsync(ct).ConfigureAwait(false);
             return new LocalRuntime(
                 normalized,
                 workspaceLock,
                 connection.ConnectionString,
                 contextComposer,
-                memoryFiles);
+                memoryFiles,
+                skillCatalog);
         }
         catch
         {
+            if (skillCatalog is not null)
+            {
+                await skillCatalog.DisposeAsync().ConfigureAwait(false);
+            }
+
             await workspaceLock.DisposeAsync().ConfigureAwait(false);
             throw;
         }
@@ -779,6 +796,30 @@ public sealed class LocalRuntime : IAsyncDisposable
         return _toolCatalogStore.CaptureSnapshot();
     }
 
+    public SkillCatalogSummary GetSkillCatalogSummary()
+    {
+        ThrowIfDisposed();
+        return _skillCatalog.GetSummary();
+    }
+
+    public async Task<SkillCatalogSummary> RefreshSkillCatalogAsync(CancellationToken ct = default)
+    {
+        ThrowIfDisposed();
+        return (await _skillCatalog.RefreshAsync(ct).ConfigureAwait(false)).ToContract();
+    }
+
+    public Task<string> LoadSkillAsync(string name, CancellationToken ct = default)
+    {
+        ThrowIfDisposed();
+        return _skillCatalog.LoadSkillAsync(name, ct);
+    }
+
+    public Task<byte[]> ReadSkillResourceAsync(string name, string resource, CancellationToken ct = default)
+    {
+        ThrowIfDisposed();
+        return _skillCatalog.ReadResourceAsync(name, resource, ct);
+    }
+
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
@@ -807,6 +848,7 @@ public sealed class LocalRuntime : IAsyncDisposable
         }
 
         await _blobStore.DisposeAsync().ConfigureAwait(false);
+        await _skillCatalog.DisposeAsync().ConfigureAwait(false);
         await _workspaceLock.DisposeAsync().ConfigureAwait(false);
         _maintenanceAudit.Dispose();
         _runGate.Dispose();
@@ -839,6 +881,7 @@ public sealed class LocalRuntime : IAsyncDisposable
                     providerFactory: providerId => ResolveProvider(
                         request.Selection,
                         providerId),
+                    skillCatalog: _skillCatalog,
                     ct: ct)
                 .ConfigureAwait(false))
             {
@@ -931,6 +974,7 @@ public sealed class LocalRuntime : IAsyncDisposable
                     providerFactory: providerId => ResolveProvider(
                         effectiveSelection,
                         providerId),
+                    skillCatalog: _skillCatalog,
                     ct: ct)
                 .ConfigureAwait(false))
             {

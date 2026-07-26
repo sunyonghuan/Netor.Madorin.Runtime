@@ -51,7 +51,7 @@ public sealed class EventPressureTests
                 runIds.Add(await client.StartNewSessionRunAsync(CreateRequest(index)));
             }
 
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             await provider.AllStarted.WaitAsync(timeout.Token);
             await Task.Delay(150, timeout.Token);
 

@@ -283,6 +283,7 @@ public sealed class OpenAICompatibleProviderAdapter :
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        ProviderCapabilityValidator.ValidateSkillsSupport(Capabilities, request.Skills, ct);
 
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
             ct,

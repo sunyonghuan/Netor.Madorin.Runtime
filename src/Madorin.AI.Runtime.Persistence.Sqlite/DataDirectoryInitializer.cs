@@ -210,6 +210,7 @@ public static class DataDirectoryInitializer
                 }
             }
 
+            EnsureReplacementTargetAvailable(reportPath);
             File.Move(temporaryPath, reportPath, overwrite: true);
         }
         finally
@@ -225,4 +226,27 @@ public static class DataDirectoryInitializer
         int Busy,
         int LogFrames,
         int CheckpointedFrames);
+
+    private static void EnsureReplacementTargetAvailable(string path)
+    {
+        if (!File.Exists(path))
+        {
+            return;
+        }
+
+        using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.ReadWrite,
+            FileShare.ReadWrite | FileShare.Delete);
+        if (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS())
+        {
+            return;
+        }
+
+#pragma warning disable CA1416 // macOS is excluded above because Lock is unsupported there.
+        stream.Lock(0, 1);
+        stream.Unlock(0, 1);
+#pragma warning restore CA1416
+    }
 }

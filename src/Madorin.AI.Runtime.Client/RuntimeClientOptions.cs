@@ -39,7 +39,9 @@ public sealed record RuntimeClientOptions(
     /// <summary>Maximum time to wait for the owned process to exit gracefully before force-killing.</summary>
     TimeSpan OwnedProcessShutdownTimeout = default,
     /// <summary>Typed handlers for Runtime-initiated host callbacks.</summary>
-    RuntimeHostCallbacks? HostCallbacks = null)
+    RuntimeHostCallbacks? HostCallbacks = null,
+    /// <summary>Ordered explicit host Skill directories supplied during initialization.</summary>
+    IReadOnlyList<SkillSourceDescriptor>? SkillSources = null)
 {
     public string ResolvedEventPipeName => EventPipeName ?? $"{PipeName}.events";
 

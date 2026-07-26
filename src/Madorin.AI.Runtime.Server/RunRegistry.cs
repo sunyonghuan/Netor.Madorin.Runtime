@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 
 namespace Madorin.AI.Runtime.Server;
 
@@ -168,7 +169,7 @@ internal sealed class RunRegistry : IDisposable
 
             try
             {
-                _cancellation.Cancel();
+                CancelNoThrow(_cancellation);
                 return true;
             }
             catch (ObjectDisposedException)
@@ -217,12 +218,25 @@ internal sealed class RunRegistry : IDisposable
             }
 
             Interlocked.Exchange(ref _timedOut, 1);
+            CancelNoThrow(_cancellation);
+        }
+
+        private static void CancelNoThrow(CancellationTokenSource cancellation)
+        {
             try
             {
-                _cancellation.Cancel();
+                cancellation.Cancel(throwOnFirstException: false);
             }
             catch (ObjectDisposedException)
             {
+            }
+            catch (AggregateException exception)
+            {
+                var diagnosticId = $"diag_cancel_{Guid.NewGuid():N}";
+                Trace.TraceWarning(
+                    "Cancellation callback failure type={0} diagnosticId={1}",
+                    exception.GetType().FullName,
+                    diagnosticId);
             }
         }
     }

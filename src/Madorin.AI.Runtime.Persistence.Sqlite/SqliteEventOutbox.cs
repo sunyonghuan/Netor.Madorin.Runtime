@@ -210,6 +210,7 @@ public sealed class SqliteEventOutbox : IEventOutbox, IDisposable
         CancellationToken ct)
     {
         using var transaction = _connection.BeginTransaction(deferred: false);
+        var createdAt = DateTimeOffset.UtcNow;
 
         await using var updateCommand = _connection.CreateCommand();
         updateCommand.Transaction = transaction;
@@ -256,13 +257,16 @@ public sealed class SqliteEventOutbox : IEventOutbox, IDisposable
         insertCommand.Parameters.AddWithValue("$messageType", messageType);
         insertCommand.Parameters.AddWithValue("$payload", payloadJson);
         insertCommand.Parameters.AddWithValue("$status", PendingStatus);
-        insertCommand.Parameters.AddWithValue("$createdAt", FormatTimestamp(DateTimeOffset.UtcNow));
+        insertCommand.Parameters.AddWithValue("$createdAt", FormatTimestamp(createdAt));
         await insertCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
 
         transaction.Commit();
         await WriteReplayCopyAsync(gsn, payloadJson, payloadBytes, ct).ConfigureAwait(false);
         CacheInMemory(
-            new OutboxEntry(gsn, runId, runSequence, messageType, payloadJson),
+            new OutboxEntry(gsn, runId, runSequence, messageType, payloadJson)
+            {
+                CreatedAt = createdAt
+            },
             payloadBytes);
         return gsn;
     }
@@ -327,7 +331,7 @@ public sealed class SqliteEventOutbox : IEventOutbox, IDisposable
         {
             await using var command = _connection.CreateCommand();
             command.CommandText = """
-                SELECT gsn, run_id, run_sequence, message_type, payload
+                SELECT gsn, run_id, run_sequence, message_type, payload, created_at
                 FROM event_outbox
                 WHERE acked_at IS NULL
                   AND status IN ($pending, $sent)
@@ -345,7 +349,10 @@ public sealed class SqliteEventOutbox : IEventOutbox, IDisposable
                     reader.GetString(1),
                     reader.GetInt64(2),
                     reader.GetString(3),
-                    reader.GetString(4)));
+                    reader.GetString(4))
+                {
+                    CreatedAt = ParseTimestamp(reader.GetString(5))
+                });
             }
 
             foreach (var entry in entries)
@@ -389,6 +396,9 @@ public sealed class SqliteEventOutbox : IEventOutbox, IDisposable
 
     private static string FormatTimestamp(DateTimeOffset value) =>
         value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+
+    private static DateTimeOffset ParseTimestamp(string value) =>
+        DateTimeOffset.Parse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
 
     private bool HasReplayCapacity(int payloadBytes, long reserveBytes = 0) =>
         _replayDirectory is null

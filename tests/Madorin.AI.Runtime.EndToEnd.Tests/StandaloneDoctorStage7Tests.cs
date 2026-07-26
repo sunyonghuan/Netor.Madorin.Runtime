@@ -31,6 +31,7 @@ public sealed class StandaloneDoctorStage7Tests
         "memory",
         "workspace",
         "data",
+        "skills",
         "provider",
         "transport",
         "logs",
@@ -85,6 +86,18 @@ public sealed class StandaloneDoctorStage7Tests
             Assert.Contains("catalog-model-b", providerDetail, StringComparison.Ordinal);
             Assert.Contains("catalog-model-c", providerDetail, StringComparison.Ordinal);
             Assert.DoesNotContain("catalog-model-d", providerDetail, StringComparison.Ordinal);
+            var skillsCheck = Assert.ContainsSingle(checks.Where(static check =>
+                check.GetProperty("name").GetString() == "skills"));
+            var skillsDetail = skillsCheck.GetProperty("detail").GetString();
+            Assert.IsNotNull(skillsDetail);
+            Assert.Contains("Catalog ", skillsDetail, StringComparison.Ordinal);
+            Assert.Contains("script execution enabled (approval required)", skillsDetail, StringComparison.Ordinal);
+            Assert.Contains("1:workspace=", skillsDetail, StringComparison.Ordinal);
+            Assert.Contains("2:user-global=", skillsDetail, StringComparison.Ordinal);
+            foreach (var extension in new[] { ".ps1", ".sh", ".py", ".js", ".cs", ".csx" })
+            {
+                Assert.Contains($"{extension}=", skillsDetail, StringComparison.Ordinal);
+            }
         }
         finally
         {

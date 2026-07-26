@@ -5,6 +5,7 @@ using Madorin.AI.Runtime.Tools.Abstractions;
 
 namespace Madorin.AI.Runtime.Providers.Abstractions;
 
+#pragma warning disable CA1068 // CancellationToken remains last for source compatibility; Skills is an ignored context value.
 public sealed record RuntimeProviderRequest(
     string InvocationId,
     string AgentId,
@@ -19,7 +20,8 @@ public sealed record RuntimeProviderRequest(
     int AttemptNumber = 0,
     bool IsIdempotent = true,
     bool HasIrreversibleToolSideEffects = false,
-    [property: JsonIgnore] CancellationToken CancellationToken = default)
+    [property: JsonIgnore] CancellationToken CancellationToken = default,
+    [property: JsonIgnore] SkillsInvocationContext? Skills = null)
 {
     public RuntimeProviderRequest CreateAttempt(int attemptNumber)
     {
@@ -38,6 +40,7 @@ public sealed record RuntimeProviderRequest(
         };
     }
 }
+#pragma warning restore CA1068
 
 /// <summary>Describes a provider-independent JSON response schema.</summary>
 public sealed record RuntimeStructuredOutput(

@@ -1,4 +1,8 @@
 using System.Runtime.CompilerServices;
+using System.Buffers;
+using System.Collections.Concurrent;
+using System.Text.Json;
+using System.Text;
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Entities;
 using Madorin.AI.Runtime.Modes.Expert;
@@ -10,6 +14,7 @@ using Madorin.AI.Runtime.Persistence.Sqlite;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Services;
 using Madorin.AI.Runtime.Services.Memory;
+using Madorin.AI.Runtime.Services.Skills;
 using Madorin.AI.Runtime.Services.Tools;
 using Madorin.AI.Runtime.Tools.Abstractions;
 using Madorin.AI.Runtime.Tools.Builtin;
@@ -61,6 +66,7 @@ internal sealed class RuntimeExecutionCore(
         ConversationRecordV1? resumedCanonicalMessage = null,
         RuntimeError? resumedMeetingFailure = null,
         IToolConsentHandler? localToolConsentHandler = null,
+        SkillCatalogService? skillCatalog = null,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
@@ -75,6 +81,22 @@ internal sealed class RuntimeExecutionCore(
                 "A Runtime execution cannot use both a control peer and a local tool consent handler.",
                 nameof(localToolConsentHandler));
         }
+
+        var gatewayCatalogSnapshot = skillCatalog is null
+            ? toolCatalogSnapshot
+            : toolCatalogSnapshot.WithInternalTools([SkillScriptToolDefinition.Descriptor]);
+        var skillCatalogSnapshots = new ConcurrentDictionary<string, SkillCatalogSnapshot>(
+            StringComparer.Ordinal);
+        Func<CancellationToken, Task<SkillCatalogSnapshot?>>? skillCatalogSnapshotProvider =
+            skillCatalog is null
+                ? null
+                : async token =>
+                {
+                    var snapshot = await skillCatalog.GetSnapshotForInvocationAsync(token)
+                        .ConfigureAwait(false);
+                    skillCatalogSnapshots.TryAdd(snapshot.Version, snapshot);
+                    return snapshot;
+                };
 
         await using var repositoryConnection = await OpenDatabaseConnectionAsync(ct)
             .ConfigureAwait(false);
@@ -110,6 +132,15 @@ internal sealed class RuntimeExecutionCore(
             new BuiltinHttpToolExecutor(),
             new BuiltinMemoryToolExecutor(_memoryFiles, _memorySnapshots)
         };
+        if (skillCatalog is not null)
+        {
+            executors.Add(new AgentFileSkillScriptToolExecutor(
+                _workspaceRoot,
+                runId,
+                version => skillCatalogSnapshots.TryGetValue(version, out var snapshot)
+                    ? snapshot
+                    : null));
+        }
         if (reverseExecutor is not null)
         {
             executors.Add(reverseExecutor);
@@ -129,17 +160,28 @@ internal sealed class RuntimeExecutionCore(
             repository,
             toolStateStore,
             toolGateway,
-            toolCatalogSnapshot,
+            gatewayCatalogSnapshot,
             workRepo);
         await recoveryService.RecoverSentToolIntentsAsync(ct).ConfigureAwait(false);
         var toolConsentCoordinator = new ToolConsentCoordinator(
             toolGateway,
             authorizationService,
-            toolCatalogSnapshot,
+            gatewayCatalogSnapshot,
             consentHandler,
             localToolConsentHandler is null ? null : new BuiltinToolConsentScopeResolver(),
             _workspaceRoot,
             toolStateStore);
+
+        Func<RuntimeSkillScriptInvocation, CancellationToken, Task<RuntimeSkillScriptResult>>? scriptInvoker =
+            skillCatalog is null
+                ? null
+                : (script, token) => RunSkillScriptThroughGatewayAsync(
+                    script,
+                    skillCatalogSnapshots,
+                    gatewayCatalogSnapshot,
+                    toolGateway,
+                    toolConsentCoordinator,
+                    token);
         if (resumedMeetingHitlResponse is null && resumedMeetingInvocation is null)
         {
             await repository.TransitionRunStatusAsync(
@@ -165,14 +207,16 @@ internal sealed class RuntimeExecutionCore(
                 credentialRefreshHandler,
                 toolGateway,
                 authorizationService,
-                toolCatalogSnapshot,
+                gatewayCatalogSnapshot,
                 _memorySnapshots,
                 _runtimeLimits,
                 reverseExecutor is null ? null : reverseExecutor.RequestPermissionAsync,
                 reverseExecutor is null ? null : reverseExecutor.RequestApprovalAsync,
                 toolStateStore,
                 isRunTimedOut,
-                toolConsentCoordinator),
+                toolConsentCoordinator,
+                skillCatalogSnapshotProvider,
+                scriptInvoker),
 
             RuntimeMode.Meeting => new MeetingModeOrchestrator(
                 providerFactory: requestedProviderId =>
@@ -203,13 +247,15 @@ internal sealed class RuntimeExecutionCore(
                 startRunSequence: meetingStartRunSequence,
                 hitlHandler: meetingHitlHandler,
                 toolGateway: toolGateway,
-                toolCatalogSnapshot: toolCatalogSnapshot,
+                toolCatalogSnapshot: gatewayCatalogSnapshot,
+                skillCatalogSnapshotProvider: skillCatalogSnapshotProvider,
                 runtimeLimits: _runtimeLimits,
                 toolConsentCoordinator: toolConsentCoordinator,
                 resumedHitlResponse: resumedMeetingHitlResponse,
                 resumedInvocation: resumedMeetingInvocation,
                 resumedCanonicalMessage: resumedCanonicalMessage,
-                resumedFailure: resumedMeetingFailure),
+                resumedFailure: resumedMeetingFailure,
+                scriptInvoker: scriptInvoker),
             RuntimeMode.Work => new WorkModeOrchestrator(
                 providerFactory: requestedProviderId =>
                 {
@@ -238,12 +284,14 @@ internal sealed class RuntimeExecutionCore(
                 startRunSequence: 1,
                 toolStateStore: toolStateStore,
                 toolGateway: toolGateway,
-                toolCatalogSnapshot: toolCatalogSnapshot,
+                toolCatalogSnapshot: gatewayCatalogSnapshot,
+                skillCatalogSnapshotProvider: skillCatalogSnapshotProvider,
                 runtimeLimits: _runtimeLimits,
                 toolConsentCoordinator: toolConsentCoordinator,
                 workRepo: workRepo,
                 connection: repositoryConnection,
-                credentialRefreshHandler: credentialRefreshHandler),
+                credentialRefreshHandler: credentialRefreshHandler,
+                scriptInvoker: scriptInvoker),
 
             _ => throw new NotSupportedException(
                 $"Runtime mode '{request.Mode}' is not supported.")
@@ -275,5 +323,122 @@ internal sealed class RuntimeExecutionCore(
             await connection.DisposeAsync().ConfigureAwait(false);
             throw;
         }
+    }
+
+    private static async Task<RuntimeSkillScriptResult> RunSkillScriptThroughGatewayAsync(
+        RuntimeSkillScriptInvocation request,
+        ConcurrentDictionary<string, SkillCatalogSnapshot> skillCatalogSnapshots,
+        ToolCatalogSnapshot gatewayCatalogSnapshot,
+        ToolGateway toolGateway,
+        ToolConsentCoordinator toolConsentCoordinator,
+        CancellationToken ct)
+    {
+        if (!skillCatalogSnapshots.TryGetValue(request.CatalogVersion, out var skillCatalogSnapshot))
+        {
+            return new RuntimeSkillScriptResult(
+                false,
+                "{}",
+                "The Skill catalog was not captured by this Invocation.");
+        }
+
+        if (!skillCatalogSnapshot.TryGetSkill(request.SkillName, out var skill) || skill is null)
+        {
+            return new RuntimeSkillScriptResult(false, "{}", $"Skill '{request.SkillName}' was not found.");
+        }
+
+        var relativeScript = request.Script.Replace('/', Path.DirectorySeparatorChar);
+        var scriptPath = Path.GetFullPath(Path.Combine(skill.MaterializedPath, relativeScript));
+        var materializedRoot = Path.GetFullPath(skill.MaterializedPath)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            + Path.DirectorySeparatorChar;
+        if (!scriptPath.StartsWith(materializedRoot, StringComparisonForPath())
+            || !skill.Scripts.Contains(request.Script, StringComparer.OrdinalIgnoreCase)
+            || !File.Exists(scriptPath))
+        {
+            return new RuntimeSkillScriptResult(false, "{}", "The requested script is outside the fixed Skill snapshot.");
+        }
+
+        string interpreter;
+        try
+        {
+            interpreter = await AgentFileSkillScriptRunner.ResolveInterpreterNameAsync(
+                Path.GetExtension(scriptPath),
+                ct).ConfigureAwait(false);
+        }
+        catch (SkillScriptException ex)
+        {
+            return new RuntimeSkillScriptResult(false, "{}", ex.Message);
+        }
+
+        var scriptHash = SkillScriptAuthorization.ComputeScriptHash(scriptPath);
+        var argumentsJson = CreateSkillScriptArgumentsJson(request, scriptHash, interpreter);
+        var invocation = new ToolInvocation(
+            Guid.NewGuid().ToString("N"),
+            SkillScriptAuthorization.ToolId,
+            request.AgentId,
+            request.ParentAgentId,
+            argumentsJson,
+            request.RunId,
+            request.SessionId,
+            request.InvocationId,
+            ToolCatalogVersion: gatewayCatalogSnapshot.EffectiveVersion,
+            ParentInvocationId: request.ParentInvocationId,
+            WorkStepId: request.WorkStepId,
+            PlanVersion: request.PlanVersion);
+
+        var result = await toolGateway.ExecuteAsync(
+            invocation,
+            permission: null,
+            gatewayCatalogSnapshot,
+            ct).ConfigureAwait(false);
+        if (result.Kind is ToolGatewayResultKind.NeedsPermission or ToolGatewayResultKind.NeedsApproval)
+        {
+            result = await toolConsentCoordinator.ResolveAndExecuteAsync(invocation, result, ct)
+                .ConfigureAwait(false);
+        }
+
+        if (result.Result is { } toolResult)
+        {
+            return toolResult.Success
+                ? new RuntimeSkillScriptResult(true, toolResult.OutputJson ?? "{}")
+                : new RuntimeSkillScriptResult(false, toolResult.OutputJson ?? "{}", toolResult.Error);
+        }
+
+        return new RuntimeSkillScriptResult(
+            false,
+            "{}",
+            result.Error?.Message ?? "Skill script execution did not produce a result.");
+
+        static StringComparison StringComparisonForPath() =>
+            OperatingSystem.IsWindows()
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal;
+    }
+
+    private static string CreateSkillScriptArgumentsJson(
+        RuntimeSkillScriptInvocation request,
+        string scriptHash,
+        string interpreter)
+    {
+        var buffer = new ArrayBufferWriter<byte>();
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("skillName", request.SkillName);
+            writer.WriteString("script", request.Script);
+            writer.WriteString("scriptHash", scriptHash);
+            writer.WriteString("interpreter", interpreter);
+            writer.WriteString("catalogVersion", request.CatalogVersion);
+            writer.WriteStartArray("arguments");
+            foreach (var argument in request.Arguments)
+            {
+                writer.WriteStringValue(argument);
+            }
+
+            writer.WriteEndArray();
+            writer.WriteEndObject();
+        }
+
+        return Encoding.UTF8.GetString(buffer.WrittenSpan);
     }
 }

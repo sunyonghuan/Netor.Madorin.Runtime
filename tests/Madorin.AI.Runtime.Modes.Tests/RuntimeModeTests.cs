@@ -8,6 +8,7 @@ using Madorin.AI.Runtime.Persistence.Files;
 using Madorin.AI.Runtime.Persistence.Sqlite;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Services.Memory;
+using Madorin.AI.Runtime.Services.Skills;
 
 namespace Madorin.AI.Runtime.Modes.Tests;
 
@@ -15,6 +16,7 @@ namespace Madorin.AI.Runtime.Modes.Tests;
 public sealed class RuntimeModeTests
 {
     private static readonly string[] ExpectedModes = ["Expert", "Meeting", "Work"];
+    private static readonly string[] ExpectedExpertSkillNames = ["expert-skill"];
 
     public TestContext TestContext { get; set; } = null!;
 
@@ -71,12 +73,32 @@ public sealed class RuntimeModeTests
                 MemoryScope.Project,
                 "# Memory\n\n- Project rule.\n",
                 TestContext.CancellationToken);
+            var skillDirectory = Path.Combine(
+                dataDirectory,
+                "skills-workspace",
+                ".madorin",
+                "skills",
+                "expert-skill");
+            Directory.CreateDirectory(skillDirectory);
+            var skillFile = Path.Combine(skillDirectory, "SKILL.md");
+            await File.WriteAllTextAsync(
+                skillFile,
+                "---\nname: expert-skill\ndescription: Expert Skill\n---\nversion one\n",
+                TestContext.CancellationToken);
+            await using var skillCatalog = new SkillCatalogService(
+                Path.Combine(dataDirectory, "skills-workspace"),
+                Path.Combine(dataDirectory, "skills-data"),
+                "expert-runtime",
+                sourceScope: SkillCatalogSourceScope.Workspace);
+            await skillCatalog.InitializeAsync(TestContext.CancellationToken);
             var orchestrator = new ExpertModeOrchestrator(
                 provider,
                 store,
                 repository,
                 outbox,
-                new AgentContextComposer(memoryFiles));
+                new AgentContextComposer(memoryFiles),
+                skillCatalogSnapshotProvider: async token =>
+                    await skillCatalog.GetSnapshotForInvocationAsync(token));
             var request = CreateExpertRequest("What is the answer?");
             var events = new List<RuntimeEventEnvelope>();
 
@@ -149,6 +171,17 @@ public sealed class RuntimeModeTests
                     MemoryScope.Project,
                     TestContext.CancellationToken),
                 invocationStarted.Snapshot.ProjectMemoryHash);
+            Assert.IsNotNull(provider.CapturedRequest.Skills);
+            var firstSkillCatalogVersion = provider.CapturedRequest.Skills.CatalogVersion;
+            Assert.AreEqual(firstSkillCatalogVersion, invocationStarted.Snapshot.SkillCatalogVersion);
+            CollectionAssert.AreEqual(
+                ExpectedExpertSkillNames,
+                provider.CapturedRequest.Skills.SkillNames);
+            await File.WriteAllTextAsync(
+                skillFile,
+                "---\nname: expert-skill\ndescription: Expert Skill\n---\nversion two\n",
+                TestContext.CancellationToken);
+            await skillCatalog.RefreshAsync(TestContext.CancellationToken);
 
             var secondRunId = await repository.CreateRunAsync(
                 sessionId,
@@ -175,6 +208,8 @@ public sealed class RuntimeModeTests
             }
 
             Assert.IsNotNull(provider.CapturedRequest);
+            Assert.IsNotNull(provider.CapturedRequest.Skills);
+            Assert.AreNotEqual(firstSkillCatalogVersion, provider.CapturedRequest.Skills.CatalogVersion);
             CollectionAssert.AreEqual(
                 new[]
                 {

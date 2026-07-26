@@ -101,6 +101,7 @@ public sealed class DeepSeekProviderAdapter : IRuntimeProviderAdapter, IDisposab
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        ProviderCapabilityValidator.ValidateSkillsSupport(Capabilities, request.Skills, ct);
 
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
             ct,
@@ -122,7 +123,12 @@ public sealed class DeepSeekProviderAdapter : IRuntimeProviderAdapter, IDisposab
         string finishReason = "stop";
         RuntimeError? failure = null;
 
-        await foreach (var update in chatClient.GetStreamingResponseAsync(messages, options, effectiveCt)
+        await foreach (var update in MafSkillsAgentFactory.CreateResponseStream(
+                               chatClient,
+                               request,
+                               messages,
+                               options,
+                               effectiveCt)
                            .ConfigureAwait(false))
         {
             if (update.FinishReason is { } reason)

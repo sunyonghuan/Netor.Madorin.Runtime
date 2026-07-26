@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics.Metrics;
+using System.Globalization;
 using Madorin.AI.Runtime.Persistence.Sqlite;
 using Microsoft.Data.Sqlite;
 
@@ -137,6 +138,34 @@ public sealed class SqliteOutboxTests
         Assert.HasCount(2, entries);
         Assert.AreEqual(firstGsn, entries[0].Gsn);
         Assert.AreEqual(firstGsn + 1, entries[1].Gsn);
+    }
+
+    [TestMethod]
+    public async Task LoadPendingAsync_PreservesPersistedCreatedAt()
+    {
+        await using var connection = await CreateDatabaseAsync(TestContext.CancellationToken);
+        using var outbox = new SqliteEventOutbox(connection);
+        var gsn = await outbox.AppendAsync(
+            "run-created-at",
+            0,
+            "run.completed",
+            "{}",
+            TestContext.CancellationToken);
+        var expected = "2026-07-26T00:00:00.1234567+00:00";
+        await using (var update = connection.CreateCommand())
+        {
+            update.CommandText = "UPDATE event_outbox SET created_at = $createdAt WHERE gsn = $gsn;";
+            update.Parameters.AddWithValue("$createdAt", expected);
+            update.Parameters.AddWithValue("$gsn", gsn);
+            await update.ExecuteNonQueryAsync(TestContext.CancellationToken);
+        }
+
+        var entries = await outbox.LoadPendingAsync(TestContext.CancellationToken);
+        var entry = Assert.ContainsSingle(entries);
+        Assert.AreEqual(gsn, entry.Gsn);
+        Assert.AreEqual(
+            DateTimeOffset.Parse(expected, CultureInfo.InvariantCulture),
+            entry.CreatedAt);
     }
 
     [TestMethod]

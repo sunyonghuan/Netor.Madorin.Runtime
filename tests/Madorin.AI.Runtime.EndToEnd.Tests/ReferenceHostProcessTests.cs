@@ -49,7 +49,7 @@ public sealed class ReferenceHostProcessTests
             .Descendants("ProjectReference")
             .Select(element => element.Attribute("Include")?.Value)
             .Where(static value => value is not null)
-            .Select(static value => Path.GetFileNameWithoutExtension(value!))
+            .Select(static value => Path.GetFileNameWithoutExtension(value!.Replace('\\', '/')))
             .Order(StringComparer.Ordinal)
             .ToArray();
 

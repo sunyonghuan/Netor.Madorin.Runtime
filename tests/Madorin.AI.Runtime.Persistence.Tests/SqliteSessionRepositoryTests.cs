@@ -341,6 +341,76 @@ public sealed class SqliteSessionRepositoryTests
     }
 
     [TestMethod]
+    public async Task TryCommitTerminalRunAsync_FailureBeforeTransaction_LeavesRunAndOutboxUnchanged()
+    {
+        await AssertTerminalCommitFailureLeavesNoPartialStateAsync(
+            SqliteSessionRepositoryFailurePoint.BeforeTerminalTransaction);
+    }
+
+    [TestMethod]
+    public async Task TryCommitTerminalRunAsync_FailureBeforeCommit_LeavesRunAndOutboxUnchanged()
+    {
+        await AssertTerminalCommitFailureLeavesNoPartialStateAsync(
+            SqliteSessionRepositoryFailurePoint.BeforeTerminalCommit);
+    }
+
+    private async Task AssertTerminalCommitFailureLeavesNoPartialStateAsync(
+        SqliteSessionRepositoryFailurePoint failurePoint)
+    {
+        await using var connection = await CreateDatabaseAsync(TestContext.CancellationToken);
+        var (setupRepository, runId) = await CreateRunAsync(
+            connection,
+            TestContext.CancellationToken);
+        await setupRepository.TransitionRunStatusAsync(
+            runId,
+            RunStatus.Accepted,
+            RunStatus.Preparing,
+            TestContext.CancellationToken);
+        await setupRepository.TransitionRunStatusAsync(
+            runId,
+            RunStatus.Preparing,
+            RunStatus.Running,
+            TestContext.CancellationToken);
+        await setupRepository.TransitionRunStatusAsync(
+            runId,
+            RunStatus.Running,
+            RunStatus.Persisting,
+            TestContext.CancellationToken);
+
+        var repository = new SqliteSessionRepository(
+            connection,
+            new SqliteSessionRepositoryOptions
+            {
+                FailureInjector = (point, _) => point == failurePoint
+                    ? ValueTask.FromException(new InvalidOperationException("injected terminal failure"))
+                    : ValueTask.CompletedTask
+            });
+        var payload = "{\"runId\":\"" + runId + "\",\"sessionId\":\"session\"}";
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(
+            () => repository.TryCommitTerminalRunAsync(
+                runId,
+                RunStatus.Completed,
+                "answer",
+                null,
+                MessageTypes.RunCompleted,
+                payload,
+                TestContext.CancellationToken));
+
+        var snapshot = await setupRepository.GetRunSnapshotAsync(
+            runId,
+            TestContext.CancellationToken);
+        Assert.IsNotNull(snapshot);
+        Assert.AreEqual(RunStatus.Persisting, snapshot.Status);
+        Assert.IsNull(snapshot.TerminalText);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM event_outbox WHERE run_id = $runId;";
+        command.Parameters.AddWithValue("$runId", runId);
+        Assert.AreEqual(0L, Convert.ToInt64(
+            await command.ExecuteScalarAsync(TestContext.CancellationToken),
+            CultureInfo.InvariantCulture));
+    }
+
+    [TestMethod]
     [DoNotParallelize]
     public async Task TransitionRunToTerminalAsync_WithConcurrentWriters_CommitsExactlyOneTerminalState()
     {

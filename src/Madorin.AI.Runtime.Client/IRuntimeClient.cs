@@ -7,6 +7,12 @@ public interface IRuntimeClient : IAsyncDisposable
     /// <summary>Gets the authenticated and initialized Runtime instance binding.</summary>
     public RuntimeInstanceBinding InstanceBinding { get; }
 
+    /// <summary>Gets the current Client lifecycle state.</summary>
+    public RuntimeClientState State { get; }
+
+    /// <summary>Completes when the Client closes or observes its first fatal connection failure.</summary>
+    public Task Completion { get; }
+
     public ValueTask ConnectAsync(CancellationToken cancellationToken = default);
 
     public ValueTask<string> StartNewSessionRunAsync(
@@ -39,6 +45,12 @@ public interface IRuntimeClient : IAsyncDisposable
         CancellationToken cancellationToken = default);
 
     public ValueTask<RuntimeStatusResult> GetRuntimeStatusAsync(
+        CancellationToken cancellationToken = default);
+
+    public ValueTask<SkillCatalogSummary> GetSkillCatalogAsync(
+        CancellationToken cancellationToken = default);
+
+    public ValueTask<SkillCatalogSummary> RefreshSkillCatalogAsync(
         CancellationToken cancellationToken = default);
 
     public ValueTask<RunListResult> ListRunsAsync(

@@ -30,6 +30,7 @@ internal static class MultiInstanceHost
             new(configuration.Runtimes[1])
         ];
         private readonly RuntimeClient?[] _clients = new RuntimeClient?[2];
+        private readonly Task?[] _completionMonitors = new Task?[2];
         private int _disposed;
 
         public int GetProcessId(int index) => _processes[index].ProcessId;
@@ -44,6 +45,7 @@ internal static class MultiInstanceHost
             for (var index = 0; index < _processes.Length; index++)
             {
                 _clients[index] = await ConnectWithRetryAsync(index).ConfigureAwait(false);
+                StartCompletionMonitor(index, _clients[index]!);
             }
         }
 
@@ -83,6 +85,30 @@ internal static class MultiInstanceHost
             }
 
             _clients[index] = await ConnectWithRetryAsync(index).ConfigureAwait(false);
+            StartCompletionMonitor(index, _clients[index]!);
+        }
+
+        private void StartCompletionMonitor(int index, RuntimeClient client)
+        {
+            _completionMonitors[index] = ObserveCompletionAsync(index, client);
+        }
+
+        private async Task ObserveCompletionAsync(int index, RuntimeClient client)
+        {
+            try
+            {
+                await client.Completion.ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                if (Volatile.Read(ref _disposed) == 0
+                    && ReferenceEquals(Volatile.Read(ref _clients[index]), client))
+                {
+                    Console.WriteLine(
+                        $"WAITING|{index}|{client.State}|{ex.GetType().Name}|{ex.Message}");
+                    Console.Out.Flush();
+                }
+            }
         }
 
         private async Task<RuntimeClient> ConnectWithRetryAsync(int index)
@@ -137,6 +163,14 @@ internal static class MultiInstanceHost
                 if (client is not null)
                 {
                     await client.DisposeAsync().ConfigureAwait(false);
+                }
+            }
+
+            foreach (var monitor in _completionMonitors)
+            {
+                if (monitor is not null)
+                {
+                    await monitor.ConfigureAwait(false);
                 }
             }
 

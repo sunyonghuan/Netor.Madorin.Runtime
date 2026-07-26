@@ -42,6 +42,34 @@ public interface ISessionRepository
         string runId,
         CancellationToken ct = default);
 
+    /// <summary>Updates a persisted Run progress snapshot without writing text deltas.</summary>
+    public Task UpdateRunProgressAsync(
+        string runId,
+        RunStatus status,
+        string? phase,
+        string? currentStep,
+        long? completedUnits,
+        long? totalUnits,
+        long? lastRunSequence,
+        string? errorJson,
+        CancellationToken ct = default);
+
+    /// <summary>Atomically commits a terminal Run snapshot and its Outbox event.</summary>
+    public Task<long?> TryCommitTerminalRunAsync(
+        string runId,
+        RunStatus terminalStatus,
+        string? terminalText,
+        string? errorJson,
+        string messageType,
+        string payloadJson,
+        CancellationToken ct = default);
+
+    /// <summary>Lists persisted Runs, optionally restricted to non-terminal states.</summary>
+    public Task<IReadOnlyList<RunSnapshot>> ListRunSnapshotsAsync(
+        string? sessionId = null,
+        bool nonTerminalOnly = false,
+        CancellationToken ct = default);
+
     /// <summary>Marks all non-terminal Runs as interrupted during startup recovery.</summary>
     public Task MarkInterruptedAsync(CancellationToken ct = default);
 

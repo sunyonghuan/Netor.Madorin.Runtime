@@ -1,4 +1,5 @@
 using System.CommandLine;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -68,7 +69,7 @@ internal static class ServiceCommands
             ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
             {
                 eventArgs.Cancel = true;
-                shutdown.Cancel();
+                CancelNoThrow(shutdown);
             };
             Console.CancelKeyPress += cancelHandler;
             using var terminateRegistration = OperatingSystem.IsWindows()
@@ -76,7 +77,7 @@ internal static class ServiceCommands
                 : PosixSignalRegistration.Create(PosixSignal.SIGTERM, context =>
                 {
                     context.Cancel = true;
-                    shutdown.Cancel();
+                    CancelNoThrow(shutdown);
                 });
 
             string handshakeSecret;
@@ -1339,6 +1340,11 @@ internal static class ServiceCommands
 
                     return Current();
 
+                case "/SKILL":
+                    await HandleSkillReplCommandAsync(runtime, output, error, argument, ct)
+                        .ConfigureAwait(false);
+                    return Current();
+
                 case "/HELP":
                     if (!ReplHelpWriter.Write(terminal, argument))
                     {
@@ -1373,6 +1379,89 @@ internal static class ServiceCommands
             await error.WriteLineAsync($"REPL command failed: {RedactSecrets(ex.Message, config)}")
                 .ConfigureAwait(false);
             return Current();
+        }
+    }
+
+    private static async Task HandleSkillReplCommandAsync(
+        LocalRuntime runtime,
+        TextWriter output,
+        TextWriter error,
+        string? argument,
+        CancellationToken ct)
+    {
+        if (argument is null)
+        {
+            await error.WriteLineAsync("Usage: /skill <list|show <name>|refresh>")
+                .ConfigureAwait(false);
+            return;
+        }
+
+        var separator = argument.IndexOf(' ');
+        var subcommand = separator < 0 ? argument : argument[..separator];
+        var value = separator < 0 ? null : argument[(separator + 1)..].Trim();
+        if (value is { Length: 0 })
+        {
+            value = null;
+        }
+
+        switch (subcommand.ToUpperInvariant())
+        {
+            case "LIST" when value is null:
+                var summary = runtime.GetSkillCatalogSummary();
+                await output.WriteLineAsync(
+                        $"Catalog {summary.CatalogVersion}: {summary.SkillCount} Skill(s).")
+                    .ConfigureAwait(false);
+                foreach (var catalogSkill in summary.Skills)
+                {
+                    await output.WriteLineAsync(
+                            $"{catalogSkill.Name}\t{catalogSkill.SourceId}\t{catalogSkill.Description}")
+                        .ConfigureAwait(false);
+                }
+
+                return;
+
+            case "SHOW" when value is not null:
+                var catalog = runtime.GetSkillCatalogSummary();
+                var skill = catalog.Skills.FirstOrDefault(candidate =>
+                    candidate.Name.Equals(value, StringComparison.OrdinalIgnoreCase));
+                if (skill is null)
+                {
+                    await error.WriteLineAsync($"Skill '{value}' was not found.")
+                        .ConfigureAwait(false);
+                    return;
+                }
+
+                var source = catalog.Sources.FirstOrDefault(candidate =>
+                    candidate.SourceId.Equals(skill.SourceId, StringComparison.Ordinal));
+                await output.WriteLineAsync($"Name: {skill.Name}").ConfigureAwait(false);
+                await output.WriteLineAsync($"Description: {skill.Description}").ConfigureAwait(false);
+                await output.WriteLineAsync(
+                        $"Source: {skill.SourceId} ({source?.Location ?? "unknown"})")
+                    .ConfigureAwait(false);
+                await output.WriteLineAsync($"Catalog: {catalog.CatalogVersion}").ConfigureAwait(false);
+                await output.WriteLineAsync($"Content hash: {skill.ContentHash}").ConfigureAwait(false);
+                await output.WriteLineAsync(
+                        $"Resources: {(skill.Resources.Length == 0 ? "none" : string.Join(", ", skill.Resources))}")
+                    .ConfigureAwait(false);
+                await output.WriteLineAsync(
+                        $"Scripts: {(skill.Scripts.Length == 0 ? "none" : string.Join(", ", skill.Scripts))}")
+                    .ConfigureAwait(false);
+                await output.WriteLineAsync("Definition:").ConfigureAwait(false);
+                await output.WriteLineAsync(await runtime.LoadSkillAsync(skill.Name, ct).ConfigureAwait(false))
+                    .ConfigureAwait(false);
+                return;
+
+            case "REFRESH" when value is null:
+                var refreshed = await runtime.RefreshSkillCatalogAsync(ct).ConfigureAwait(false);
+                await output.WriteLineAsync(
+                        $"Catalog {refreshed.CatalogVersion}: {refreshed.SkillCount} Skill(s).")
+                    .ConfigureAwait(false);
+                return;
+
+            default:
+                await error.WriteLineAsync("Usage: /skill <list|show <name>|refresh>")
+                    .ConfigureAwait(false);
+                return;
         }
     }
 
@@ -1866,5 +1955,23 @@ internal static class ServiceCommands
             writer.WriteString("message", message);
             writer.WriteEndObject();
         });
+    }
+
+    private static void CancelNoThrow(CancellationTokenSource cancellation)
+    {
+        try
+        {
+            cancellation.Cancel(throwOnFirstException: false);
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        catch (AggregateException exception)
+        {
+            Trace.TraceWarning(
+                "Shutdown cancellation callback failure type={0} diagnosticId={1}",
+                exception.GetType().FullName,
+                $"diag_cancel_{Guid.NewGuid():N}");
+        }
     }
 }

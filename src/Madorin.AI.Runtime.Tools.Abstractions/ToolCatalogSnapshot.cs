@@ -6,6 +6,7 @@ namespace Madorin.AI.Runtime.Tools.Abstractions;
 public sealed class ToolCatalogSnapshot
 {
     private readonly FrozenDictionary<string, ToolDescriptor> _tools;
+    private readonly IReadOnlyList<ToolDescriptor> _allTools;
     private readonly IReadOnlyList<ToolDescriptor> _orderedTools;
 
     public ToolCatalogSnapshot(
@@ -20,7 +21,10 @@ public sealed class ToolCatalogSnapshot
             .OrderBy(static tool => tool.ToolId, StringComparer.Ordinal)
             .ToArray();
         _tools = copies.ToFrozenDictionary(static tool => tool.ToolId, StringComparer.Ordinal);
-        _orderedTools = Array.AsReadOnly(copies);
+        _allTools = Array.AsReadOnly(copies);
+        _orderedTools = Array.AsReadOnly(copies
+            .Where(static tool => tool.Tags?.Contains("internal", StringComparer.Ordinal) != true)
+            .ToArray());
     }
 
     /// <summary>Gets the version assigned by the host to its catalog partition.</summary>
@@ -31,6 +35,19 @@ public sealed class ToolCatalogSnapshot
 
     /// <summary>Gets all tools in ordinal tool-id order.</summary>
     public IReadOnlyList<ToolDescriptor> Tools => _orderedTools;
+
+    /// <summary>Gets all descriptors, including Runtime-internal descriptors used only by the Gateway.</summary>
+    public IReadOnlyList<ToolDescriptor> AllTools => _allTools;
+
+    /// <summary>Creates a fixed snapshot with additional internal descriptors hidden from Providers.</summary>
+    public ToolCatalogSnapshot WithInternalTools(IEnumerable<ToolDescriptor> descriptors)
+    {
+        ArgumentNullException.ThrowIfNull(descriptors);
+        return new ToolCatalogSnapshot(
+            HostCatalogVersion,
+            EffectiveVersion,
+            _allTools.Concat(descriptors));
+    }
 
     /// <summary>Looks up a tool within this fixed snapshot.</summary>
     public bool TryGetTool(string toolId, out ToolDescriptor? descriptor) =>

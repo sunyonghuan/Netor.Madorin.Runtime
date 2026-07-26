@@ -2,14 +2,19 @@ using System.CommandLine;
 using System.Globalization;
 using System.Text.Json;
 using Madorin.AI.Runtime.Cli.Config;
+using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Server;
 using Madorin.AI.Runtime.Services.Memory;
+using Madorin.AI.Runtime.Services.Skills;
 
 namespace Madorin.AI.Runtime.Cli.Commands;
 
 internal static class DoctorCommand
 {
+    private static readonly string[] SkillScriptExtensions =
+        [".ps1", ".sh", ".py", ".js", ".cs", ".csx"];
+
     public static Command Create(
         Option<bool> jsonOption,
         Option<string?> workspaceOption,
@@ -96,7 +101,7 @@ internal static class DoctorCommand
         }
 
         var loader = new StandaloneConfigLoader(context.ConfigDirectory);
-        var checks = new List<DoctorCheck>(11)
+        var checks = new List<DoctorCheck>(12)
         {
             CheckRuntime()
         };
@@ -120,6 +125,10 @@ internal static class DoctorCommand
         var databaseInspection = await CheckDatabaseAsync(context.DataDirectory)
             .ConfigureAwait(false);
         checks.Add(databaseInspection.Check);
+        checks.Add(await CheckSkillsAsync(
+                context.WorkspaceRoot,
+                context.DataDirectory)
+            .ConfigureAwait(false));
         checks.Add(await CheckProviderAsync(
                 providerId,
                 configInspection,
@@ -244,6 +253,70 @@ internal static class DoctorCommand
                 >= 10 => "supported",
                 _ => "requires .NET 10 or later"
             }})");
+    }
+
+    private static async Task<DoctorCheck> CheckSkillsAsync(
+        string workspaceRoot,
+        string dataDirectory)
+    {
+        try
+        {
+            await using var catalog = new SkillCatalogService(
+                workspaceRoot,
+                dataDirectory,
+                $"doctor-{Guid.NewGuid():N}");
+            var snapshot = await catalog.InitializeAsync().ConfigureAwait(false);
+            var interpreterTasks = SkillScriptExtensions.Select(async extension =>
+            {
+                try
+                {
+                    var interpreter = await AgentFileSkillScriptRunner
+                        .ResolveInterpreterNameAsync(extension)
+                        .ConfigureAwait(false);
+                    return $"{extension}={interpreter}";
+                }
+                catch (SkillScriptException ex)
+                    when (ex.Code == RuntimeErrorCodes.SkillScriptInterpreterUnavailable)
+                {
+                    return $"{extension}=unavailable";
+                }
+            });
+            var interpreters = await Task.WhenAll(interpreterTasks).ConfigureAwait(false);
+            var unavailable = interpreters.Any(static value =>
+                value.EndsWith("=unavailable", StringComparison.Ordinal));
+            var hasErrors = snapshot.Diagnostics.Any(static diagnostic =>
+                diagnostic.Severity.Equals("error", StringComparison.OrdinalIgnoreCase));
+            var hasWarnings = snapshot.Diagnostics.Any(static diagnostic =>
+                diagnostic.Severity.Equals("warning", StringComparison.OrdinalIgnoreCase));
+            var status = hasErrors
+                ? "error"
+                : unavailable || hasWarnings
+                    ? "warning"
+                    : "ok";
+            var sources = string.Join(
+                " -> ",
+                snapshot.Sources.Select((source, index) =>
+                    $"{index + 1}:{source.SourceId}={source.Location} "
+                    + $"[{source.Status}, {source.SkillCount} Skill(s)]"));
+            if (sources.Length == 0)
+            {
+                sources = "none";
+            }
+
+            return new DoctorCheck(
+                "skills",
+                status,
+                $"Catalog {snapshot.Version}; {snapshot.Skills.Length} Skill(s); "
+                + $"script execution enabled (approval required); sources {sources}; "
+                + $"interpreters {string.Join(", ", interpreters)}.");
+        }
+        catch (Exception ex) when (ex is SkillCatalogRefreshException
+            or IOException
+            or UnauthorizedAccessException
+            or InvalidDataException)
+        {
+            return new DoctorCheck("skills", "error", $"Skill catalog check failed: {ex.Message}");
+        }
     }
 
     private static async Task<ConfigInspection> CheckPersonalConfigAsync(

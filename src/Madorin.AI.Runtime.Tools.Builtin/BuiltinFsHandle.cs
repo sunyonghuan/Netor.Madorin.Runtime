@@ -101,12 +101,14 @@ internal static partial class BuiltinFsHandle
         bool isDirectory,
         bool allowDeleteSharing)
     {
-        var handle = File.OpenHandle(
-            path,
-            FileMode.Open,
-            FileAccess.Read,
-            allowDeleteSharing ? FileShare.Read | FileShare.Delete : FileShare.Read,
-            isDirectory ? FileOptions.None : FileOptions.Asynchronous | FileOptions.RandomAccess);
+        var handle = isDirectory
+            ? OpenUnixDirectory(path)
+            : File.OpenHandle(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                allowDeleteSharing ? FileShare.Read | FileShare.Delete : FileShare.Read,
+                FileOptions.Asynchronous | FileOptions.RandomAccess);
         try
         {
             var attributes = File.GetAttributes(path);
@@ -213,6 +215,26 @@ internal static partial class BuiltinFsHandle
             comparison);
     }
 
+    private static SafeFileHandle OpenUnixDirectory(string path)
+    {
+        var pathPointer = Marshal.StringToCoTaskMemUTF8(path);
+        try
+        {
+            var descriptor = OpenUnixPath(pathPointer, 0);
+            if (descriptor < 0)
+            {
+                var error = Marshal.GetLastPInvokeError();
+                throw new IOException($"The filesystem target could not be opened (errno {error}).", error);
+            }
+
+            return new SafeFileHandle((nint)descriptor, ownsHandle: true);
+        }
+        finally
+        {
+            Marshal.FreeCoTaskMem(pathPointer);
+        }
+    }
+
     [LibraryImport("kernel32.dll", EntryPoint = "CreateFileW", SetLastError = true,
         StringMarshalling = StringMarshalling.Utf16)]
     private static partial SafeFileHandle CreateFile(
@@ -240,6 +262,9 @@ internal static partial class BuiltinFsHandle
         char* filePath,
         uint filePathLength,
         uint flags);
+
+    [DllImport("libc", EntryPoint = "open", SetLastError = true)]
+    private static extern int OpenUnixPath(nint path, int flags);
 
     private enum FileInfoByHandleClass
     {

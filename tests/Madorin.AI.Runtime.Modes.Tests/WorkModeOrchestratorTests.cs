@@ -9,6 +9,7 @@ using Madorin.AI.Runtime.Persistence.Abstractions;
 using Madorin.AI.Runtime.Persistence.Sqlite;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Services.Memory;
+using Madorin.AI.Runtime.Services.Skills;
 using Microsoft.Data.Sqlite;
 
 namespace Madorin.AI.Runtime.Modes.Tests;
@@ -105,6 +106,24 @@ public sealed class WorkModeOrchestratorTests
         Assert.AreEqual(result.CanonicalHistory[1].MessageId, step.StepMessageId);
         Assert.IsNotNull(step.CheckpointJson);
         StringAssert.Contains(step.CheckpointJson, startedAgentIds[1].InvocationId);
+    }
+
+    [TestMethod]
+    public async Task RunAsync_CatalogRefreshBetweenManagerAndChild_CapturesPerInvocationVersions()
+    {
+        var result = await RunAsync(repetitionCount: 1, refreshSkillsBetweenInvocations: true);
+
+        Assert.HasCount(2, result.CapturedRequests);
+        Assert.IsTrue(result.CapturedRequests.All(static item => item.Skills is not null));
+        Assert.AreNotEqual(
+            result.CapturedRequests[0].Skills!.CatalogVersion,
+            result.CapturedRequests[1].Skills!.CatalogVersion);
+        foreach (var request in result.CapturedRequests)
+        {
+            Assert.IsTrue(result.InvocationSnapshots.TryGetValue(request.InvocationId, out var snapshot));
+            Assert.AreEqual(request.Skills!.CatalogVersion, snapshot.SkillCatalogVersion);
+            CollectionAssert.AreEqual(request.Skills.SkillNames, snapshot.SkillNames);
+        }
     }
 
     [TestMethod]
@@ -343,13 +362,15 @@ public sealed class WorkModeOrchestratorTests
         string? managerOutput = null,
         WorkContextPolicy? contextPolicy = null,
         bool requireWorkerCredentialRefresh = false,
-        bool credentialRefreshSucceeds = true)
+        bool credentialRefreshSucceeds = true,
+        bool refreshSkillsBetweenInvocations = false)
     {
         var ct = _testContext.CancellationToken;
         var dataDirectory = Path.Combine(
             _testContext.TestRunDirectory ?? Path.GetTempPath(),
             $"work-{Guid.NewGuid():N}");
         Directory.CreateDirectory(dataDirectory);
+        SkillCatalogService? skillCatalog = null;
 
         try
         {
@@ -380,6 +401,44 @@ public sealed class WorkModeOrchestratorTests
                 ct);
             var sessionRepo = new SqliteSessionRepository(connection);
             var workRepo = new SqliteWorkRepository(connection);
+            Func<CancellationToken, Task<SkillCatalogSnapshot?>>? captureSkills = null;
+            if (refreshSkillsBetweenInvocations)
+            {
+                var skillsWorkspace = Path.Combine(dataDirectory, "skills-workspace");
+                var skillDirectory = Path.Combine(
+                    skillsWorkspace,
+                    ".madorin",
+                    "skills",
+                    "work-skill");
+                Directory.CreateDirectory(skillDirectory);
+                var skillFile = Path.Combine(skillDirectory, "SKILL.md");
+                await File.WriteAllTextAsync(
+                    skillFile,
+                    "---\nname: work-skill\ndescription: Work Skill\n---\nversion one\n",
+                    ct);
+                var catalog = new SkillCatalogService(
+                    skillsWorkspace,
+                    Path.Combine(dataDirectory, "skills-data"),
+                    "work-runtime",
+                    sourceScope: SkillCatalogSourceScope.Workspace);
+                skillCatalog = catalog;
+                await catalog.InitializeAsync(ct);
+                var skillCaptureCount = 0;
+                captureSkills = async token =>
+                {
+                    if (Interlocked.Increment(ref skillCaptureCount) == 2)
+                    {
+                        await File.WriteAllTextAsync(
+                            skillFile,
+                            "---\nname: work-skill\ndescription: Work Skill\n---\nversion two\n",
+                            token);
+                        await catalog.RefreshAsync(token);
+                    }
+
+                    return await catalog.GetSnapshotForInvocationAsync(token);
+                };
+            }
+
             var workflowApprovalRequests = new List<ApprovalRequest>();
             var credentialRefreshRequests = new List<CredentialsRefreshRequestedEvent>();
             var credentialWaitStates = new List<WorkResumeState>();
@@ -423,7 +482,8 @@ public sealed class WorkModeOrchestratorTests
 
                         return credentialRefreshSucceeds;
                     }
-                    : null);
+                    : null,
+                skillCatalogSnapshotProvider: captureSkills);
             var request = CreateRequest(
                 failurePolicy,
                 maxRetriesPerStep,
@@ -498,6 +558,11 @@ public sealed class WorkModeOrchestratorTests
         }
         finally
         {
+            if (skillCatalog is not null)
+            {
+                await skillCatalog.DisposeAsync();
+            }
+
             if (Directory.Exists(dataDirectory))
             {
                 Directory.Delete(dataDirectory, recursive: true);

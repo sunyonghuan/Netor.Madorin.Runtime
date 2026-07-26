@@ -5,7 +5,7 @@ namespace Madorin.AI.Runtime.Persistence.Sqlite;
 /// <summary>Creates and migrates the Runtime SQLite metadata schema.</summary>
 public static class SqliteSchema
 {
-    public const int CurrentVersion = 15;
+    public const int CurrentVersion = 16;
 
     private static readonly string[] RequiredTables =
     [
@@ -42,6 +42,7 @@ public static class SqliteSchema
         "idx_sessions_status",
         "idx_runs_session",
         "idx_runs_status",
+        "idx_runs_progress",
         "idx_outbox_gsn",
         "idx_outbox_status",
         "idx_message_index_session_sequence",
@@ -79,6 +80,12 @@ public static class SqliteSchema
         ("session_idempotency", "request_hash"),
         ("run_idempotency", "request_hash"),
         ("runs", "terminal_text"),
+        ("runs", "phase"),
+        ("runs", "current_step"),
+        ("runs", "completed_units"),
+        ("runs", "total_units"),
+        ("runs", "last_run_sequence"),
+        ("runs", "error_json"),
         ("tool_intents", "agent_id"),
         ("tool_intents", "parent_agent_id"),
         ("tool_intents", "catalog_version"),
@@ -95,6 +102,8 @@ public static class SqliteSchema
         ("tool_intents", "error_code"),
         ("tool_intents", "result_visible"),
         ("tool_grants", "approval_request_id"),
+        ("tool_grants", "allowed_skill_script_keys"),
+        ("tool_grants", "skill_catalog_version"),
         ("tool_approvals", "request_kind"),
         ("tool_audit", "session_id"),
         ("tool_audit", "invocation_id"),
@@ -188,8 +197,10 @@ public static class SqliteSchema
 
         await EnsureVersionEightBlobColumnsAsync(conn, ct).ConfigureAwait(false);
         await EnsureVersionEightGrantColumnsAsync(conn, ct).ConfigureAwait(false);
+        await EnsureSkillScriptGrantColumnsAsync(conn, ct).ConfigureAwait(false);
         await EnsureVersionEightAuditColumnsAsync(conn, ct).ConfigureAwait(false);
         await EnsureVersionTwelveAuditLineageColumnsAsync(conn, ct).ConfigureAwait(false);
+        await EnsureVersionFifteenApprovalColumnsAsync(conn, ct).ConfigureAwait(false);
 
         await ValidateAsync(conn, ct).ConfigureAwait(false);
     }
@@ -310,6 +321,9 @@ public static class SqliteSchema
                     break;
                 case 15:
                     await ApplyVersionFifteenAsync(conn, ct).ConfigureAwait(false);
+                    break;
+                case 16:
+                    await ApplyVersionSixteenAsync(conn, ct).ConfigureAwait(false);
                     break;
                 default:
                     throw new InvalidOperationException($"No migration is registered for schema version {version}.");
@@ -630,7 +644,9 @@ public static class SqliteSchema
                 created_at TEXT NOT NULL,
                 revoked_at TEXT,
                 revocation_reason TEXT,
-                approval_request_id TEXT
+                approval_request_id TEXT,
+                allowed_skill_script_keys TEXT NOT NULL DEFAULT '[]',
+                skill_catalog_version TEXT
             );
             CREATE TABLE tool_approvals(
                 approval_request_id TEXT PRIMARY KEY,
@@ -1024,6 +1040,65 @@ public static class SqliteSchema
         transaction.Commit();
     }
 
+    private static async Task ApplyVersionSixteenAsync(SqliteConnection conn, CancellationToken ct)
+    {
+        using var transaction = conn.BeginTransaction(deferred: false);
+
+        await AddColumnIfMissingAsync(conn, transaction, "runs", "phase", "TEXT", ct)
+            .ConfigureAwait(false);
+        await AddColumnIfMissingAsync(conn, transaction, "runs", "current_step", "TEXT", ct)
+            .ConfigureAwait(false);
+        await AddColumnIfMissingAsync(conn, transaction, "runs", "completed_units", "INTEGER", ct)
+            .ConfigureAwait(false);
+        await AddColumnIfMissingAsync(conn, transaction, "runs", "total_units", "INTEGER", ct)
+            .ConfigureAwait(false);
+        await AddColumnIfMissingAsync(
+                conn,
+                transaction,
+                "runs",
+                "last_run_sequence",
+                "INTEGER NOT NULL DEFAULT 0",
+                ct)
+            .ConfigureAwait(false);
+        await AddColumnIfMissingAsync(conn, transaction, "runs", "error_json", "TEXT", ct)
+            .ConfigureAwait(false);
+
+        await using var versionCommand = conn.CreateCommand();
+        versionCommand.Transaction = transaction;
+        versionCommand.CommandText = """
+            CREATE INDEX IF NOT EXISTS idx_runs_progress
+            ON runs(session_id, status, updated_at, run_id);
+            INSERT OR IGNORE INTO schema_versions(version, applied_at)
+            VALUES(16, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            """;
+        await versionCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        transaction.Commit();
+    }
+
+    private static async Task EnsureVersionFifteenApprovalColumnsAsync(
+        SqliteConnection conn,
+        CancellationToken ct)
+    {
+        if (!await SchemaObjectExistsAsync(conn, "table", "tool_approvals", ct)
+                .ConfigureAwait(false)
+            || await ColumnExistsAsync(conn, "tool_approvals", "request_kind", ct)
+                .ConfigureAwait(false))
+        {
+            return;
+        }
+
+        using var transaction = conn.BeginTransaction(deferred: false);
+        await AddColumnIfMissingAsync(
+                conn,
+                transaction,
+                "tool_approvals",
+                "request_kind",
+                "TEXT NOT NULL DEFAULT 'approval'",
+                ct)
+            .ConfigureAwait(false);
+        transaction.Commit();
+    }
+
     private static async Task AddColumnIfMissingAsync(
         SqliteConnection conn,
         SqliteTransaction transaction,
@@ -1126,6 +1201,35 @@ public static class SqliteSchema
         command.CommandText =
             "ALTER TABLE tool_grants ADD COLUMN approval_request_id TEXT;";
         await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        transaction.Commit();
+    }
+
+    private static async Task EnsureSkillScriptGrantColumnsAsync(
+        SqliteConnection conn,
+        CancellationToken ct)
+    {
+        if (!await SchemaObjectExistsAsync(conn, "table", "tool_grants", ct).ConfigureAwait(false))
+        {
+            return;
+        }
+
+        using var transaction = conn.BeginTransaction(deferred: false);
+        await AddColumnIfMissingAsync(
+                conn,
+                transaction,
+                "tool_grants",
+                "allowed_skill_script_keys",
+                "TEXT NOT NULL DEFAULT '[]'",
+                ct)
+            .ConfigureAwait(false);
+        await AddColumnIfMissingAsync(
+                conn,
+                transaction,
+                "tool_grants",
+                "skill_catalog_version",
+                "TEXT",
+                ct)
+            .ConfigureAwait(false);
         transaction.Commit();
     }
 

@@ -23,6 +23,7 @@ namespace Madorin.AI.Runtime.Providers.Abstractions;
 [JsonSerializable(typeof(RuntimeProviderEvent))]
 [JsonSerializable(typeof(RuntimeProviderMessage))]
 [JsonSerializable(typeof(RuntimeProviderRequest))]
+[JsonSerializable(typeof(SkillsInvocationContext))]
 [JsonSerializable(typeof(RuntimeStructuredOutput))]
 [JsonSerializable(typeof(TextDeltaProviderEvent))]
 [JsonSerializable(typeof(ToolCallCompleteProviderEvent))]

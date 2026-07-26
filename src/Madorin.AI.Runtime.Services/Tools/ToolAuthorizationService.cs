@@ -124,7 +124,12 @@ public sealed class ToolAuthorizationService(
                 grant.ParentGrantId,
                 grant.RootGrantId,
                 grant.DelegationChain,
-                grant.ApprovalRequestId)
+                grant.ApprovalRequestId,
+                StepId: null,
+                ParentInvocationId: null,
+                PlanVersion: null,
+                AllowedSkillScriptKeys: grant.AllowedSkillScriptKeys,
+                SkillCatalogVersion: grant.SkillCatalogVersion)
         ]);
 
         ToolGrantState? parent = null;
@@ -206,7 +211,9 @@ public sealed class ToolAuthorizationService(
                 NormalizeValues(grant.DelegatedAgentIds),
                 delegationChain,
                 now,
-                ApprovalRequestId: grant.ApprovalRequestId),
+                ApprovalRequestId: grant.ApprovalRequestId,
+                AllowedSkillScriptKeys: context.AllowedSkillScriptKeys,
+                SkillCatalogVersion: context.SkillCatalogVersion),
             ct).ConfigureAwait(false);
     }
 
@@ -299,6 +306,23 @@ public sealed class ToolAuthorizationService(
         ToolPermissionContext permission)
     {
         var missing = new List<string>();
+        if (string.Equals(descriptor.ToolId, SkillScriptAuthorization.ToolId, StringComparison.Ordinal))
+        {
+            if (!SkillScriptAuthorization.TryReadScope(
+                    invocation.ArgumentsJson,
+                    out var skillName,
+                    out var scriptHash,
+                    out var interpreter,
+                    out var catalogVersion)
+                || !string.Equals(permission.SkillCatalogVersion, catalogVersion, StringComparison.Ordinal)
+                || permission.AllowedSkillScriptKeys?.Contains(
+                    SkillScriptAuthorization.CreateKey(skillName, scriptHash, interpreter),
+                    StringComparer.Ordinal) != true)
+            {
+                missing.Add("skill.script");
+            }
+        }
+
         if (permission.AllowedToolIds is not null
             && !permission.AllowedToolIds.Contains(descriptor.ToolId, StringComparer.Ordinal))
         {
@@ -492,7 +516,14 @@ public sealed class ToolAuthorizationService(
             grant.ParentGrantId,
             grant.RootGrantId,
             grant.DelegationChain,
-            grant.ApprovalRequestId);
+            grant.ApprovalRequestId,
+            StepId: null,
+            ParentInvocationId: null,
+            PlanVersion: null,
+            AllowedSkillScriptKeys: grant.AllowedSkillScriptKeys is { Length: > 0 }
+                ? grant.AllowedSkillScriptKeys
+                : null,
+            SkillCatalogVersion: grant.SkillCatalogVersion);
     }
 
     private static ToolAuthorizationResult Denied(string capability, string reason) =>

@@ -12,6 +12,7 @@ using Madorin.AI.Runtime.Persistence.Files;
 using Madorin.AI.Runtime.Persistence.Sqlite;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Services.Memory;
+using Madorin.AI.Runtime.Services.Skills;
 using Madorin.AI.Runtime.Services.Tools;
 using Madorin.AI.Runtime.Tools.Abstractions;
 
@@ -36,7 +37,9 @@ public sealed class ExpertModeOrchestrator(
         approvalHandler = null,
     IToolStateStore? toolStateStore = null,
     Func<bool>? isRunTimedOut = null,
-    ToolConsentCoordinator? toolConsentCoordinator = null) : IModeOrchestrator
+    ToolConsentCoordinator? toolConsentCoordinator = null,
+    Func<CancellationToken, Task<SkillCatalogSnapshot?>>? skillCatalogSnapshotProvider = null,
+    Func<RuntimeSkillScriptInvocation, CancellationToken, Task<RuntimeSkillScriptResult>>? scriptInvoker = null) : IModeOrchestrator
 {
     private const string ProjectionVersion = "expert-full-tail-v1";
     private readonly SqliteEventOutbox _outbox = outbox
@@ -65,6 +68,10 @@ public sealed class ExpertModeOrchestrator(
         _toolPermissionHandler = toolPermissionHandler;
     private readonly Func<bool>? _isRunTimedOut = isRunTimedOut;
     private readonly ToolConsentCoordinator? _toolConsentCoordinator = toolConsentCoordinator;
+    private readonly Func<CancellationToken, Task<SkillCatalogSnapshot?>>? _skillCatalogSnapshotProvider =
+        skillCatalogSnapshotProvider;
+    private readonly Func<RuntimeSkillScriptInvocation, CancellationToken, Task<RuntimeSkillScriptResult>>?
+        _scriptInvoker = scriptInvoker;
 
     public RuntimeMode Mode => RuntimeMode.Expert;
 
@@ -95,6 +102,7 @@ public sealed class ExpertModeOrchestrator(
             : await _agentContextComposer.ComposeAsync(expert.Agent.SystemPrompt, ct)
                 .ConfigureAwait(false);
         using var memorySnapshotLease = CaptureMemorySnapshot(invocationId, agentContext);
+        var skillCatalogSnapshot = await CaptureSkillCatalogSnapshotAsync(ct).ConfigureAwait(false);
         var catalogVersion = _toolCatalogSnapshot?.EffectiveVersion
             ?? request.Selection.ToolCatalogVersion;
         var snapshot = new InvocationSnapshot(
@@ -107,7 +115,12 @@ public sealed class ExpertModeOrchestrator(
             agentContext.ProjectMemoryHash,
             catalogVersion,
             ProjectionVersion,
-            startedAt);
+            startedAt,
+            SkillCatalogVersion: skillCatalogSnapshot?.Version,
+            SkillNames: skillCatalogSnapshot?.Skills.Select(static skill => skill.Name).ToArray(),
+            SkillContentHashes: skillCatalogSnapshot?.Skills.Select(static skill => skill.ContentHash).ToArray(),
+            SkillSourceIds: skillCatalogSnapshot?.Skills.Select(static skill => skill.SourceId).ToArray(),
+            SkillMaterializedPaths: skillCatalogSnapshot?.Skills.Select(static skill => skill.MaterializedPath).ToArray());
 
         await AppendContentAsync(
             sessionId,
@@ -149,7 +162,8 @@ public sealed class ExpertModeOrchestrator(
                     modelId,
                     [systemMessage, .. candidateMessages],
                     Tools: tools,
-                    CancellationToken: token),
+                    CancellationToken: token,
+                    Skills: CreateSkillsContext(snapshot, runId, sessionId)),
                 token);
         var projection = await ContextProjectionBuilder.BuildAsync(
                 history,
@@ -168,7 +182,8 @@ public sealed class ExpertModeOrchestrator(
             modelId,
             [.. providerMessages],
             Tools: tools,
-            CancellationToken: ct);
+            CancellationToken: ct,
+            Skills: CreateSkillsContext(snapshot, runId, sessionId));
 
         long runSequence = 1;
         var startedPayload = JsonSerializer.SerializeToElement(
@@ -582,10 +597,6 @@ public sealed class ExpertModeOrchestrator(
                     failure = CreateRuntimeError(
                         RuntimeErrorCodes.RunTimedOut,
                         "The Run exceeded its configured timeout.");
-                    await TransitionToTerminalAsync(
-                        runId,
-                        RunStatus.Failed,
-                        CreateTerminalTextSnapshot(terminalContent)).ConfigureAwait(false);
                     var timeoutInvocationPayload = JsonSerializer.SerializeToElement(
                         new InvocationFailedEvent(invocationId, failure),
                         RuntimeJsonContext.Default.InvocationFailedEvent);
@@ -599,23 +610,25 @@ public sealed class ExpertModeOrchestrator(
                     var timeoutRunFailedPayload = JsonSerializer.SerializeToElement(
                         new RunFailedEvent(runId, sessionId, failure),
                         RuntimeJsonContext.Default.RunFailedEvent);
-                    yield return await CreateEnvelopeAsync(
+                    var timeoutTerminal = await CommitTerminalEnvelopeAsync(
                         runtimeInstanceId,
                         runId,
-                        runSequence,
-                        MessageTypes.RunFailed,
                         timeoutRunFailedPayload,
+                        RunStatus.Failed,
+                        CreateTerminalTextSnapshot(terminalContent),
+                        failure,
+                        runSequence,
                         CancellationToken.None).ConfigureAwait(false);
+                    if (timeoutTerminal is not null)
+                    {
+                        yield return timeoutTerminal;
+                    }
                     yield break;
                 }
 
                 failure ??= CreateRuntimeError(
                     "RunCancelled",
                     "The Run was cancelled before the Provider stream completed.");
-                await TransitionToTerminalAsync(
-                    runId,
-                    RunStatus.Cancelled,
-                    CreateTerminalTextSnapshot(terminalContent)).ConfigureAwait(false);
                 var cancelledInvocationPayload = JsonSerializer.SerializeToElement(
                     new InvocationFailedEvent(invocationId, failure),
                     RuntimeJsonContext.Default.InvocationFailedEvent);
@@ -629,20 +642,22 @@ public sealed class ExpertModeOrchestrator(
                 var runCancelledPayload = JsonSerializer.SerializeToElement(
                     new RunCancelledEvent(runId, sessionId),
                     RuntimeJsonContext.Default.RunCancelledEvent);
-                yield return await CreateEnvelopeAsync(
+                var cancelledTerminal = await CommitTerminalEnvelopeAsync(
                     runtimeInstanceId,
                     runId,
-                    runSequence,
-                    MessageTypes.RunCancelled,
                     runCancelledPayload,
-                    CancellationToken.None).ConfigureAwait(false);
+                    RunStatus.Cancelled,
+                    CreateTerminalTextSnapshot(terminalContent),
+                    error: null,
+                    runSequence: runSequence,
+                    ct: CancellationToken.None).ConfigureAwait(false);
+                if (cancelledTerminal is not null)
+                {
+                    yield return cancelledTerminal;
+                }
                 yield break;
             }
 
-            await TransitionToTerminalAsync(
-                runId,
-                RunStatus.Failed,
-                CreateTerminalTextSnapshot(terminalContent)).ConfigureAwait(false);
             var invocationFailedPayload = JsonSerializer.SerializeToElement(
                 new InvocationFailedEvent(invocationId, failure!),
                 RuntimeJsonContext.Default.InvocationFailedEvent);
@@ -656,13 +671,19 @@ public sealed class ExpertModeOrchestrator(
             var runFailedPayload = JsonSerializer.SerializeToElement(
                 new RunFailedEvent(runId, sessionId, failure!),
                 RuntimeJsonContext.Default.RunFailedEvent);
-            yield return await CreateEnvelopeAsync(
+            var failedTerminal = await CommitTerminalEnvelopeAsync(
                 runtimeInstanceId,
                 runId,
-                runSequence,
-                MessageTypes.RunFailed,
                 runFailedPayload,
+                RunStatus.Failed,
+                CreateTerminalTextSnapshot(terminalContent),
+                failure,
+                runSequence,
                 CancellationToken.None).ConfigureAwait(false);
+            if (failedTerminal is not null)
+            {
+                yield return failedTerminal;
+            }
             yield break;
         }
 
@@ -686,20 +707,22 @@ public sealed class ExpertModeOrchestrator(
             MessageTypes.InvocationCompleted,
             completedPayload,
             CancellationToken.None).ConfigureAwait(false);
-        await TransitionToTerminalAsync(
-            runId,
-            RunStatus.Completed,
-            CreateTerminalTextSnapshot(terminalContent)).ConfigureAwait(false);
         var runCompletedPayload = JsonSerializer.SerializeToElement(
             new RunCompletedEvent(runId, sessionId),
             RuntimeJsonContext.Default.RunCompletedEvent);
-        yield return await CreateEnvelopeAsync(
+        var completedTerminal = await CommitTerminalEnvelopeAsync(
             runtimeInstanceId,
             runId,
-            runSequence,
-            MessageTypes.RunCompleted,
             runCompletedPayload,
-            CancellationToken.None).ConfigureAwait(false);
+            RunStatus.Completed,
+            CreateTerminalTextSnapshot(terminalContent),
+            error: null,
+            runSequence: runSequence,
+            ct: CancellationToken.None).ConfigureAwait(false);
+        if (completedTerminal is not null)
+        {
+            yield return completedTerminal;
+        }
     }
 
     private async Task<ToolGatewayResult> ResolveConsentAndExecuteAsync(
@@ -1035,7 +1058,21 @@ public sealed class ExpertModeOrchestrator(
         CancellationToken ct)
     {
         var payload = JsonSerializer.SerializeToElement(
-            new RunStatusChangedEvent(runId, status.ToString()),
+            new RunStatusChangedEvent(runId, status.ToString())
+            {
+                Mode = RuntimeMode.Expert,
+                UpdatedAt = DateTimeOffset.UtcNow,
+                Phase = status switch
+                {
+                    RunStatus.Accepted or RunStatus.Preparing => "preparing",
+                    RunStatus.Running => "running",
+                    RunStatus.WaitingForTool => "waiting-for-tool",
+                    RunStatus.WaitingForApproval => "waiting-for-approval",
+                    RunStatus.WaitingForCredentials => "waiting-for-credentials",
+                    RunStatus.Persisting => "persisting",
+                    _ => "terminal"
+                }
+            },
             RuntimeJsonContext.Default.RunStatusChangedEvent);
         return CreateEnvelopeAsync(
             runtimeInstanceId,
@@ -1046,24 +1083,46 @@ public sealed class ExpertModeOrchestrator(
             ct);
     }
 
-    private async Task TransitionToTerminalAsync(
+    private async Task<RuntimeEventEnvelope?> CommitTerminalEnvelopeAsync(
+        string runtimeInstanceId,
         string runId,
+        JsonElement payload,
         RunStatus terminalStatus,
-        string? terminalText)
+        string? terminalText,
+        RuntimeError? error,
+        long runSequence,
+        CancellationToken ct)
     {
-        var current = await _sessionRepo.GetRunStatusAsync(runId, CancellationToken.None)
-            .ConfigureAwait(false);
-        if (RunStateMachine.IsTerminal(current))
+        var messageType = terminalStatus switch
         {
-            return;
-        }
-
-        await _sessionRepo.TransitionRunToTerminalAsync(
+            RunStatus.Completed => MessageTypes.RunCompleted,
+            RunStatus.Cancelled => MessageTypes.RunCancelled,
+            RunStatus.Failed => MessageTypes.RunFailed,
+            _ => throw new ArgumentOutOfRangeException(nameof(terminalStatus))
+        };
+        var gsn = await _sessionRepo.TryCommitTerminalRunAsync(
             runId,
-            current,
             terminalStatus,
             terminalText,
-            CancellationToken.None).ConfigureAwait(false);
+            error is null
+                ? null
+                : JsonSerializer.Serialize(error, RuntimeJsonContext.Default.RuntimeError),
+            messageType,
+            payload.GetRawText(),
+            ct).ConfigureAwait(false);
+        if (gsn is null)
+        {
+            return null;
+        }
+
+        return new RuntimeEventEnvelope(
+            runtimeInstanceId,
+            gsn.Value,
+            runId,
+            runSequence,
+            messageType,
+            DateTimeOffset.UtcNow,
+            payload);
     }
 
     private static string? CreateTerminalTextSnapshot(IReadOnlyList<ContentBlock> content)
@@ -1089,6 +1148,32 @@ public sealed class ExpertModeOrchestrator(
             IsRetryable: false,
             ProviderDetails: null,
             Guid.NewGuid().ToString("N"));
+
+    private SkillsInvocationContext? CreateSkillsContext(
+        InvocationSnapshot snapshot,
+        string runId,
+        string sessionId) =>
+        string.IsNullOrWhiteSpace(snapshot.SkillCatalogVersion)
+            ? null
+            : new SkillsInvocationContext(
+                snapshot.SkillCatalogVersion,
+                snapshot.SkillNames ?? [],
+                snapshot.SkillContentHashes ?? [],
+                snapshot.SkillSourceIds ?? [],
+                snapshot.SkillMaterializedPaths,
+                _scriptInvoker,
+                runId,
+                sessionId,
+                snapshot.AgentId,
+                snapshot.InvocationId,
+                ParentAgentId: null,
+                ParentInvocationId: snapshot.ParentInvocationId,
+                WorkStepId: snapshot.WorkStepId,
+                PlanVersion: snapshot.WorkPlanVersion);
+
+    private Task<SkillCatalogSnapshot?> CaptureSkillCatalogSnapshotAsync(CancellationToken ct) =>
+        _skillCatalogSnapshotProvider?.Invoke(ct)
+        ?? Task.FromResult<SkillCatalogSnapshot?>(null);
 
     private static string ComputeHash(string value) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();

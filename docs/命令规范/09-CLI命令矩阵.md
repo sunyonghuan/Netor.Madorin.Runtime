@@ -6,7 +6,7 @@
 >
 > 机器真值：`tests/Madorin.AI.Runtime.EndToEnd.Tests/Snapshots/stage7-cli-command-matrix.v1.json`
 
-本文冻结当前 46 条命令路径、局部参数、默认值、数据影响、锁要求、主要退出码和可解析示例。精确帮助文本及参数集合由机器快照的 SHA-256 和 `Stage7CommandMatrixTests` 约束；本文用于人工评审和运维判断。
+本文冻结当前 51 条命令路径、局部参数、默认值、数据影响、锁要求、主要退出码和可解析示例。精确帮助文本及参数集合由机器快照的 SHA-256 和 `Stage7CommandMatrixTests` 约束；本文用于人工评审和运维判断。
 
 ## 1. 通用契约
 

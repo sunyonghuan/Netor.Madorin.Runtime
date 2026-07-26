@@ -60,7 +60,12 @@ public static class ToolGrantCalculator
                 MergeTraceValue(
                     result.PlanVersion,
                     next.PlanVersion,
-                    nameof(ToolPermissionContext.PlanVersion)));
+                    nameof(ToolPermissionContext.PlanVersion)),
+                IntersectValues(result.AllowedSkillScriptKeys, next.AllowedSkillScriptKeys),
+                MergeTraceValue(
+                    result.SkillCatalogVersion,
+                    next.SkillCatalogVersion,
+                    nameof(ToolPermissionContext.SkillCatalogVersion)));
         }
 
         return result;
@@ -101,6 +106,7 @@ public static class ToolGrantCalculator
             AllowedToolIds = NormalizeValues(permission.AllowedToolIds),
             AllowedCallIds = NormalizeValues(permission.AllowedCallIds),
             AllowedEnvironmentVariables = NormalizeValues(permission.AllowedEnvironmentVariables),
+            AllowedSkillScriptKeys = NormalizeValues(permission.AllowedSkillScriptKeys),
             NetworkPolicy = NormalizeNetwork(
                 permission.NetworkPolicy ?? new NetworkPolicy(permission.DenyNetwork, [])),
             DelegationChain = permission.DelegationChain?.ToArray()
@@ -243,6 +249,8 @@ public static class ToolGrantCalculator
         && NullableSetEquals(
             first.AllowedEnvironmentVariables,
             second.AllowedEnvironmentVariables)
+        && NullableSetEquals(first.AllowedSkillScriptKeys, second.AllowedSkillScriptKeys)
+        && string.Equals(first.SkillCatalogVersion, second.SkillCatalogVersion, StringComparison.Ordinal)
         && NetworkEquivalent(first.NetworkPolicy, second.NetworkPolicy);
 
     private static bool NetworkEquivalent(NetworkPolicy? first, NetworkPolicy? second)

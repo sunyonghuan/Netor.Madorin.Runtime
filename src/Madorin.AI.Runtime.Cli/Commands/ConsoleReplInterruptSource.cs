@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace Madorin.AI.Runtime.Cli.Commands;
 
 internal sealed class ConsoleReplInterruptSource : IReplInterruptSource
@@ -14,7 +16,17 @@ internal sealed class ConsoleReplInterruptSource : IReplInterruptSource
         ConsoleCancelEventHandler handler = (_, eventArgs) =>
         {
             eventArgs.Cancel = true;
-            interruptHandler();
+            try
+            {
+                interruptHandler();
+            }
+            catch (Exception exception)
+            {
+                Trace.TraceWarning(
+                    "Console interrupt callback failure type={0} diagnosticId={1}",
+                    exception.GetType().FullName,
+                    $"diag_cancel_{Guid.NewGuid():N}");
+            }
         };
         Console.CancelKeyPress += handler;
         return new Subscription(handler);

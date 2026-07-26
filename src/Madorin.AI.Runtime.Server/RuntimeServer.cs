@@ -1,4 +1,5 @@
 ﻿using System.Collections.Concurrent;
+using System.Runtime.ExceptionServices;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Madorin.AI.Runtime.Contracts;
@@ -11,6 +12,7 @@ using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Server.Auth;
 using Madorin.AI.Runtime.Services;
 using Madorin.AI.Runtime.Services.Memory;
+using Madorin.AI.Runtime.Services.Skills;
 using Madorin.AI.Runtime.Services.Tools;
 using Madorin.AI.Runtime.Tools.Abstractions;
 using Madorin.AI.Runtime.Tools.Builtin;
@@ -53,6 +55,9 @@ public sealed class RuntimeServer : IAsyncDisposable
     private readonly SemaphoreSlim _meetingResumeGate = new(1, 1);
     private readonly RunRegistry _runRegistry;
     private readonly CancellationTokenSource _shutdown = new();
+    private readonly TaskCompletionSource<object?> _fatalSignal =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private Exception? _fatalFailure;
     private int _startupToolRecoveryPending;
     private int _connectionId;
     private int _disposed;
@@ -282,7 +287,11 @@ public sealed class RuntimeServer : IAsyncDisposable
         await WritePidFileAsync(pidPath, ct).ConfigureAwait(false);
         try
         {
-            await Task.WhenAll(
+            using var fatalRegistration = stoppingToken.Register(
+                static state => ((TaskCompletionSource<object?>)state!).TrySetCanceled(),
+                _fatalSignal);
+            var rootTasks = new List<Task>
+            {
                 AcceptConnectionsAsync(
                     PipeName,
                     NamedPipeTransport.MaxControlMessageBytes,
@@ -294,8 +303,55 @@ public sealed class RuntimeServer : IAsyncDisposable
                     HandleEventConnectionAsync,
                     stoppingToken),
                 MonitorHostLeasesAsync(stoppingToken),
-                RecoverPersistedMeetingApprovalsAsync(stoppingToken))
-                .ConfigureAwait(false);
+                RecoverPersistedMeetingApprovalsAsync(stoppingToken),
+                _fatalSignal.Task
+            };
+
+            var pending = new HashSet<Task>(rootTasks);
+            Exception? rootFailure = null;
+            while (pending.Count > 0)
+            {
+                var completed = await Task.WhenAny(pending).ConfigureAwait(false);
+                pending.Remove(completed);
+                if (completed.IsFaulted)
+                {
+                    rootFailure = completed.Exception?.GetBaseException()
+                        ?? new InvalidOperationException("A Runtime root task faulted without an exception.");
+                    break;
+                }
+
+                if (completed.IsCanceled && !stoppingToken.IsCancellationRequested)
+                {
+                    rootFailure = new TaskCanceledException(
+                        "A Runtime root task was cancelled unexpectedly.");
+                    break;
+                }
+            }
+
+            if (rootFailure is not null)
+            {
+                try
+                {
+                    await _shutdown.CancelAsync().ConfigureAwait(false);
+                }
+                catch (Exception)
+                {
+                    // The root failure is the observable Runtime fault.
+                }
+
+                await ObserveTasksAsync(rootTasks).ConfigureAwait(false);
+                await ObserveConnectionTasksAsync().ConfigureAwait(false);
+                ExceptionDispatchInfo.Capture(rootFailure).Throw();
+            }
+
+            if (stoppingToken.IsCancellationRequested)
+            {
+                await ObserveTasksAsync(rootTasks).ConfigureAwait(false);
+            }
+            else
+            {
+                await Task.WhenAll(rootTasks).ConfigureAwait(false);
+            }
             await DrainConnectionsAsync().ConfigureAwait(false);
         }
         finally
@@ -466,7 +522,8 @@ public sealed class RuntimeServer : IAsyncDisposable
                     await _blobStore.AbortSessionAsync(
                         session.HostInstanceId,
                         CancellationToken.None).ConfigureAwait(false);
-                    session.Dispose();
+                    session.MarkControlDisconnected();
+                    TryDisposeDisconnectedSession(session);
                 }
             }
         }
@@ -715,10 +772,20 @@ public sealed class RuntimeServer : IAsyncDisposable
                 protocolVersion,
                 ProtocolVersions.Current,
                 StringComparison.Ordinal);
+            SkillCatalogService skillCatalog;
+            try
+            {
+                skillCatalog = await CreateSkillCatalogAsync(initializeRequest.SkillSources, ct).ConfigureAwait(false);
+            }
+            catch (SkillCatalogRefreshException ex)
+            {
+                return Error(request.Id, -32020, $"{ex.Code}: {ex.Message}");
+            }
             session.Initialize(
                 initializeRequest.LastConfirmedGsn,
                 protocolVersion,
-                initializeRequest.ExpectedCapabilities);
+                initializeRequest.ExpectedCapabilities,
+                skillCatalog);
             var initializeResponse = new InitializeResponse(
                 InstanceId,
                 typeof(RuntimeServer).Assembly.GetName().Version?.ToString() ?? "0.1.0",
@@ -731,7 +798,13 @@ public sealed class RuntimeServer : IAsyncDisposable
                     SessionResume: true,
                     ReverseRpc: supportsStage5 ? true : null,
                     ToolCatalog: supportsStage5 ? true : null,
-                    ToolPermissions: supportsStage5 ? true : null),
+                    ToolPermissions: supportsStage5 ? true : null,
+                    Skills: new SkillsCapabilities(
+                        Enabled: true,
+                        SourceKinds: ["directory"],
+                        ResourcesSupported: true,
+                        ScriptsSupported: true,
+                        HotRefreshSupported: true)),
                 CreateNegotiatedLimits(supportsStage5),
                 EventPipeName,
                 _heartbeatIntervalSeconds);
@@ -744,6 +817,33 @@ public sealed class RuntimeServer : IAsyncDisposable
         if (!session.IsInitialized)
         {
             return Error(request.Id, -32002, "The control channel has not been initialized.");
+        }
+
+        if (string.Equals(request.Method, MessageTypes.SkillCatalogGet, StringComparison.Ordinal))
+        {
+            var summary = session.SkillCatalog?.GetSummary()
+                ?? throw new InvalidOperationException("The Skill catalog is not initialized.");
+            var result = JsonSerializer.SerializeToElement(summary, RuntimeJsonContext.Default.SkillCatalogSummary);
+            return new JsonRpcResponse("2.0", request.Id, result);
+        }
+
+        if (string.Equals(request.Method, MessageTypes.SkillCatalogRefresh, StringComparison.Ordinal))
+        {
+            if (session.SkillCatalog is null)
+            {
+                return Error(request.Id, -32020, "The Skill catalog is not initialized.");
+            }
+
+            try
+            {
+                var summary = (await session.SkillCatalog.RefreshAsync(ct).ConfigureAwait(false)).ToContract();
+                var result = JsonSerializer.SerializeToElement(summary, RuntimeJsonContext.Default.SkillCatalogSummary);
+                return new JsonRpcResponse("2.0", request.Id, result);
+            }
+            catch (SkillCatalogRefreshException ex)
+            {
+                return Error(request.Id, -32020, $"{ex.Code}: {ex.Message}");
+            }
         }
 
         if (string.Equals(request.Method, MessageTypes.ToolCatalogReplace, StringComparison.Ordinal))
@@ -898,11 +998,7 @@ public sealed class RuntimeServer : IAsyncDisposable
             }
 
             var result = JsonSerializer.SerializeToElement(
-                new RunQueryResult(
-                    snapshot.RunId,
-                    snapshot.SessionId,
-                    snapshot.Status,
-                    snapshot.TerminalText),
+                CreateRunQueryResult(snapshot),
                 RuntimeJsonContext.Default.RunQueryResult);
             return new JsonRpcResponse("2.0", request.Id, result);
         }
@@ -949,32 +1045,27 @@ public sealed class RuntimeServer : IAsyncDisposable
             }
 
             var activeRuns = new List<RunListItem>();
-            foreach (var pair in _activeRuns.ToArray()
-                         .OrderBy(static pair => pair.Value.StartedAt)
-                         .ThenBy(static pair => pair.Key, StringComparer.Ordinal))
+            var snapshots = await repository.ListRunSnapshotsAsync(
+                parameters.SessionId,
+                nonTerminalOnly: true,
+                ct).ConfigureAwait(false);
+            foreach (var snapshot in snapshots)
             {
-                if (parameters.SessionId is not null
-                    && !string.Equals(
-                        parameters.SessionId,
-                        pair.Value.SessionId,
-                        StringComparison.Ordinal))
-                {
-                    continue;
-                }
-
-                var snapshot = await repository.GetRunSnapshotAsync(pair.Key, ct)
-                    .ConfigureAwait(false);
-                if (snapshot is null
-                    || Madorin.AI.Runtime.Core.RunStateMachine.IsTerminal(snapshot.Status))
-                {
-                    continue;
-                }
-
                 activeRuns.Add(new RunListItem(
                     snapshot.RunId,
                     snapshot.SessionId,
                     snapshot.Status,
-                    pair.Value.StartedAt));
+                    snapshot.CreatedAt ?? snapshot.UpdatedAt ?? DateTimeOffset.UtcNow)
+                {
+                    Mode = snapshot.Mode,
+                    Phase = snapshot.Phase,
+                    CurrentStep = snapshot.CurrentStep,
+                    CompletedUnits = snapshot.CompletedUnits,
+                    TotalUnits = snapshot.TotalUnits,
+                    UpdatedAt = snapshot.UpdatedAt,
+                    LastRunSequence = snapshot.LastRunSequence,
+                    Error = DeserializeRuntimeError(snapshot.ErrorJson)
+                });
             }
 
             var result = JsonSerializer.SerializeToElement(
@@ -1215,6 +1306,27 @@ public sealed class RuntimeServer : IAsyncDisposable
         }
 
         return Error(request.Id, -32601, $"Unknown method '{request.Method}'.");
+    }
+
+    private async Task<SkillCatalogService> CreateSkillCatalogAsync(
+        IReadOnlyList<SkillSourceDescriptor>? sources,
+        CancellationToken ct)
+    {
+        var catalog = new SkillCatalogService(
+            WorkspaceRoot,
+            _dataDirectory,
+            InstanceId,
+            sources ?? []);
+        try
+        {
+            await catalog.InitializeAsync(ct).ConfigureAwait(false);
+            return catalog;
+        }
+        catch
+        {
+            await catalog.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
     }
 
     private async Task<byte[]> HandleBlobFrameAsync(
@@ -2501,14 +2613,54 @@ public sealed class RuntimeServer : IAsyncDisposable
                 resumedMeetingInvocation: resumedMeetingInvocation,
                 resumedCanonicalMessage: resumedCanonicalMessage,
                 resumedMeetingFailure: resumedMeetingFailure,
+                skillCatalog: session.SkillCatalog,
                 ct: ct).ConfigureAwait(false))
             {
+                if (string.Equals(envelope.MessageType, MessageTypes.RunStatusChanged, StringComparison.Ordinal)
+                    && envelope.Payload.Deserialize(RuntimeJsonContext.Default.RunStatusChangedEvent)
+                        is { } statusChanged
+                    && Enum.TryParse<RunStatus>(statusChanged.Status, ignoreCase: false, out var changedStatus))
+                {
+                    await runRepository.UpdateRunProgressAsync(
+                        runId,
+                        changedStatus,
+                        statusChanged.Phase,
+                        statusChanged.CurrentStep,
+                        statusChanged.CompletedUnits,
+                        statusChanged.TotalUnits,
+                        envelope.RunSequence,
+                        statusChanged.Error is null
+                            ? null
+                            : JsonSerializer.Serialize(
+                                statusChanged.Error,
+                                RuntimeJsonContext.Default.RuntimeError),
+                        CancellationToken.None).ConfigureAwait(false);
+                }
+
                 if (IsTerminalRunEvent(envelope.MessageType))
                 {
                     await TransitionRunForTerminalEventAsync(
                         runRepository,
                         runId,
                         envelope.MessageType).ConfigureAwait(false);
+                    var terminalStatus = envelope.MessageType == MessageTypes.RunCompleted
+                        ? RunStatus.Completed
+                        : envelope.MessageType == MessageTypes.RunCancelled
+                            ? RunStatus.Cancelled
+                            : RunStatus.Failed;
+                    var errorJson = envelope.Payload.TryGetProperty("error", out var errorElement)
+                        ? errorElement.GetRawText()
+                        : null;
+                    await runRepository.UpdateRunProgressAsync(
+                        runId,
+                        terminalStatus,
+                        "terminal",
+                        currentStep: null,
+                        completedUnits: null,
+                        totalUnits: null,
+                        lastRunSequence: envelope.RunSequence,
+                        errorJson: errorJson,
+                        ct: CancellationToken.None).ConfigureAwait(false);
                     activeRun.ReleaseCapacity();
                 }
 
@@ -2545,7 +2697,22 @@ public sealed class RuntimeServer : IAsyncDisposable
             _activeRuns.TryRemove(runId, out _);
             _activeRunRequests.TryRemove(runRequest.RunIdempotencyKey, out _);
             activeRun.Dispose();
+            TryDisposeDisconnectedSession(session);
         }
+    }
+
+    private void TryDisposeDisconnectedSession(AuthenticatedSession session)
+    {
+        if (!session.IsControlDisconnected
+            || _activeRuns.Values.Any(run => string.Equals(
+                run.OwnerHostInstanceId,
+                session.HostInstanceId,
+                StringComparison.Ordinal)))
+        {
+            return;
+        }
+
+        session.DisposeIfDisconnected();
     }
 
     private IDuplexRpcPeer? ResolveReverseRpcPeer(string hostInstanceId)
@@ -2894,11 +3061,20 @@ public sealed class RuntimeServer : IAsyncDisposable
         await using var runConnection = await OpenDatabaseConnectionAsync(ct)
             .ConfigureAwait(false);
         var runRepository = new SqliteSessionRepository(runConnection);
-        await runRepository.TransitionRunStatusAsync(
-            runId,
-            RunStatus.Running,
-            RunStatus.WaitingForApproval,
-            ct).ConfigureAwait(false);
+        var runStatus = await runRepository.GetRunStatusAsync(runId, ct).ConfigureAwait(false);
+        if (runStatus == RunStatus.Running)
+        {
+            await runRepository.TransitionRunStatusAsync(
+                runId,
+                RunStatus.Running,
+                RunStatus.WaitingForApproval,
+                ct).ConfigureAwait(false);
+        }
+        else if (runStatus != RunStatus.WaitingForApproval)
+        {
+            throw new InvalidOperationException(
+                $"Run '{runId}' is in state '{runStatus}' and cannot wait for HITL approval.");
+        }
 
         var waitTask = activeRun.WaitForMeetingHitlAsync(request, ct);
 
@@ -3400,33 +3576,44 @@ public sealed class RuntimeServer : IAsyncDisposable
         string sessionId,
         AuthenticatedSession session)
     {
-        await using var repositoryConnection = await OpenDatabaseConnectionAsync(CancellationToken.None)
-            .ConfigureAwait(false);
-        var repository = new SqliteSessionRepository(repositoryConnection);
-        await new SqliteWorkRepository(repositoryConnection).MarkSessionInterruptedAsync(
-            sessionId,
-            "The parent Run was cancelled.",
-            CancellationToken.None).ConfigureAwait(false);
-        await TryTransitionMeetingToTerminalAsync(
-            repositoryConnection,
-            sessionId,
-            "Cancelled").ConfigureAwait(false);
-        if (!await TryTransitionToTerminalAsync(
-            repository,
-            runId,
-            RunStatus.Cancelled).ConfigureAwait(false))
+        try
         {
-            return;
-        }
+            await using var repositoryConnection = await OpenDatabaseConnectionAsync(CancellationToken.None)
+                .ConfigureAwait(false);
+            var repository = new SqliteSessionRepository(repositoryConnection);
+            await new SqliteWorkRepository(repositoryConnection).MarkSessionInterruptedAsync(
+                sessionId,
+                "The parent Run was cancelled.",
+                CancellationToken.None).ConfigureAwait(false);
+            await TryTransitionMeetingToTerminalAsync(
+                repositoryConnection,
+                sessionId,
+                "Cancelled").ConfigureAwait(false);
+            var payload = JsonSerializer.SerializeToElement(
+                new RunCancelledEvent(runId, sessionId),
+                RuntimeJsonContext.Default.RunCancelledEvent);
+            var gsn = await repository.TryCommitTerminalRunAsync(
+                runId,
+                RunStatus.Cancelled,
+                terminalText: null,
+                errorJson: null,
+                MessageTypes.RunCancelled,
+                payload.GetRawText(),
+                CancellationToken.None).ConfigureAwait(false);
+            if (gsn is null)
+            {
+                return;
+            }
 
-        var payload = JsonSerializer.SerializeToElement(
-            new RunCancelledEvent(runId, sessionId),
-            RuntimeJsonContext.Default.RunCancelledEvent);
-        await AppendTerminalEventAsync(
-            runId,
-            MessageTypes.RunCancelled,
-            payload,
-            session).ConfigureAwait(false);
+            using var outbox = CreateEventOutbox(repositoryConnection);
+            await DispatchPendingEventsAsync(session, outbox, CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            TriggerRuntimeFatal(exception);
+            throw;
+        }
     }
 
     private async Task CompleteFailedRunAsync(
@@ -3436,36 +3623,50 @@ public sealed class RuntimeServer : IAsyncDisposable
         Exception exception,
         string errorCode = "RunExecutionFailed")
     {
-        await using var repositoryConnection = await OpenDatabaseConnectionAsync(CancellationToken.None)
-            .ConfigureAwait(false);
-        var repository = new SqliteSessionRepository(repositoryConnection);
-        await TryTransitionMeetingToTerminalAsync(
-            repositoryConnection,
-            sessionId,
-            "Failed").ConfigureAwait(false);
-        if (!await TryTransitionToTerminalAsync(
-            repository,
-            runId,
-            RunStatus.Failed).ConfigureAwait(false))
+        try
         {
-            return;
-        }
+            await using var repositoryConnection = await OpenDatabaseConnectionAsync(CancellationToken.None)
+                .ConfigureAwait(false);
+            var repository = new SqliteSessionRepository(repositoryConnection);
+            await TryTransitionMeetingToTerminalAsync(
+                repositoryConnection,
+                sessionId,
+                "Failed").ConfigureAwait(false);
+            var error = new RuntimeError(
+                errorCode,
+                "runtime",
+                "Run execution failed.",
+                IsRetryable: false,
+                ProviderDetails: null,
+                Guid.NewGuid().ToString("N"));
+            var payload = JsonSerializer.SerializeToElement(
+                new RunFailedEvent(runId, sessionId, error),
+                RuntimeJsonContext.Default.RunFailedEvent);
+            var errorJson = JsonSerializer.Serialize(
+                error,
+                RuntimeJsonContext.Default.RuntimeError);
+            var gsn = await repository.TryCommitTerminalRunAsync(
+                runId,
+                RunStatus.Failed,
+                terminalText: null,
+                errorJson,
+                MessageTypes.RunFailed,
+                payload.GetRawText(),
+                CancellationToken.None).ConfigureAwait(false);
+            if (gsn is null)
+            {
+                return;
+            }
 
-        var error = new RuntimeError(
-            errorCode,
-            "runtime",
-            exception.Message,
-            IsRetryable: false,
-            ProviderDetails: null,
-            Guid.NewGuid().ToString("N"));
-        var payload = JsonSerializer.SerializeToElement(
-            new RunFailedEvent(runId, sessionId, error),
-            RuntimeJsonContext.Default.RunFailedEvent);
-        await AppendTerminalEventAsync(
-            runId,
-            MessageTypes.RunFailed,
-            payload,
-            session).ConfigureAwait(false);
+            using var outbox = CreateEventOutbox(repositoryConnection);
+            await DispatchPendingEventsAsync(session, outbox, CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception terminalException)
+        {
+            TriggerRuntimeFatal(terminalException);
+            throw;
+        }
     }
 
     private static async Task TryTransitionMeetingToTerminalAsync(
@@ -3632,7 +3833,7 @@ public sealed class RuntimeServer : IAsyncDisposable
                     entry.RunId,
                     entry.RunSequence,
                     entry.MessageType,
-                    DateTimeOffset.UtcNow,
+                    entry.CreatedAt ?? DateTimeOffset.UtcNow,
                     payloadDocument.RootElement.Clone());
                 try
                 {
@@ -3675,7 +3876,7 @@ public sealed class RuntimeServer : IAsyncDisposable
                 entry.RunId,
                 entry.RunSequence,
                 entry.MessageType,
-                DateTimeOffset.UtcNow,
+                entry.CreatedAt ?? DateTimeOffset.UtcNow,
                 payloadDocument.RootElement.Clone());
             await eventChannel.SendAsync(envelope, ct).ConfigureAwait(false);
             await outbox.MarkSentAsync(entry.Gsn, ct).ConfigureAwait(false);
@@ -3731,7 +3932,24 @@ public sealed class RuntimeServer : IAsyncDisposable
                 snapshot.RunId,
                 snapshot.SessionId,
                 snapshot.Status,
-                snapshot.TerminalText);
+                snapshot.TerminalText)
+            {
+                Mode = snapshot.Mode,
+                Phase = snapshot.Phase,
+                CurrentStep = snapshot.CurrentStep,
+                CompletedUnits = snapshot.CompletedUnits,
+                TotalUnits = snapshot.TotalUnits,
+                UpdatedAt = snapshot.UpdatedAt,
+                LastRunSequence = snapshot.LastRunSequence,
+                Error = DeserializeRuntimeError(snapshot.ErrorJson)
+            };
+
+    private static RuntimeError? DeserializeRuntimeError(string? errorJson) =>
+        string.IsNullOrWhiteSpace(errorJson)
+            ? null
+            : JsonSerializer.Deserialize(
+                errorJson,
+                RuntimeJsonContext.Default.RuntimeError);
 
 
     private async Task<ConversationHistoryMetadata> TryGetConversationHistoryMetadataAsync(
@@ -4323,6 +4541,47 @@ public sealed class RuntimeServer : IAsyncDisposable
         }
     }
 
+    private static async Task ObserveTasksAsync(IEnumerable<Task> tasks)
+    {
+        foreach (var task in tasks)
+        {
+            try
+            {
+                await task.ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                // A prior root fault determines the Runtime outcome.
+            }
+        }
+    }
+
+    private async Task ObserveConnectionTasksAsync()
+    {
+        await ObserveTasksAsync(_connections.Values.ToArray()).ConfigureAwait(false);
+    }
+
+    private void TriggerRuntimeFatal(Exception failure)
+    {
+        ArgumentNullException.ThrowIfNull(failure);
+        if (Interlocked.CompareExchange(ref _fatalFailure, failure, null) is not null)
+        {
+            return;
+        }
+
+        _fatalSignal.TrySetException(failure);
+        try
+        {
+            _shutdown.Cancel(throwOnFirstException: false);
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        catch (AggregateException)
+        {
+        }
+    }
+
     private async Task DrainRunsAsync()
     {
         var tasks = _activeRuns.Values
@@ -4588,10 +4847,13 @@ public sealed class RuntimeServer : IAsyncDisposable
         private TaskCompletionSource<FramedEventChannel> _eventChannelSource = CreateEventChannelSource();
         private IDuplexRpcPeer? _controlPeer;
         private RuntimeCapabilities? _hostCapabilities;
+        private SkillCatalogService? _skillCatalog;
         private string? _protocolVersion;
         private long _lastConfirmedGsn;
         private long _lastDispatchedGsn;
         private int _initialized;
+        private int _controlDisconnected;
+        private int _disposed;
         private long _lastActivityUnixMilliseconds = lastActivity.ToUnixTimeMilliseconds();
 
         public string HostInstanceId { get; } = hostInstanceId;
@@ -4599,6 +4861,8 @@ public sealed class RuntimeServer : IAsyncDisposable
         public string SessionKey { get; } = sessionKey;
 
         public ToolCatalogStore ToolCatalogStore => _toolCatalogStore;
+
+        public SkillCatalogService? SkillCatalog => Volatile.Read(ref _skillCatalog);
 
         public bool SupportsReverseRpc =>
             string.Equals(_protocolVersion, ProtocolVersions.Current, StringComparison.Ordinal)
@@ -4610,7 +4874,9 @@ public sealed class RuntimeServer : IAsyncDisposable
 
         public bool SupportsToolPermissions =>
             string.Equals(_protocolVersion, ProtocolVersions.Current, StringComparison.Ordinal)
-            && _hostCapabilities?.ToolPermissions is not false;
+                && _hostCapabilities?.ToolPermissions is not false;
+
+        public bool IsControlDisconnected => Volatile.Read(ref _controlDisconnected) != 0;
 
         public ValueTask DisconnectControlChannelAsync() => controlTransport.DisposeAsync();
 
@@ -4629,7 +4895,34 @@ public sealed class RuntimeServer : IAsyncDisposable
 
         public void ExitRequest() => _requestGate.Release();
 
-        public void Dispose() => _requestGate.Dispose();
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
+            _requestGate.Dispose();
+            _ = DisposeSkillCatalogAsync();
+        }
+
+        public void MarkControlDisconnected() => Volatile.Write(ref _controlDisconnected, 1);
+
+        public void DisposeIfDisconnected()
+        {
+            if (IsControlDisconnected)
+            {
+                Dispose();
+            }
+        }
+
+        private async Task DisposeSkillCatalogAsync()
+        {
+            if (_skillCatalog is not null)
+            {
+                await _skillCatalog.DisposeAsync().ConfigureAwait(false);
+            }
+        }
 
         public void Touch(DateTimeOffset timestamp) =>
             Interlocked.Exchange(
@@ -4650,12 +4943,14 @@ public sealed class RuntimeServer : IAsyncDisposable
         public void Initialize(
             long lastConfirmedGsn,
             string protocolVersion,
-            RuntimeCapabilities hostCapabilities)
+            RuntimeCapabilities hostCapabilities,
+            SkillCatalogService skillCatalog)
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(protocolVersion);
             ArgumentNullException.ThrowIfNull(hostCapabilities);
             _protocolVersion = protocolVersion;
             _hostCapabilities = hostCapabilities;
+            _skillCatalog = skillCatalog ?? throw new ArgumentNullException(nameof(skillCatalog));
             Confirm(lastConfirmedGsn);
             MarkDispatched(lastConfirmedGsn);
             Volatile.Write(ref _initialized, 1);

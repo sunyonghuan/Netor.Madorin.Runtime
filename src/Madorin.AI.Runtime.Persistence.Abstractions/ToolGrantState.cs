@@ -26,4 +26,6 @@ public sealed record ToolGrantState(
     DateTimeOffset CreatedAt,
     DateTimeOffset? RevokedAt = null,
     string? RevocationReason = null,
-    string? ApprovalRequestId = null);
+    string? ApprovalRequestId = null,
+    string[]? AllowedSkillScriptKeys = null,
+    string? SkillCatalogVersion = null);

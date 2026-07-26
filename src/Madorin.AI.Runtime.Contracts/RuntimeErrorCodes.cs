@@ -33,4 +33,16 @@ public static class RuntimeErrorCodes
     public const string ToolCallConflict = nameof(ToolCallConflict);
     public const string ToolCallInProgress = nameof(ToolCallInProgress);
     public const string ToolIntentInvalid = nameof(ToolIntentInvalid);
+    public const string SkillSourceKindNotSupported = nameof(SkillSourceKindNotSupported);
+    public const string SkillSourceNotFound = nameof(SkillSourceNotFound);
+    public const string SkillSourceUnavailable = nameof(SkillSourceUnavailable);
+    public const string SkillDefinitionInvalid = nameof(SkillDefinitionInvalid);
+    public const string SkillDuplicateInSource = nameof(SkillDuplicateInSource);
+    public const string SkillResourceBlocked = nameof(SkillResourceBlocked);
+    public const string SkillScriptUnsupported = nameof(SkillScriptUnsupported);
+    public const string SkillScriptInterpreterUnavailable = nameof(SkillScriptInterpreterUnavailable);
+    public const string SkillScriptAuthorizationRequired = nameof(SkillScriptAuthorizationRequired);
+    public const string SkillToolUnavailable = nameof(SkillToolUnavailable);
+    public const string SkillRefreshFailed = nameof(SkillRefreshFailed);
+    public const string SkillsNotSupportedByProvider = nameof(SkillsNotSupportedByProvider);
 }

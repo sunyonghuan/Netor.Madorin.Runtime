@@ -14,6 +14,7 @@ using Madorin.AI.Runtime.Persistence.Sqlite;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Services;
 using Madorin.AI.Runtime.Services.Memory;
+using Madorin.AI.Runtime.Services.Skills;
 using Madorin.AI.Runtime.Services.Tools;
 using Madorin.AI.Runtime.Tools.Abstractions;
 
@@ -40,6 +41,7 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
     private readonly Func<MeetingHitlRequest, CancellationToken, Task<MeetingHitlResponse>>? _hitlHandler;
     private readonly ToolGateway? _toolGateway;
     private readonly ToolCatalogSnapshot? _toolCatalogSnapshot;
+    private readonly Func<CancellationToken, Task<SkillCatalogSnapshot?>>? _skillCatalogSnapshotProvider;
     private readonly MeetingHitlResponse? _resumedHitlResponse;
     private readonly MeetingInvocationRecord? _resumedInvocation;
     private readonly ConversationRecordV1? _resumedCanonicalMessage;
@@ -81,14 +83,16 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
         MeetingHitlResponse? resumedHitlResponse = null,
         MeetingInvocationRecord? resumedInvocation = null,
         ConversationRecordV1? resumedCanonicalMessage = null,
-        RuntimeError? resumedFailure = null)
+        RuntimeError? resumedFailure = null,
+        Func<CancellationToken, Task<SkillCatalogSnapshot?>>? skillCatalogSnapshotProvider = null,
+        Func<RuntimeSkillScriptInvocation, CancellationToken, Task<RuntimeSkillScriptResult>>? scriptInvoker = null)
     {
         ArgumentNullException.ThrowIfNull(providerFactory);
         _providerFactory = providerFactory;
         ArgumentNullException.ThrowIfNull(store);
         _store = store;
         _invocationExecutor = new MeetingInvocationExecutor(
-            new ProviderAgentInvocationExecutor(providerFactory),
+            new ProviderAgentInvocationExecutor(providerFactory, scriptInvoker),
             store,
             toolGateway,
             toolCatalogSnapshot,
@@ -105,6 +109,7 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
         _hitlHandler = hitlHandler;
         _toolGateway = toolGateway;
         _toolCatalogSnapshot = toolCatalogSnapshot;
+        _skillCatalogSnapshotProvider = skillCatalogSnapshotProvider;
         _resumedHitlResponse = resumedHitlResponse;
         _resumedInvocation = resumedInvocation;
         _resumedCanonicalMessage = resumedCanonicalMessage;
@@ -313,6 +318,16 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                 CreatedAt: hitlNow,
                 ExpiresAt: hitlExpiresAt);
 
+            yield return await CreateStatusEnvelopeAsync(
+                runtimeInstanceId,
+                runId,
+                runSequence++,
+                RunStatus.WaitingForApproval,
+                currentStep: $"round:{runFirstRoundIndex}:approval",
+                completedUnits: 0,
+                totalUnits: maxRounds,
+                ct).ConfigureAwait(false);
+
             MeetingHitlResponse hitlResponse;
             if (_resumedHitlResponse is not null)
             {
@@ -369,16 +384,27 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
 
                 case MeetingHitlAction.Reject:
                 case MeetingHitlAction.Cancel:
+                    var cancellationReason = hitlResponse.Reason ?? "Cancelled by HITL.";
                     await CancelMeetingAndRunAsync(
-                        sessionId, runId,
-                        hitlResponse.Reason ?? "Cancelled by HITL.",
-                        CancellationToken.None).ConfigureAwait(false);
-                    yield return await CreateEnvelopeAsync(
-                        runtimeInstanceId, runId, runSequence++,
-                        MessageTypes.RunCancelled,
-                        new RunCancelledEvent(runId, sessionId),
-                        RuntimeJsonContext.Default.RunCancelledEvent,
-                        ct).ConfigureAwait(false);
+                        sessionId,
+                        runId,
+                        cancellationReason,
+                        CancellationToken.None,
+                        transitionRun: false).ConfigureAwait(false);
+                    var cancelledEnvelope = await CommitTerminalEnvelopeAsync(
+                        runtimeInstanceId,
+                        runId,
+                        runSequence++,
+                        RunStatus.Cancelled,
+                        cancellationReason,
+                        error: null,
+                        value: new RunCancelledEvent(runId, sessionId),
+                        typeInfo: RuntimeJsonContext.Default.RunCancelledEvent,
+                        ct: ct).ConfigureAwait(false);
+                    if (cancelledEnvelope is not null)
+                    {
+                        yield return cancelledEnvelope;
+                    }
                     yield break;
 
                 default:
@@ -945,6 +971,15 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
 
                 yield return await CreateInvocationStartedEnvelopeAsync(
                     selectorRequest, runtimeInstanceId, runSequence++, ct).ConfigureAwait(false);
+                yield return await CreateStatusEnvelopeAsync(
+                    runtimeInstanceId,
+                    runId,
+                    runSequence++,
+                    RunStatus.Running,
+                    currentStep: $"round:{roundIndex}:{(isHostDriven ? "host" : "selector")}",
+                    completedUnits: Math.Clamp(roundIndex - runFirstRoundIndex, 0, maxRounds),
+                    totalUnits: maxRounds,
+                    ct).ConfigureAwait(false);
                 if (selectorContext.Projection.IsAdjusted)
                 {
                     yield return await CreateProjectionAdjustedEnvelopeAsync(
@@ -1151,6 +1186,15 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                     participantRequest = participantContext.Request;
                     yield return await CreateInvocationStartedEnvelopeAsync(
                         participantRequest, runtimeInstanceId, runSequence++, ct).ConfigureAwait(false);
+                    yield return await CreateStatusEnvelopeAsync(
+                        runtimeInstanceId,
+                        runId,
+                        runSequence++,
+                        RunStatus.Running,
+                        currentStep: $"round:{roundIndex}:participant:{selected.ParticipantId}",
+                        completedUnits: Math.Clamp(roundIndex - runFirstRoundIndex, 0, maxRounds),
+                        totalUnits: maxRounds,
+                        ct).ConfigureAwait(false);
                     if (participantContext.Projection.IsAdjusted)
                     {
                         yield return await CreateProjectionAdjustedEnvelopeAsync(
@@ -1392,6 +1436,15 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                     participantRequest = participantContext.Request;
                     yield return await CreateInvocationStartedEnvelopeAsync(
                         participantRequest, runtimeInstanceId, runSequence++, ct).ConfigureAwait(false);
+                    yield return await CreateStatusEnvelopeAsync(
+                        runtimeInstanceId,
+                        runId,
+                        runSequence++,
+                        RunStatus.Running,
+                        currentStep: $"round:{roundIndex}:participant:{participant.ParticipantId}",
+                        completedUnits: Math.Clamp(roundIndex - runFirstRoundIndex, 0, maxRounds),
+                        totalUnits: maxRounds,
+                        ct).ConfigureAwait(false);
                     if (participantContext.Projection.IsAdjusted)
                     {
                         yield return await CreateProjectionAdjustedEnvelopeAsync(
@@ -1589,19 +1642,27 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             RunStatus.Persisting,
             CancellationToken.None).ConfigureAwait(false);
 
-        await _sessionRepo.TransitionRunToTerminalAsync(
+        yield return await CreateStatusEnvelopeAsync(
+            runtimeInstanceId,
             runId,
+            runSequence++,
             RunStatus.Persisting,
-            RunStatus.Completed,
-            terminalText,
-            CancellationToken.None).ConfigureAwait(false);
+            currentStep: "meeting:finalizing",
+            completedUnits: maxRounds,
+            totalUnits: maxRounds,
+            ct).ConfigureAwait(false);
 
-        yield return await CreateCompletedEnvelopeAsync(
+        var completedEnvelope = await CreateCompletedEnvelopeAsync(
             runId,
             sessionId,
             runtimeInstanceId,
             runSequence,
+            terminalText,
             ct).ConfigureAwait(false);
+        if (completedEnvelope is not null)
+        {
+            yield return completedEnvelope;
+        }
     }
 
     private async Task<MeetingProjectionResult> BuildProjectedMessagesAsync(
@@ -1748,6 +1809,7 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             MeetingInvocationRole.Participant,
             projectionStrategyOverride,
             ct: ct).ConfigureAwait(false);
+        var skillCatalogSnapshot = await CaptureSkillCatalogSnapshotAsync(ct).ConfigureAwait(false);
         var snapshot = new InvocationSnapshot(
             invocationId,
             agent.AgentId,
@@ -1758,7 +1820,12 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             context.ProjectMemoryHash,
             request.Selection.ToolCatalogVersion,
             ProjectionVersion,
-            DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow,
+            SkillCatalogVersion: skillCatalogSnapshot?.Version,
+            SkillNames: skillCatalogSnapshot?.Skills.Select(static skill => skill.Name).ToArray(),
+            SkillContentHashes: skillCatalogSnapshot?.Skills.Select(static skill => skill.ContentHash).ToArray(),
+            SkillSourceIds: skillCatalogSnapshot?.Skills.Select(static skill => skill.SourceId).ToArray(),
+            SkillMaterializedPaths: skillCatalogSnapshot?.Skills.Select(static skill => skill.MaterializedPath).ToArray());
         return new ProjectedInvocationRequest(
             new AgentInvocationRequest(
                 invocationId,
@@ -1811,6 +1878,7 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             MeetingInvocationRole.Summarizer,
             MeetingContextStrategy.Full,
             ct).ConfigureAwait(false);
+        var skillCatalogSnapshot = await CaptureSkillCatalogSnapshotAsync(ct).ConfigureAwait(false);
         var snapshot = new InvocationSnapshot(
             invocationId,
             agent.AgentId,
@@ -1821,7 +1889,12 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             context.ProjectMemoryHash,
             request.Selection.ToolCatalogVersion,
             SummaryProjectionVersion,
-            DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow,
+            SkillCatalogVersion: skillCatalogSnapshot?.Version,
+            SkillNames: skillCatalogSnapshot?.Skills.Select(static skill => skill.Name).ToArray(),
+            SkillContentHashes: skillCatalogSnapshot?.Skills.Select(static skill => skill.ContentHash).ToArray(),
+            SkillSourceIds: skillCatalogSnapshot?.Skills.Select(static skill => skill.SourceId).ToArray(),
+            SkillMaterializedPaths: skillCatalogSnapshot?.Skills.Select(static skill => skill.MaterializedPath).ToArray());
         var instruction = "Summarize the meeting's public discussion through canonical sequence "
             + summarizesThroughSeq.ToString(CultureInfo.InvariantCulture)
             + ". Return a concise factual summary only; do not add new decisions or tool calls.";
@@ -2189,19 +2262,57 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             RuntimeJsonContext.Default.RunAcceptedEvent,
             ct);
 
-    private Task<RuntimeEventEnvelope> CreateCompletedEnvelopeAsync(
+    private async Task<RuntimeEventEnvelope?> CreateCompletedEnvelopeAsync(
         string runId,
         string sessionId,
         string runtimeInstanceId,
         long runSequence,
+        string? terminalText,
+        CancellationToken ct) =>
+        await CommitTerminalEnvelopeAsync(
+            runtimeInstanceId,
+            runId,
+            runSequence,
+            RunStatus.Completed,
+            terminalText,
+            error: null,
+            value: new RunCompletedEvent(runId, sessionId),
+            typeInfo: RuntimeJsonContext.Default.RunCompletedEvent,
+            ct: ct).ConfigureAwait(false);
+
+    private Task<RuntimeEventEnvelope> CreateStatusEnvelopeAsync(
+        string runtimeInstanceId,
+        string runId,
+        long runSequence,
+        RunStatus status,
+        string? currentStep,
+        long? completedUnits,
+        long? totalUnits,
         CancellationToken ct) =>
         CreateEnvelopeAsync(
             runtimeInstanceId,
             runId,
             runSequence,
-            MessageTypes.RunCompleted,
-            new RunCompletedEvent(runId, sessionId),
-            RuntimeJsonContext.Default.RunCompletedEvent,
+            MessageTypes.RunStatusChanged,
+            new RunStatusChangedEvent(runId, status.ToString())
+            {
+                Mode = RuntimeMode.Meeting,
+                Phase = status switch
+                {
+                    RunStatus.Accepted or RunStatus.Preparing => "preparing",
+                    RunStatus.Running => "running",
+                    RunStatus.WaitingForTool => "waiting-for-tool",
+                    RunStatus.WaitingForApproval => "waiting-for-approval",
+                    RunStatus.WaitingForCredentials => "waiting-for-credentials",
+                    RunStatus.Persisting => "persisting",
+                    _ => "terminal"
+                },
+                CurrentStep = currentStep,
+                CompletedUnits = completedUnits,
+                TotalUnits = totalUnits,
+                UpdatedAt = DateTimeOffset.UtcNow
+            },
+            RuntimeJsonContext.Default.RunStatusChangedEvent,
             ct);
 
     private async Task<RuntimeEventEnvelope> CreateInvocationStartedEnvelopeAsync(
@@ -2336,6 +2447,48 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             payload);
     }
 
+    private async Task<RuntimeEventEnvelope?> CommitTerminalEnvelopeAsync<T>(
+        string runtimeInstanceId,
+        string runId,
+        long runSequence,
+        RunStatus terminalStatus,
+        string? terminalText,
+        RuntimeError? error,
+        T value,
+        JsonTypeInfo<T> typeInfo,
+        CancellationToken ct)
+        where T : notnull
+    {
+        var messageType = terminalStatus switch
+        {
+            RunStatus.Completed => MessageTypes.RunCompleted,
+            RunStatus.Cancelled => MessageTypes.RunCancelled,
+            RunStatus.Failed => MessageTypes.RunFailed,
+            _ => throw new ArgumentOutOfRangeException(nameof(terminalStatus))
+        };
+        var payload = JsonSerializer.SerializeToElement(value, typeInfo);
+        var gsn = await _sessionRepo.TryCommitTerminalRunAsync(
+            runId,
+            terminalStatus,
+            terminalText,
+            error is null
+                ? null
+                : JsonSerializer.Serialize(error, RuntimeJsonContext.Default.RuntimeError),
+            messageType,
+            payload.GetRawText(),
+            ct).ConfigureAwait(false);
+        return gsn is null
+            ? null
+            : new RuntimeEventEnvelope(
+                runtimeInstanceId,
+                gsn.Value,
+                runId,
+                runSequence,
+                messageType,
+                DateTimeOffset.UtcNow,
+                payload);
+    }
+
     private async Task<RuntimeEventEnvelope> CreateEnvelopeAsync<T>(
         string runtimeInstanceId,
         string runId,
@@ -2362,6 +2515,10 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             DateTimeOffset.UtcNow,
             payload);
     }
+
+    private Task<SkillCatalogSnapshot?> CaptureSkillCatalogSnapshotAsync(CancellationToken ct) =>
+        _skillCatalogSnapshotProvider?.Invoke(ct)
+        ?? Task.FromResult<SkillCatalogSnapshot?>(null);
 
     private static string ComputeHash(string value) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
@@ -2406,8 +2563,16 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             RuntimeJsonContext.Default.InvocationSnapshot)
             ?? throw new InvalidOperationException(
                 $"Invocation '{invocation.InvocationId}' has an empty persisted snapshot.");
-        var regenerated = projected.Request.Snapshot with { StartedAt = persisted.StartedAt };
-        if (regenerated != persisted
+        var regenerated = projected.Request.Snapshot with
+        {
+            StartedAt = persisted.StartedAt,
+            SkillCatalogVersion = persisted.SkillCatalogVersion,
+            SkillNames = persisted.SkillNames,
+            SkillContentHashes = persisted.SkillContentHashes,
+            SkillSourceIds = persisted.SkillSourceIds,
+            SkillMaterializedPaths = persisted.SkillMaterializedPaths
+        };
+        if (!InvocationSnapshotsEquivalent(regenerated, persisted)
             || !string.Equals(invocation.InvocationId, persisted.InvocationId, StringComparison.Ordinal)
             || !string.Equals(invocation.AgentId, persisted.AgentId, StringComparison.Ordinal))
         {
@@ -2420,6 +2585,53 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             Request = projected.Request with { Snapshot = persisted }
         };
     }
+
+    private static bool InvocationSnapshotsEquivalent(
+        InvocationSnapshot first,
+        InvocationSnapshot second) =>
+        string.Equals(first.InvocationId, second.InvocationId, StringComparison.Ordinal)
+        && string.Equals(first.AgentId, second.AgentId, StringComparison.Ordinal)
+        && string.Equals(first.ProviderId, second.ProviderId, StringComparison.Ordinal)
+        && string.Equals(first.ModelId, second.ModelId, StringComparison.Ordinal)
+        && string.Equals(first.PromptHash, second.PromptHash, StringComparison.Ordinal)
+        && string.Equals(first.GlobalMemoryHash, second.GlobalMemoryHash, StringComparison.Ordinal)
+        && string.Equals(first.ProjectMemoryHash, second.ProjectMemoryHash, StringComparison.Ordinal)
+        && string.Equals(first.ToolCatalogVersion, second.ToolCatalogVersion, StringComparison.Ordinal)
+        && string.Equals(first.ProjectionVersion, second.ProjectionVersion, StringComparison.Ordinal)
+        && first.StartedAt == second.StartedAt
+        && string.Equals(first.ParentInvocationId, second.ParentInvocationId, StringComparison.Ordinal)
+        && string.Equals(first.WorkStepId, second.WorkStepId, StringComparison.Ordinal)
+        && string.Equals(first.WorkPlanVersion, second.WorkPlanVersion, StringComparison.Ordinal)
+        && ContextProjectionEquivalent(first.ContextProjection, second.ContextProjection)
+        && string.Equals(first.SkillCatalogVersion, second.SkillCatalogVersion, StringComparison.Ordinal)
+        && SequenceEqual(first.SkillNames, second.SkillNames)
+        && SequenceEqual(first.SkillContentHashes, second.SkillContentHashes)
+        && SequenceEqual(first.SkillSourceIds, second.SkillSourceIds)
+        && SequenceEqual(first.SkillMaterializedPaths, second.SkillMaterializedPaths);
+
+    private static bool ContextProjectionEquivalent(
+        ContextProjectionSnapshot? first,
+        ContextProjectionSnapshot? second)
+    {
+        if (first is null || second is null)
+        {
+            return first is null && second is null;
+        }
+
+        return string.Equals(first.Strategy, second.Strategy, StringComparison.Ordinal)
+            && SequenceEqual(first.RetainedItems, second.RetainedItems)
+            && first.DroppedMessageCount == second.DroppedMessageCount
+            && first.IncludedMessageCount == second.IncludedMessageCount
+            && first.EstimatedTokens == second.EstimatedTokens
+            && string.Equals(first.EstimateSource, second.EstimateSource, StringComparison.Ordinal)
+            && first.TokenLimit == second.TokenLimit
+            && first.SummarizedUnitCount == second.SummarizedUnitCount;
+    }
+
+    private static bool SequenceEqual<T>(T[]? first, T[]? second) =>
+        first is null || second is null
+            ? first is null && second is null
+            : first.AsSpan().SequenceEqual(second);
 
     private ReconciledCanonicalText? GetReconciledCanonicalText(
         MeetingInvocationRecord invocation,
@@ -2834,7 +3046,11 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
     }
 
     private async Task CancelMeetingAndRunAsync(
-        string sessionId, string runId, string reason, CancellationToken ct)
+        string sessionId,
+        string runId,
+        string reason,
+        CancellationToken ct,
+        bool transitionRun = true)
     {
         var meetingTransitioned = await _meetingRepo.TryTransitionMeetingStatusAsync(
             sessionId, "Running", "Cancelled", ct).ConfigureAwait(false);
@@ -2842,6 +3058,11 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
         {
             await _meetingRepo.TryTransitionMeetingStatusAsync(
                 sessionId, "WaitingForApproval", "Cancelled", ct).ConfigureAwait(false);
+        }
+
+        if (!transitionRun)
+        {
+            return;
         }
 
         try
@@ -2956,6 +3177,7 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             MeetingInvocationRole.Host,
             projectionStrategyOverride,
             ct: ct).ConfigureAwait(false);
+        var skillCatalogSnapshot = await CaptureSkillCatalogSnapshotAsync(ct).ConfigureAwait(false);
         var snapshot = new InvocationSnapshot(
             invocationId,
             agent.AgentId,
@@ -2966,7 +3188,12 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             context.ProjectMemoryHash,
             request.Selection.ToolCatalogVersion,
             HostProjectionVersion,
-            DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow,
+            SkillCatalogVersion: skillCatalogSnapshot?.Version,
+            SkillNames: skillCatalogSnapshot?.Skills.Select(static skill => skill.Name).ToArray(),
+            SkillContentHashes: skillCatalogSnapshot?.Skills.Select(static skill => skill.ContentHash).ToArray(),
+            SkillSourceIds: skillCatalogSnapshot?.Skills.Select(static skill => skill.SourceId).ToArray(),
+            SkillMaterializedPaths: skillCatalogSnapshot?.Skills.Select(static skill => skill.MaterializedPath).ToArray());
 
         return new ProjectedInvocationRequest(
             new AgentInvocationRequest(
@@ -3026,6 +3253,7 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             MeetingInvocationRole.Selector,
             projectionStrategyOverride,
             ct: ct).ConfigureAwait(false);
+        var skillCatalogSnapshot = await CaptureSkillCatalogSnapshotAsync(ct).ConfigureAwait(false);
         var snapshot = new InvocationSnapshot(
             invocationId,
             agent.AgentId,
@@ -3036,7 +3264,12 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             context.ProjectMemoryHash,
             request.Selection.ToolCatalogVersion,
             SelectorProjectionVersion,
-            DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow,
+            SkillCatalogVersion: skillCatalogSnapshot?.Version,
+            SkillNames: skillCatalogSnapshot?.Skills.Select(static skill => skill.Name).ToArray(),
+            SkillContentHashes: skillCatalogSnapshot?.Skills.Select(static skill => skill.ContentHash).ToArray(),
+            SkillSourceIds: skillCatalogSnapshot?.Skills.Select(static skill => skill.SourceId).ToArray(),
+            SkillMaterializedPaths: skillCatalogSnapshot?.Skills.Select(static skill => skill.MaterializedPath).ToArray());
 
         return new ProjectedInvocationRequest(
             new AgentInvocationRequest(

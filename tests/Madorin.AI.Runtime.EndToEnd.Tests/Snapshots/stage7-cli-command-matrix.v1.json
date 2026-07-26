@@ -1,7 +1,7 @@
 {
   "$schema": "https://madorin.dev/schemas/stage7-cli-command-matrix/1.0",
   "schemaVersion": 1,
-  "commandCount": 46,
+  "commandCount": 51,
   "globalOptions": [
     "--workspace",
     "--data-dir",
@@ -146,7 +146,7 @@
     {
       "path": "",
       "usage": "madorin [command] [options]",
-      "helpSha256": "998afa8523be4d735132fec953bbbaada416f9c9fa904eb47bd6f362b11df7ab",
+      "helpSha256": "ecd25ded0f2ec0b6ad4807362ef5e2e43ec9c5c68c4a5e87d124bb14e553e8e7",
       "options": [],
       "arguments": [],
       "example": ["version"]
@@ -478,6 +478,46 @@
       "options": [],
       "arguments": [{ "name": "sessionId", "min": 1, "max": 1 }],
       "example": ["session", "unarchive", "session-1"]
+    },
+    {
+      "path": "skill",
+      "usage": "madorin skill [command] [options]",
+      "helpSha256": "d65136d40b4e43a7c1446c9f9df5436e6100de4b6149b9222e1320cc7fca5cb4",
+      "options": [],
+      "arguments": [],
+      "example": ["skill", "list"]
+    },
+    {
+      "path": "skill list",
+      "usage": "madorin skill list [options]",
+      "helpSha256": "5c5869c23444198cd1de988ce737bb1f877bf2f2e5cbf4c875029104b2011cbb",
+      "options": ["--scope"],
+      "arguments": [],
+      "example": ["skill", "list"]
+    },
+    {
+      "path": "skill refresh",
+      "usage": "madorin skill refresh [options]",
+      "helpSha256": "80c4d14e13a1e418214084f79ce5c958255dc2e90323504c5e3d067c1f9d14f4",
+      "options": [],
+      "arguments": [],
+      "example": ["skill", "refresh"]
+    },
+    {
+      "path": "skill show",
+      "usage": "madorin skill show <name> [options]",
+      "helpSha256": "1729f36c5dc6334c6ecda325dd975aa03b9e5dcecfa854121055b00e3265e858",
+      "options": ["--scope"],
+      "arguments": [{ "name": "name", "min": 1, "max": 1 }],
+      "example": ["skill", "show", "demo"]
+    },
+    {
+      "path": "skill validate",
+      "usage": "madorin skill validate [options]",
+      "helpSha256": "566510791a44d701643521a76bac05203fe793765ea1375ec4fe3349566d8f13",
+      "options": ["--scope"],
+      "arguments": [],
+      "example": ["skill", "validate"]
     },
     {
       "path": "storage",

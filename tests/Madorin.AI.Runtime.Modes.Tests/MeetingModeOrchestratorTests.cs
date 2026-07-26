@@ -11,6 +11,7 @@ using Madorin.AI.Runtime.Persistence.Files;
 using Madorin.AI.Runtime.Persistence.Sqlite;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Services.Memory;
+using Madorin.AI.Runtime.Services.Skills;
 using Microsoft.Data.Sqlite;
 
 namespace Madorin.AI.Runtime.Modes.Tests;
@@ -76,13 +77,47 @@ public sealed class MeetingModeOrchestratorTests
                 var sessionRepo = new SqliteSessionRepository(connection);
                 var meetingRepo = new SqliteMeetingRepository(connection);
                 var (sessionId, runId) = await CreateRunningRunAsync(sessionRepo, ct);
+                var skillDirectory = Path.Combine(
+                    dataDirectory,
+                    "skills-workspace",
+                    ".madorin",
+                    "skills",
+                    "meeting-skill");
+                Directory.CreateDirectory(skillDirectory);
+                var skillFile = Path.Combine(skillDirectory, "SKILL.md");
+                await File.WriteAllTextAsync(
+                    skillFile,
+                    "---\nname: meeting-skill\ndescription: Meeting Skill\n---\nversion one\n",
+                    ct);
+                await using var skillCatalog = new SkillCatalogService(
+                    Path.Combine(dataDirectory, "skills-workspace"),
+                    Path.Combine(dataDirectory, "skills-data"),
+                    "meeting-runtime",
+                    sourceScope: SkillCatalogSourceScope.Workspace);
+                await skillCatalog.InitializeAsync(ct);
+                var skillCaptureCount = 0;
+                async Task<SkillCatalogSnapshot?> CaptureSkillsAsync(CancellationToken token)
+                {
+                    if (Interlocked.Increment(ref skillCaptureCount) == 2)
+                    {
+                        await File.WriteAllTextAsync(
+                            skillFile,
+                            "---\nname: meeting-skill\ndescription: Meeting Skill\n---\nversion two\n",
+                            token);
+                        await skillCatalog.RefreshAsync(token);
+                    }
+
+                    return await skillCatalog.GetSnapshotForInvocationAsync(token);
+                }
+
                 var orchestrator = new MeetingModeOrchestrator(
                     _ => provider,
                     store,
                     sessionRepo,
                     meetingRepo,
                     outbox,
-                    new AgentContextComposer(memoryFiles));
+                    new AgentContextComposer(memoryFiles),
+                    skillCatalogSnapshotProvider: CaptureSkillsAsync);
                 var participants = new[]
                 {
                     new AgentRef("participant-b", "v1", "You are participant B.", "fake", "model-b"),
@@ -120,6 +155,12 @@ public sealed class MeetingModeOrchestratorTests
                     ExpectedParticipantIds,
                     provider.InvokedAgentIds.ToArray());
                 Assert.HasCount(2, provider.CapturedRequests);
+                Assert.IsTrue(provider.CapturedRequests.All(static item => item.Skills is not null));
+                Assert.AreNotEqual(
+                    provider.CapturedRequests[0].Skills!.CatalogVersion,
+                    provider.CapturedRequests[1].Skills!.CatalogVersion);
+                Assert.IsTrue(provider.CapturedRequests.All(static item =>
+                    item.Skills!.SkillNames.SequenceEqual(["meeting-skill"])));
                 foreach (var providerRequest in provider.CapturedRequests)
                 {
                     var instructions = ((TextContentBlock)providerRequest.Messages[0].Content[0]).Text;
@@ -144,6 +185,11 @@ public sealed class MeetingModeOrchestratorTests
                     .ToArray();
 
                 Assert.HasCount(2, started);
+                CollectionAssert.AreEqual(
+                    provider.CapturedRequests
+                        .Select(static item => item.Skills!.CatalogVersion)
+                        .ToArray(),
+                    started.Select(static item => item.Snapshot.SkillCatalogVersion).ToArray());
                 CollectionAssert.AreEqual(
                     ExpectedParticipantIds,
                     started.Select(static item => item.Snapshot.AgentId).ToArray());

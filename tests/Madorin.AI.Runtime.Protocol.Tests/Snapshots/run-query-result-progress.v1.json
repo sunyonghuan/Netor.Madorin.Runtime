@@ -1,0 +1,24 @@
+{
+  "$schema": "madorin.ai.runtime.protocol-snapshot/v1",
+  "protocolVersion": "1.1",
+  "messageType": "run.query.result",
+  "payload": {
+    "runId": "run-query",
+    "sessionId": "session-1",
+    "status": "Running",
+    "mode": "Work",
+    "phase": "waiting-for-tool",
+    "currentStep": "step-2",
+    "completedUnits": 1,
+    "totalUnits": 3,
+    "updatedAt": "2026-07-26T02:03:04+00:00",
+    "lastRunSequence": 7,
+    "error": {
+      "code": "ToolExecutionFailed",
+      "category": "tool",
+      "message": "Tool execution failed.",
+      "isRetryable": true,
+      "diagnosticId": "diag-progress-1"
+    }
+  }
+}

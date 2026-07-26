@@ -13,6 +13,8 @@ SampleHost 是只通过公开 Client SDK 和 Contracts 集成 Madorin AI Runtime
 `reference-host` 是阶段 7 的完整业务集成示例。调用方提供三个工作区、三个 Runtime 实例 ID 和三个 Pipe 端点，三个 handshake secret 继续通过 stdin 逐行传入。宿主随后：
 
 - 创建三个独立 `RuntimeClient`，并发运行 Expert、Meeting 和 Work。
+- 声明目录、资源、脚本和热刷新 Skills 能力；工作区存在 `.madorin/host-skills/` 时，将其作为有序补充来源传入。Runtime 仍先加载绑定工作区和 Runtime OS 用户全局来源。
+- 通过 Client SDK 查询并刷新每个 Runtime 的 Skills Catalog，输出实例、刷新前后版本、有效数量和实际来源 ID。
 - 按 `runtimeInstanceId`、`runId`、GSN 和 Run 序号校验、分流事件，并在处理成功后显式确认 GSN。
 - 发布工具目录，处理权限、审批、宿主/MCP 工具回调，并按 callId 查询持久结果。
 - 演示 Run 取消、Selection 更新、Session resume/rehydrate、Runtime 重启和继续同一 Session。
@@ -31,4 +33,4 @@ dotnet test .\tests\Madorin.AI.Runtime.EndToEnd.Tests\Madorin.AI.Runtime.EndToEn
   --filter "ClassName=Madorin.AI.Runtime.EndToEnd.Tests.ReferenceHostProcessTests"
 ```
 
-阶段 7 仍在执行中。当前协议版本为 `1.1`，SQLite Schema 版本为 `14`。
+阶段 7A 正在执行。当前协议版本为 `1.1`，SQLite Schema 版本为 `16`。每个 Client 拥有独立的 `State`/`Completion` 生命周期；单实例失败保留最后快照并标记为 `WAITING`，其他实例继续更新。恢复时先恢复事件游标再查询 Run，不伪造业务终态。

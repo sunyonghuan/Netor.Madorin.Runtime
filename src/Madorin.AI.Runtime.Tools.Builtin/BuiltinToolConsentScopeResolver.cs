@@ -1,5 +1,7 @@
 using System.Text.Json;
 using Madorin.AI.Runtime.Contracts;
+using Madorin.AI.Runtime.Services.Skills;
+using Madorin.AI.Runtime.Services.Tools;
 using Madorin.AI.Runtime.Tools.Abstractions;
 
 namespace Madorin.AI.Runtime.Tools.Builtin;
@@ -91,8 +93,33 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
         BuiltinToolRegistry.ProcessRunToolId => ProcessScope(workspaceRoot, arguments),
         BuiltinToolRegistry.PowerShellRunToolId => PowerShellScope(workspaceRoot, arguments),
         BuiltinToolRegistry.HttpRequestToolId => HttpScope(arguments),
+        SkillScriptAuthorization.ToolId => ScriptScope(arguments, workspaceRoot),
         _ => throw new NotSupportedException("The built-in tool scope is unknown.")
     };
+
+    private static ToolRequestedScope ScriptScope(JsonElement arguments, string workspaceRoot)
+    {
+        var skill = arguments.GetProperty("skillName").GetString();
+        var script = arguments.GetProperty("script").GetString();
+        var interpreter = arguments.GetProperty("interpreter").GetString();
+        var hash = arguments.GetProperty("scriptHash").GetString();
+        if (string.IsNullOrWhiteSpace(skill)
+            || string.IsNullOrWhiteSpace(script)
+            || string.IsNullOrWhiteSpace(interpreter)
+            || string.IsNullOrWhiteSpace(hash))
+        {
+            throw new InvalidDataException("A Skill script scope requires skill, script, hash, and interpreter.");
+        }
+
+        return Create(
+            $"skill:{skill}/{script}",
+            $"script hash {hash}; interpreter {interpreter}; Runtime user permissions apply",
+            readRoots: [],
+            writeRoots: [],
+            allowedExecutables: [interpreter],
+            allowedEnvironmentVariables: SkillScriptEnvironmentPolicy.InheritedVariableNames.ToArray(),
+            canGrantForRun: true);
+    }
 
     private static ToolRequestedScope FileReadScope(
         string workspaceRoot,
