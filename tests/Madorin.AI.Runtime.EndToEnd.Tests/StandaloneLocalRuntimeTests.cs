@@ -51,11 +51,204 @@ public sealed class StandaloneLocalRuntimeTests
             Assert.AreEqual(64, first.WorkspaceKey.Length);
             Assert.AreNotEqual(first.RuntimeInstanceId, second.RuntimeInstanceId);
             Assert.AreEqual(
-                Path.Combine(configDirectory, "data", "workspaces", first.WorkspaceKey),
+                Path.Combine(workspace, ".madorin"),
                 first.DataDirectory);
+            Assert.IsTrue(first.UsesDefaultDataDirectory);
+            Assert.AreEqual(
+                Path.Combine(configDirectory, "data", "workspaces", first.WorkspaceKey),
+                first.LegacyDataDirectory);
             Assert.AreEqual(first.WorkspaceKey, overridden.WorkspaceKey);
             Assert.AreEqual(Path.Combine(root, "custom-data"), overridden.DataDirectory);
+            Assert.IsFalse(overridden.UsesDefaultDataDirectory);
             Assert.StartsWith(overridden.DataDirectory, overridden.LogDirectory);
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [TestMethod]
+    [Timeout(15_000, CooperativeCancellation = true)]
+    public async Task CreatePreparedContext_MigratesLegacyDataAndPreservesWorkspaceFiles()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var workspace = Path.Combine(root, "workspace with 空格");
+            var configDirectory = Path.Combine(root, "config");
+            Directory.CreateDirectory(workspace);
+            var context = StandaloneRuntimeContext.Create(
+                workspace,
+                configDirectory: configDirectory);
+            Assert.IsNotNull(context.LegacyDataDirectory);
+            Directory.CreateDirectory(Path.Combine(context.LegacyDataDirectory, "messages"));
+            await File.WriteAllTextAsync(
+                Path.Combine(context.LegacyDataDirectory, "state.db"),
+                "legacy-database",
+                _testContext.CancellationToken);
+            await File.WriteAllTextAsync(
+                Path.Combine(context.LegacyDataDirectory, "messages", "session.jsonl"),
+                "{\"sequence\":1}",
+                _testContext.CancellationToken);
+            Directory.CreateDirectory(context.DataDirectory);
+            await File.WriteAllTextAsync(
+                Path.Combine(context.DataDirectory, "config.json"),
+                "{\"defaultModel\":\"workspace-model\"}",
+                _testContext.CancellationToken);
+
+            var prepared = await StandaloneRuntimeContext.CreatePreparedAsync(
+                workspace,
+                configDirectory: configDirectory,
+                ct: _testContext.CancellationToken);
+
+            Assert.AreEqual(context.DataDirectory, prepared.DataDirectory);
+            Assert.AreEqual(
+                "legacy-database",
+                await File.ReadAllTextAsync(
+                    Path.Combine(prepared.DataDirectory, "state.db"),
+                    _testContext.CancellationToken));
+            Assert.AreEqual(
+                "{\"defaultModel\":\"workspace-model\"}",
+                await File.ReadAllTextAsync(
+                    Path.Combine(prepared.DataDirectory, "config.json"),
+                    _testContext.CancellationToken));
+            Assert.IsTrue(File.Exists(Path.Combine(
+                prepared.DataDirectory,
+                StandaloneWorkspaceDataMigrator.MigrationMarkerFileName)));
+            Assert.IsTrue(File.Exists(Path.Combine(context.LegacyDataDirectory, "state.db")));
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [TestMethod]
+    [Timeout(15_000, CooperativeCancellation = true)]
+    public async Task CreatePreparedContext_WithExplicitDataDirectory_DoesNotMigrateLegacyData()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var workspace = Path.Combine(root, "workspace");
+            var configDirectory = Path.Combine(root, "config");
+            var explicitDataDirectory = Path.Combine(root, "explicit-data");
+            Directory.CreateDirectory(workspace);
+            var defaultContext = StandaloneRuntimeContext.Create(
+                workspace,
+                configDirectory: configDirectory);
+            Assert.IsNotNull(defaultContext.LegacyDataDirectory);
+            Directory.CreateDirectory(defaultContext.LegacyDataDirectory);
+            await File.WriteAllTextAsync(
+                Path.Combine(defaultContext.LegacyDataDirectory, "state.db"),
+                "legacy-database",
+                _testContext.CancellationToken);
+
+            var prepared = await StandaloneRuntimeContext.CreatePreparedAsync(
+                workspace,
+                explicitDataDirectory,
+                configDirectory,
+                _testContext.CancellationToken);
+
+            Assert.AreEqual(Path.GetFullPath(explicitDataDirectory), prepared.DataDirectory);
+            Assert.IsFalse(Directory.Exists(explicitDataDirectory));
+            Assert.IsFalse(File.Exists(Path.Combine(explicitDataDirectory, "state.db")));
+            Assert.IsTrue(File.Exists(Path.Combine(defaultContext.LegacyDataDirectory, "state.db")));
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [TestMethod]
+    [Timeout(15_000, CooperativeCancellation = true)]
+    public async Task CreatePreparedContext_WhenBothLocationsContainRuntimeData_RejectsMerge()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var workspace = Path.Combine(root, "workspace");
+            var configDirectory = Path.Combine(root, "config");
+            Directory.CreateDirectory(workspace);
+            var context = StandaloneRuntimeContext.Create(
+                workspace,
+                configDirectory: configDirectory);
+            Assert.IsNotNull(context.LegacyDataDirectory);
+            Directory.CreateDirectory(context.LegacyDataDirectory);
+            Directory.CreateDirectory(context.DataDirectory);
+            await File.WriteAllTextAsync(
+                Path.Combine(context.LegacyDataDirectory, "state.db"),
+                "legacy",
+                _testContext.CancellationToken);
+            await File.WriteAllTextAsync(
+                Path.Combine(context.DataDirectory, "state.db"),
+                "local",
+                _testContext.CancellationToken);
+
+            var exception = await Assert.ThrowsExactlyAsync<StandaloneWorkspaceDataMigrationException>(
+                () => StandaloneRuntimeContext.CreatePreparedAsync(
+                    workspace,
+                    configDirectory: configDirectory,
+                    ct: _testContext.CancellationToken));
+
+            Assert.Contains("both", exception.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.AreEqual(
+                "legacy",
+                await File.ReadAllTextAsync(
+                    Path.Combine(context.LegacyDataDirectory, "state.db"),
+                    _testContext.CancellationToken));
+            Assert.AreEqual(
+                "local",
+                await File.ReadAllTextAsync(
+                    Path.Combine(context.DataDirectory, "state.db"),
+                    _testContext.CancellationToken));
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [TestMethod]
+    [Timeout(15_000, CooperativeCancellation = true)]
+    public async Task CreatePreparedContext_ConcurrentMigration_IsIdempotent()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var workspace = Path.Combine(root, "workspace");
+            var configDirectory = Path.Combine(root, "config");
+            Directory.CreateDirectory(workspace);
+            var context = StandaloneRuntimeContext.Create(
+                workspace,
+                configDirectory: configDirectory);
+            Assert.IsNotNull(context.LegacyDataDirectory);
+            Directory.CreateDirectory(context.LegacyDataDirectory);
+            await File.WriteAllTextAsync(
+                Path.Combine(context.LegacyDataDirectory, "state.db"),
+                new string('x', 128 * 1024),
+                _testContext.CancellationToken);
+
+            var first = StandaloneRuntimeContext.CreatePreparedAsync(
+                workspace,
+                configDirectory: configDirectory,
+                ct: _testContext.CancellationToken);
+            var second = StandaloneRuntimeContext.CreatePreparedAsync(
+                Path.Combine(workspace, "."),
+                configDirectory: configDirectory,
+                ct: _testContext.CancellationToken);
+            await Task.WhenAll(first, second);
+
+            Assert.IsTrue(File.Exists(Path.Combine(workspace, ".madorin", "state.db")));
+            Assert.IsTrue(File.Exists(Path.Combine(
+                workspace,
+                ".madorin",
+                StandaloneWorkspaceDataMigrator.MigrationMarkerFileName)));
+            Assert.AreEqual(1, Directory.EnumerateFiles(
+                Path.Combine(workspace, ".madorin"),
+                StandaloneWorkspaceDataMigrator.MigrationMarkerFileName).Count());
         }
         finally
         {

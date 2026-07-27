@@ -34,7 +34,9 @@ internal sealed class StandaloneToolConsentHandler(
             _terminal.WriteLine("1  Allow once", CliTextStyle.Parameter);
             _terminal.WriteLine(
                 canGrantForRun
-                    ? "2  Allow for this Run"
+                    ? context.ScopeResolution.Scope!.AllowDelete
+                        ? "2  Allow workspace deletes for this Run"
+                        : "2  Allow for this Run"
                     : "2  Allow for this Run (unavailable)",
                 canGrantForRun ? CliTextStyle.Parameter : CliTextStyle.Muted);
             _terminal.WriteLine("3  Deny", CliTextStyle.Parameter);
@@ -117,7 +119,9 @@ internal sealed class StandaloneToolConsentHandler(
     {
         for (var attempt = 0; attempt < MaxInputAttempts; attempt++)
         {
-            _terminal.Write("Select [1/2/3]: ", CliTextStyle.Prompt);
+            _terminal.Write(
+                canGrantForRun ? "Select [1/2/3]: " : "Select [1/3]: ",
+                CliTextStyle.Prompt);
             var input = await _terminal.ReadLineAsync(ct).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(input))
             {
@@ -130,10 +134,17 @@ internal sealed class StandaloneToolConsentHandler(
                     return StandaloneToolGrantLifetime.Once;
                 case "2" when canGrantForRun:
                     return StandaloneToolGrantLifetime.Run;
+                case "2":
+                    _terminal.WriteLine(
+                        "Option 2 is unavailable for this tool request. Enter 1 or 3.",
+                        CliTextStyle.Error);
+                    break;
                 case "3":
                     return null;
                 default:
-                    _terminal.WriteLine("Enter 1, 2, or 3.", CliTextStyle.Error);
+                    _terminal.WriteLine(
+                        canGrantForRun ? "Enter 1, 2, or 3." : "Enter 1 or 3.",
+                        CliTextStyle.Error);
                     break;
             }
         }

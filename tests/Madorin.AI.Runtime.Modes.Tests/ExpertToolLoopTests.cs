@@ -310,7 +310,7 @@ public sealed class ExpertToolLoopTests
 
     private sealed class TestToolRegistry : IBuiltinToolRegistry
     {
-        public const string ToolId = "builtin.fs.calculate";
+        public const string ToolId = "mcli_fs_calculate";
 
         private static readonly ToolDescriptor Descriptor = new(
             ToolId,

@@ -22,7 +22,7 @@ public sealed class ProviderToolNamePolicyTests
 
         var fileRead = tools.Single(
             static tool => tool.ToolId == BuiltinToolRegistry.FileReadToolId);
-        Assert.AreEqual("builtin__fs__read", ProviderToolNamePolicy.GetName(fileRead));
+        Assert.AreEqual("mcli_fs_read", ProviderToolNamePolicy.GetName(fileRead));
     }
 
     [TestMethod]
@@ -36,25 +36,25 @@ public sealed class ProviderToolNamePolicyTests
     [TestMethod]
     public void GetHistoryName_InvalidStoredName_UsesCurrentDescriptorName()
     {
-        var tool = CreateTool("builtin.fs.read", "Read file");
+        var tool = CreateTool("mcli_fs_read", "Read file");
 
         var name = ProviderToolNamePolicy.GetHistoryName(
             [tool],
             tool.ToolId,
             tool.DisplayName);
 
-        Assert.AreEqual("builtin__fs__read", name);
+        Assert.AreEqual("mcli_fs_read", name);
     }
 
     [TestMethod]
     public void ResolveToolId_AcceptsProviderAndLegacyNames()
     {
-        var tool = CreateTool("builtin.fs.read", "Read file");
+        var tool = CreateTool("mcli_fs_read", "Read file");
         ToolDescriptor[] tools = [tool];
 
         Assert.AreEqual(
             tool.ToolId,
-            ProviderToolNamePolicy.ResolveToolId(tools, "builtin__fs__read"));
+            ProviderToolNamePolicy.ResolveToolId(tools, "mcli_fs_read"));
         Assert.AreEqual(
             tool.ToolId,
             ProviderToolNamePolicy.ResolveToolId(tools, "Read file"));

@@ -12,13 +12,15 @@ public sealed record StandaloneRuntimeContext(
     string RuntimeInstanceId,
     string ConfigDirectory,
     string DataDirectory,
-    string LogDirectory)
+    string LogDirectory,
+    bool UsesDefaultDataDirectory,
+    string? LegacyDataDirectory)
 {
     /// <summary>
     /// Creates a new <see cref="StandaloneRuntimeContext"/> with normalized absolute paths.
     /// </summary>
     /// <param name="workspace">Workspace root; defaults to the current directory.</param>
-    /// <param name="dataDirectory">Explicit data directory override; defaults to a workspace-keyed location under <paramref name="configDirectory"/>.</param>
+    /// <param name="dataDirectory">Explicit data directory override; defaults to <c>&lt;workspace&gt;/.madorin</c>.</param>
     /// <param name="configDirectory">Config directory; defaults to <see cref="StandaloneConfigLoader.GetDefaultConfigDirectory"/>.</param>
     public static StandaloneRuntimeContext Create(
         string? workspace = null,
@@ -55,10 +57,16 @@ public sealed record StandaloneRuntimeContext(
 
         var runtimeInstanceId = Guid.NewGuid().ToString("N");
 
+        var usesDefaultDataDirectory = dataDirectory is null;
         var normalizedData = dataDirectory is not null
             ? Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory))
             : Path.TrimEndingDirectorySeparator(Path.GetFullPath(
-                Path.Combine(normalizedConfig, "data", "workspaces", workspaceKey)));
+                Path.Combine(normalizedWorkspace, ".madorin")));
+
+        var legacyDataDirectory = usesDefaultDataDirectory
+            ? Path.TrimEndingDirectorySeparator(Path.GetFullPath(
+                Path.Combine(normalizedConfig, "data", "workspaces", workspaceKey)))
+            : null;
 
         var logDirectory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(
             Path.Combine(normalizedData, "logs", runtimeInstanceId)));
@@ -69,6 +77,23 @@ public sealed record StandaloneRuntimeContext(
             runtimeInstanceId,
             normalizedConfig,
             normalizedData,
-            logDirectory);
+            logDirectory,
+            usesDefaultDataDirectory,
+            legacyDataDirectory);
+    }
+
+    /// <summary>
+    /// Creates a context and prepares its data directory, including safe migration from the
+    /// legacy user-level workspace directory when the default data location is used.
+    /// </summary>
+    public static async Task<StandaloneRuntimeContext> CreatePreparedAsync(
+        string? workspace = null,
+        string? dataDirectory = null,
+        string? configDirectory = null,
+        CancellationToken ct = default)
+    {
+        var context = Create(workspace, dataDirectory, configDirectory);
+        await StandaloneWorkspaceDataMigrator.PrepareAsync(context, ct).ConfigureAwait(false);
+        return context;
     }
 }

@@ -218,7 +218,7 @@ run --workspace <startup-current-directory>
 
 - 工作区最终通过 `Path.GetFullPath` 规范化。
 - 不修改进程当前目录，不影响相对路径由其他组件自行解析时的既有行为。
-- 独立模式数据目录继续采用现有规则：位于配置目录的 `data/workspaces/<workspace-key>`，不改为可执行文件目录或进程当前目录。
+- 本文当时约定独立模式数据目录位于配置目录的 `data/workspaces/<workspace-key>`；该约定已被 P8 工作区本地数据方案覆盖。现行规则为 `<workspace>/.madorin`，旧目录仅作为兼容迁移源。
 - `ToolPermissionContext.WorkspaceRoot` 必须来源于已确定的 Runtime 工作区，不得重新读取当前目录。
 
 ### 7.3 Windows 验证场景

@@ -221,7 +221,8 @@ internal static class StandaloneProviderProtocolCatalog
             entry.ApiKey,
             baseUrl: GetBaseUrl(entry, "Kimi"),
             models: ToProviderModels(entry.Models),
-            providerId: entry.Name);
+            providerId: entry.Name,
+            maxTools: entry.MaxTools);
 
     private static AliyunProviderAdapter BuildAliyun(ProviderEntry entry) =>
         new(

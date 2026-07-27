@@ -294,7 +294,7 @@ internal static class ServiceCommands
             StandaloneRuntimeContext context;
             try
             {
-                context = StandaloneRuntimeContext.Create(
+                context = await StandaloneRuntimeContext.CreatePreparedAsync(
                     parseResult.GetValue(workspaceOption),
                     parseResult.GetValue(dataDirectoryOption),
                     configDirectory);
@@ -309,6 +309,17 @@ internal static class ServiceCommands
                     "InvalidRuntimeContext",
                     ex.Message);
                 return ExitCodes.InvalidArguments;
+            }
+            catch (StandaloneWorkspaceDataMigrationException ex)
+            {
+                RunOutputWriter.WriteCommandFailure(
+                    output,
+                    error,
+                    outputFormat,
+                    machineOutputRedirected,
+                    "WorkspaceDataUnavailable",
+                    ex.Message);
+                return ExitCodes.WorkspaceError;
             }
 
             var loader = new StandaloneConfigLoader(context.ConfigDirectory);
@@ -768,12 +779,9 @@ internal static class ServiceCommands
 
     private static void TryCancel(CancellationTokenSource? cancellationTokenSource)
     {
-        try
+        if (cancellationTokenSource is not null)
         {
-            cancellationTokenSource?.Cancel();
-        }
-        catch (ObjectDisposedException)
-        {
+            CancelNoThrow(cancellationTokenSource);
         }
     }
 
@@ -1329,8 +1337,8 @@ internal static class ServiceCommands
                     {
                         var access = tool.ToolId switch
                         {
-                            "builtin.memory.read" => "read-only",
-                            "builtin.memory.append" => "approval required",
+                            "mcli_memory_read" => "read-only",
+                            "mcli_memory_append" => "approval required",
                             _ when tool.RequiresApproval => "approval required",
                             _ => tool.Risk.ToString()
                         };

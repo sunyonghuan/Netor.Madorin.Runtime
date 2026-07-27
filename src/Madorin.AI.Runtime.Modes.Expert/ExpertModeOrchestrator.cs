@@ -58,7 +58,6 @@ public sealed class ExpertModeOrchestrator(
     private readonly MemoryInvocationSnapshotStore? _memorySnapshotStore = memorySnapshotStore;
     private readonly RuntimeLimits _runtimeLimits = runtimeLimits ?? new RuntimeLimits(
         MaxToolRounds: 8,
-        MaxToolCallsPerRound: 8,
         MaxToolResultBytesPerInvocation: 4 * 1024 * 1024);
     private readonly ToolCatalogSnapshot? _toolCatalogSnapshot = toolCatalogSnapshot;
     private readonly ToolGateway? _toolGateway = toolGateway;
@@ -86,6 +85,7 @@ public sealed class ExpertModeOrchestrator(
         ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
         ArgumentNullException.ThrowIfNull(request);
         ArgumentException.ThrowIfNullOrWhiteSpace(runtimeInstanceId);
+        ValidateToolCallLimit(_runtimeLimits.MaxToolCallsPerRound);
         var expert = ValidateAndGetOptions(request);
         var providerId = expert.Agent.ProviderId ?? request.Selection.DefaultSelection.ProviderId;
         var modelId = expert.Agent.ModelId ?? request.Selection.DefaultSelection.ModelId;
@@ -183,7 +183,10 @@ public sealed class ExpertModeOrchestrator(
             [.. providerMessages],
             Tools: tools,
             CancellationToken: ct,
-            Skills: CreateSkillsContext(snapshot, runId, sessionId));
+            Skills: CreateSkillsContext(snapshot, runId, sessionId))
+        {
+            HistoryMessageCount = Math.Max(0, providerMessages.Count - 1)
+        };
 
         long runSequence = 1;
         var startedPayload = JsonSerializer.SerializeToElement(
@@ -221,7 +224,7 @@ public sealed class ExpertModeOrchestrator(
         RuntimeError? failure = null;
         var cancelled = false;
         var maxToolRounds = _runtimeLimits.MaxToolRounds ?? 8;
-        var maxToolCallsPerRound = _runtimeLimits.MaxToolCallsPerRound ?? 8;
+        var maxToolCallsPerRound = _runtimeLimits.MaxToolCallsPerRound;
         var maxToolResultBytes = _runtimeLimits.MaxToolResultBytesPerInvocation
             ?? 4L * 1024 * 1024;
         long totalToolResultBytes = 0;
@@ -235,7 +238,10 @@ public sealed class ExpertModeOrchestrator(
                 failure = null;
                 var hasObservedProviderOutput = false;
                 var attemptRequest = providerRequest.CreateAttempt(providerAttempt);
-                var providerEnumerator = _provider.CompleteStreamingAsync(attemptRequest, ct)
+                var providerEnumerator = ProviderInvocationBoundary.CompleteStreamingAsync(
+                        _provider,
+                        attemptRequest,
+                        ct)
                     .GetAsyncEnumerator(ct);
                 try
                 {
@@ -419,11 +425,12 @@ public sealed class ExpertModeOrchestrator(
                 break;
             }
 
-            if (toolCalls.Length > maxToolCallsPerRound)
+            if (maxToolCallsPerRound is { } toolCallLimit
+                && toolCalls.Length > toolCallLimit)
             {
                 failure = CreateRuntimeError(
                     RuntimeErrorCodes.LimitsIncompatible,
-                    $"The Provider requested {toolCalls.Length} tools in one round; the limit is {maxToolCallsPerRound}.");
+                    $"The Provider requested {toolCalls.Length} tools in one round; the limit is {toolCallLimit}.");
                 break;
             }
 
@@ -1148,6 +1155,16 @@ public sealed class ExpertModeOrchestrator(
             IsRetryable: false,
             ProviderDetails: null,
             Guid.NewGuid().ToString("N"));
+
+    private static void ValidateToolCallLimit(int? maxToolCallsPerRound)
+    {
+        if (maxToolCallsPerRound is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxToolCallsPerRound),
+                "MaxToolCallsPerRound must be a positive integer or null.");
+        }
+    }
 
     private SkillsInvocationContext? CreateSkillsContext(
         InvocationSnapshot snapshot,

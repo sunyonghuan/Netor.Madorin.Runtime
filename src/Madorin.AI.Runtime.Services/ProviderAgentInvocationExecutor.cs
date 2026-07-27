@@ -46,9 +46,16 @@ public sealed class ProviderAgentInvocationExecutor : IAgentInvocationExecutor
             IsIdempotent: request.IsIdempotent,
             HasIrreversibleToolSideEffects: request.HasIrreversibleToolSideEffects,
             CancellationToken: ct,
-            Skills: CreateSkillsContext(request, _scriptInvoker));
+            Skills: CreateSkillsContext(request, _scriptInvoker))
+        {
+            HistoryMessageCount = request.HistoryMessageCount
+        };
 
-        await foreach (var evt in adapter.CompleteStreamingAsync(providerRequest, ct).ConfigureAwait(false))
+        await foreach (var evt in ProviderInvocationBoundary.CompleteStreamingAsync(
+                adapter,
+                providerRequest,
+                ct)
+            .ConfigureAwait(false))
         {
             yield return evt;
         }

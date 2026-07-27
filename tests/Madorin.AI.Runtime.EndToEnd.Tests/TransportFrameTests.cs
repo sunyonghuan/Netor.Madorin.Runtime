@@ -232,7 +232,7 @@ public sealed class TransportFrameTests
             RedirectStandardError = true,
             RedirectStandardOutput = true
         };
-        var cliAssemblyPath = Path.Combine(AppContext.BaseDirectory, "madorin-ai-cli.dll");
+        var cliAssemblyPath = Path.Combine(AppContext.BaseDirectory, "madorin.dll");
         if (!File.Exists(cliAssemblyPath))
         {
             throw new FileNotFoundException("The Runtime CLI assembly was not copied to the test output.", cliAssemblyPath);

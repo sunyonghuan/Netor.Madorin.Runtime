@@ -12,41 +12,48 @@ internal static class DatabaseCommands
         Option<string?> workspaceOption,
         Option<string?> dataDirectoryOption,
         TextReader input,
-        TextWriter output)
+        TextWriter output,
+        string? configDirectory = null)
     {
         var command = new Command("db", "Maintain the Runtime state database.");
         command.Subcommands.Add(CreateCheck(
             jsonOption,
             workspaceOption,
             dataDirectoryOption,
-            output));
+            output,
+            configDirectory));
         command.Subcommands.Add(CreateRepair(
             jsonOption,
             workspaceOption,
             dataDirectoryOption,
             input,
-            output));
+            output,
+            configDirectory));
         command.Subcommands.Add(CreateRebuild(
             jsonOption,
             workspaceOption,
             dataDirectoryOption,
             input,
-            output));
+            output,
+            configDirectory));
         command.Subcommands.Add(CreateVacuum(
             jsonOption,
             workspaceOption,
             dataDirectoryOption,
-            output));
+            output,
+            configDirectory));
         command.Subcommands.Add(CreateBackup(
             jsonOption,
             workspaceOption,
             dataDirectoryOption,
-            output));
+            output,
+            configDirectory));
         command.Subcommands.Add(CreateMigrate(
             jsonOption,
             workspaceOption,
             dataDirectoryOption,
-            output));
+            output,
+            configDirectory));
         return command;
     }
 
@@ -54,7 +61,8 @@ internal static class DatabaseCommands
         Option<bool> jsonOption,
         Option<string?> workspaceOption,
         Option<string?> dataDirectoryOption,
-        TextWriter output)
+        TextWriter output,
+        string? configDirectory)
     {
         var command = new Command("migrate", "Apply forward database migrations.");
         var targetOption = CommandOptions.Create<int?>(
@@ -69,9 +77,10 @@ internal static class DatabaseCommands
         {
             try
             {
-                var context = StandaloneRuntimeContext.Create(
+                var context = await StandaloneRuntimeContext.CreatePreparedAsync(
                     parseResult.GetValue(workspaceOption),
-                    parseResult.GetValue(dataDirectoryOption));
+                    parseResult.GetValue(dataDirectoryOption),
+                    configDirectory);
                 var targetVersion = parseResult.GetValue(targetOption);
                 if (parseResult.GetValue(dryRunOption))
                 {
@@ -126,16 +135,18 @@ internal static class DatabaseCommands
         Option<bool> jsonOption,
         Option<string?> workspaceOption,
         Option<string?> dataDirectoryOption,
-        TextWriter output)
+        TextWriter output,
+        string? configDirectory)
     {
         var command = new Command("vacuum", "Compact the SQLite database.");
         command.SetAction(async parseResult =>
         {
             try
             {
-                var context = StandaloneRuntimeContext.Create(
+                var context = await StandaloneRuntimeContext.CreatePreparedAsync(
                     parseResult.GetValue(workspaceOption),
-                    parseResult.GetValue(dataDirectoryOption));
+                    parseResult.GetValue(dataDirectoryOption),
+                    configDirectory);
                 var result = await DatabaseMaintenanceService.VacuumAsync(
                         context.WorkspaceRoot,
                         context.DataDirectory)
@@ -183,7 +194,8 @@ internal static class DatabaseCommands
         Option<bool> jsonOption,
         Option<string?> workspaceOption,
         Option<string?> dataDirectoryOption,
-        TextWriter output)
+        TextWriter output,
+        string? configDirectory)
     {
         var command = new Command("backup", "Back up Runtime state.");
         var outputOption = CommandOptions.Create<string?>(
@@ -198,9 +210,10 @@ internal static class DatabaseCommands
         {
             try
             {
-                var context = StandaloneRuntimeContext.Create(
+                var context = await StandaloneRuntimeContext.CreatePreparedAsync(
                     parseResult.GetValue(workspaceOption),
-                    parseResult.GetValue(dataDirectoryOption));
+                    parseResult.GetValue(dataDirectoryOption),
+                    configDirectory);
                 var result = await DatabaseMaintenanceService.BackupAsync(
                         context.WorkspaceRoot,
                         context.DataDirectory,
@@ -250,7 +263,8 @@ internal static class DatabaseCommands
         Option<bool> jsonOption,
         Option<string?> workspaceOption,
         Option<string?> dataDirectoryOption,
-        TextWriter output)
+        TextWriter output,
+        string? configDirectory)
     {
         var command = new Command("check", "Check database integrity without modifying storage.");
         var verboseOption = CommandOptions.Create<bool>(
@@ -261,9 +275,10 @@ internal static class DatabaseCommands
         {
             try
             {
-                var context = StandaloneRuntimeContext.Create(
+                var context = await StandaloneRuntimeContext.CreatePreparedAsync(
                     parseResult.GetValue(workspaceOption),
-                    parseResult.GetValue(dataDirectoryOption));
+                    parseResult.GetValue(dataDirectoryOption),
+                    configDirectory);
                 var result = await DatabaseMaintenanceService.CheckAsync(context.DataDirectory)
                     .ConfigureAwait(false);
                 WriteCheckResult(
@@ -296,7 +311,8 @@ internal static class DatabaseCommands
         Option<string?> workspaceOption,
         Option<string?> dataDirectoryOption,
         TextReader input,
-        TextWriter output)
+        TextWriter output,
+        string? configDirectory)
     {
         var command = new Command(
             "repair",
@@ -314,9 +330,10 @@ internal static class DatabaseCommands
             var isJson = CliOutput.IsJson(parseResult, jsonOption);
             try
             {
-                var context = StandaloneRuntimeContext.Create(
+                var context = await StandaloneRuntimeContext.CreatePreparedAsync(
                     parseResult.GetValue(workspaceOption),
-                    parseResult.GetValue(dataDirectoryOption));
+                    parseResult.GetValue(dataDirectoryOption),
+                    configDirectory);
                 var plan = await DatabaseMaintenanceService.CheckAsync(context.DataDirectory)
                     .ConfigureAwait(false);
                 if (plan.Healthy)
@@ -415,7 +432,8 @@ internal static class DatabaseCommands
         Option<string?> workspaceOption,
         Option<string?> dataDirectoryOption,
         TextReader input,
-        TextWriter output)
+        TextWriter output,
+        string? configDirectory)
     {
         var command = new Command("rebuild", "Rebuild indexes from canonical message files.");
         var dryRunOption = CommandOptions.Create<bool>(
@@ -431,9 +449,10 @@ internal static class DatabaseCommands
             var isJson = CliOutput.IsJson(parseResult, jsonOption);
             try
             {
-                var context = StandaloneRuntimeContext.Create(
+                var context = await StandaloneRuntimeContext.CreatePreparedAsync(
                     parseResult.GetValue(workspaceOption),
-                    parseResult.GetValue(dataDirectoryOption));
+                    parseResult.GetValue(dataDirectoryOption),
+                    configDirectory);
                 var plan = await DatabaseMaintenanceService.PlanRebuildAsync(
                         context.DataDirectory)
                     .ConfigureAwait(false);

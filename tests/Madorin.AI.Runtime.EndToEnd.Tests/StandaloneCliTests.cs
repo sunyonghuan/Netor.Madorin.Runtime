@@ -319,6 +319,116 @@ public sealed class StandaloneCliTests
     }
 
     [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task RunForTests_DefaultWorkspaceData_ReopensAfterRestartAndWorkspaceMove()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var configDirectory = Path.Combine(root, "config");
+            var workspace = Path.Combine(root, "workspace original");
+            var relocatedWorkspace = Path.Combine(root, "工作区 relocated");
+            Directory.CreateDirectory(workspace);
+            await WriteConfigurationAsync(configDirectory, "test-key");
+            var provider = new RecordingProvider();
+            var runOutput = new StringWriter();
+
+            var runExitCode = CliApplication.RunForTests(
+                ["run", "--workspace", workspace, "--input", "persist this session"],
+                runOutput,
+                new StringReader(string.Empty),
+                configDirectory,
+                _ => _ => provider);
+
+            Assert.AreEqual(ExitCodes.Success, runExitCode, runOutput.ToString());
+            var context = StandaloneRuntimeContext.Create(
+                workspace,
+                configDirectory: configDirectory);
+            Assert.IsTrue(File.Exists(Path.Combine(workspace, ".madorin", "state.db")));
+            Assert.IsNotNull(context.LegacyDataDirectory);
+            Assert.IsFalse(Directory.Exists(context.LegacyDataDirectory));
+
+            var secondOutput = new StringWriter();
+            var secondExitCode = CliApplication.RunForTests(
+                ["session", "list", "--workspace", workspace, "--json"],
+                secondOutput,
+                new StringReader(string.Empty),
+                configDirectory,
+                _ => _ => provider);
+
+            Assert.AreEqual(ExitCodes.Success, secondExitCode, secondOutput.ToString());
+            Assert.Contains("sessionId", secondOutput.ToString(), StringComparison.Ordinal);
+
+            Directory.Move(workspace, relocatedWorkspace);
+            var relocatedOutput = new StringWriter();
+            var relocatedExitCode = CliApplication.RunForTests(
+                ["session", "list", "--workspace", relocatedWorkspace, "--json"],
+                relocatedOutput,
+                new StringReader(string.Empty),
+                configDirectory,
+                _ => _ => provider);
+
+            Assert.AreEqual(ExitCodes.Success, relocatedExitCode, relocatedOutput.ToString());
+            Assert.Contains("sessionId", relocatedOutput.ToString(), StringComparison.Ordinal);
+            Assert.IsTrue(File.Exists(Path.Combine(relocatedWorkspace, ".madorin", "state.db")));
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [TestMethod]
+    [DataRow("db")]
+    [DataRow("storage")]
+    [Timeout(20_000, CooperativeCancellation = true)]
+    public async Task RunForTests_MaintenanceCommandUsesConfiguredLegacyMigrationRoot(
+        string commandGroup)
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var configDirectory = Path.Combine(root, "custom-config");
+            var workspace = Path.Combine(root, "workspace", commandGroup);
+            Directory.CreateDirectory(workspace);
+            var context = StandaloneRuntimeContext.Create(
+                workspace,
+                configDirectory: configDirectory);
+            Assert.IsNotNull(context.LegacyDataDirectory);
+            Directory.CreateDirectory(context.LegacyDataDirectory);
+            var legacyProof = Path.Combine(context.LegacyDataDirectory, "migration-proof.txt");
+            await File.WriteAllTextAsync(
+                legacyProof,
+                commandGroup,
+                _testContext.CancellationToken);
+            var output = new StringWriter();
+
+            var exitCode = CliApplication.RunForTests(
+                [commandGroup, "check", "--workspace", workspace, "--json"],
+                output,
+                new StringReader(string.Empty),
+                configDirectory,
+                _ => _ => throw new InvalidOperationException(
+                    "Maintenance checks must not resolve a Provider."));
+
+            Assert.AreEqual(ExitCodes.GeneralError, exitCode, output.ToString());
+            Assert.IsTrue(File.Exists(Path.Combine(
+                workspace,
+                ".madorin",
+                "migration-proof.txt")));
+            Assert.IsTrue(File.Exists(Path.Combine(
+                workspace,
+                ".madorin",
+                StandaloneWorkspaceDataMigrator.MigrationMarkerFileName)));
+            Assert.IsTrue(File.Exists(legacyProof));
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [TestMethod]
     public async Task RunForTests_MemoryCommands_CoverLifecycleCancellationAndFailures()
     {
         var root = CreateTemporaryDirectory();
@@ -687,7 +797,7 @@ public sealed class StandaloneCliTests
             CreateNoWindow = true,
             WorkingDirectory = workspace
         };
-        startInfo.ArgumentList.Add(Path.Combine(AppContext.BaseDirectory, "madorin-ai-cli.dll"));
+        startInfo.ArgumentList.Add(Path.Combine(AppContext.BaseDirectory, "madorin.dll"));
         startInfo.ArgumentList.Add("memory");
         startInfo.ArgumentList.Add("add");
         startInfo.ArgumentList.Add("project");

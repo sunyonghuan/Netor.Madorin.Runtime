@@ -89,6 +89,8 @@ Desktop.ini
 $RECYCLE.BIN/
 
 # Local agent state
+/.artifacts/
+/.codemap/
 .agents/
 .codex/
 .claude/

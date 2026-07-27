@@ -1839,7 +1839,8 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                     .. projection.Messages,
                 ],
                 snapshot,
-                AvailableTools: ResolveAvailableTools(agent, providerId)),
+                AvailableTools: ResolveAvailableTools(agent, providerId),
+                HistoryMessageCount: 1 + projection.Messages.Length),
             projection);
     }
 
@@ -1915,7 +1916,8 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                         [new TextContentBlock(instruction)])
                 ],
                 snapshot,
-                AvailableTools: null),
+                AvailableTools: null,
+                HistoryMessageCount: 1 + projection.Messages.Length),
             projection);
     }
 
@@ -3214,7 +3216,8 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                 ],
                 snapshot,
                 AvailableTools: null,
-                StructuredOutput: CreateHostStructuredOutput()),
+                StructuredOutput: CreateHostStructuredOutput(),
+                HistoryMessageCount: 1 + projection.Messages.Length),
             projection);
     }
 
@@ -3288,7 +3291,8 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                 ],
                 snapshot,
                 AvailableTools: null,
-                StructuredOutput: CreateSelectorStructuredOutput()),
+                StructuredOutput: CreateSelectorStructuredOutput(),
+                HistoryMessageCount: 1 + projection.Messages.Length),
             projection);
     }
 

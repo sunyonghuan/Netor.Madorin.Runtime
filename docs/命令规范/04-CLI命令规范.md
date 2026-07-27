@@ -81,7 +81,7 @@ madorin run
   --output-format text|json|jsonl  可选；输出格式（默认 text）
   --no-stream              可选；等待完整结果后输出（非流式）
   --timeout <seconds>      可选；执行超时
-  --data-dir <path>        可选；覆盖数据目录
+  --data-dir <path>        可选；覆盖数据目录（默认 {workspace}/.madorin）
 ```
 
 **交互模式斜杠命令**见第 8 节。
@@ -135,6 +135,8 @@ madorin doctor
 ### `madorin config`
 
 全局配置固定为当前用户目录下的 `~/.madorin/config.json` 和 `agents/*.json`。工作区可选配置固定为 `<workspace>/.madorin/config.json`，只保存 `schemaVersion` 和 `selection.provider/model/agent`；不向父目录扫描，不自动创建，不允许凭据、Provider 地址或 Agent 正文。
+
+工作区 `.madorin` 同时是独立 CLI 的默认运行数据目录；`state.db`、`messages/`、`blobs/`、检查点和日志不写入用户级配置目录。旧版本的 `~/.madorin/data/workspaces/<workspaceKey>` 只作为兼容迁移源：首次使用新版本访问该工作区时在工作区锁内复制、校验并切换，旧目录保留；新旧两处均已有运行数据时拒绝自动合并。
 
 ```text
 madorin config init                 交互创建全局配置和默认 Agent

@@ -45,14 +45,14 @@ public sealed class BuiltinFileToolTests
         var write = await ExecuteAsync(
             executor,
             BuiltinToolRegistry.FileWriteToolId,
-            """{"path":"docs/data.txt","content":"one\ntwo\nthree\n"}""",
+            """{"path":"docs/data.txt","content":"one\ntwo\nthree\n","encoding":"utf-8","mode":"create"}""",
             permission);
         Assert.IsTrue(write.Success, write.Error);
 
         var status = await ExecuteAsync(
             executor,
             BuiltinToolRegistry.FileStatusToolId,
-            """{"path":"docs/data.txt"}""",
+            """{"path":"docs/data.txt","encoding":"utf-8"}""",
             permission);
         Assert.IsTrue(status.Success, status.Error);
         using (var output = JsonDocument.Parse(status.OutputJson!))
@@ -64,20 +64,20 @@ public sealed class BuiltinFileToolTests
         var read = await ExecuteAsync(
             executor,
             BuiltinToolRegistry.FileReadToolId,
-            """{"path":"docs/data.txt"}""",
+            """{"path":"docs/data.txt","encoding":"utf-8"}""",
             permission);
         Assert.IsTrue(read.Success, read.Error);
         using (var output = JsonDocument.Parse(read.OutputJson!))
         {
             Assert.AreEqual(
-                "one\ntwo\nthree\n",
+                "1| one\n2| two\n3| three\n4| ",
                 output.RootElement.GetProperty("content").GetString());
         }
 
         var search = await ExecuteAsync(
             executor,
             BuiltinToolRegistry.FileSearchToolId,
-            """{"path":"docs","query":"two","maxResults":5}""",
+            """{"path":"docs","query":"two","encoding":"utf-8","maxResults":5}""",
             permission);
         Assert.IsTrue(search.Success, search.Error);
         using (var output = JsonDocument.Parse(search.OutputJson!))
@@ -93,11 +93,11 @@ public sealed class BuiltinFileToolTests
             TestContext.CancellationToken);
         var expectedHash = Convert.ToHexString(SHA256.HashData(currentBytes));
         var patchArguments = $$"""
-            {"path":"docs/data.txt","expectedHash":"{{expectedHash}}","startLine":2,"endLine":2,"replacement":"second"}
+            {"path":"docs/data.txt","encoding":"utf-8","expectedHash":"{{expectedHash}}","operations":[{"type":"replace","startLine":2,"endLine":2,"content":"second"}]}
             """;
         var patched = await ExecuteAsync(
             executor,
-            BuiltinToolRegistry.FilePatchToolId,
+            BuiltinToolRegistry.FileEditToolId,
             patchArguments,
             permission);
         Assert.IsTrue(patched.Success, patched.Error);
@@ -132,11 +132,11 @@ public sealed class BuiltinFileToolTests
     }
 
     [TestMethod]
-    [DataRow("""{"path":"../escape.txt"}""")]
-    [DataRow("""{"path":"//?/C:/Windows/win.ini"}""")]
-    [DataRow("""{"path":"//server/share/file.txt"}""")]
-    [DataRow("""{"path":"file.txt:secret"}""")]
-    [DataRow("""{"path":".madorin/secret.txt"}""")]
+    [DataRow("""{"path":"../escape.txt","encoding":"utf-8"}""")]
+    [DataRow("""{"path":"//?/C:/Windows/win.ini","encoding":"utf-8"}""")]
+    [DataRow("""{"path":"//server/share/file.txt","encoding":"utf-8"}""")]
+    [DataRow("""{"path":"file.txt:secret","encoding":"utf-8"}""")]
+    [DataRow("""{"path":".madorin/secret.txt","encoding":"utf-8"}""")]
     public async Task FileRead_DangerousPath_IsRejected(string argumentsJson)
     {
         var result = await ExecuteAsync(
@@ -166,7 +166,7 @@ public sealed class BuiltinFileToolTests
         var result = await ExecuteAsync(
             new BuiltinFsToolExecutor(),
             BuiltinToolRegistry.FileReadToolId,
-            """{"path":"link.txt"}""",
+            """{"path":"link.txt","encoding":"utf-8"}""",
             CreatePermission());
 
         Assert.IsFalse(result.Success);
@@ -189,7 +189,7 @@ public sealed class BuiltinFileToolTests
         var result = await ExecuteAsync(
             new BuiltinFsToolExecutor(),
             BuiltinToolRegistry.FileReadToolId,
-            """{"path":"casesensitivename.TXT"}""",
+            """{"path":"casesensitivename.TXT","encoding":"utf-8"}""",
             CreatePermission());
 
         Assert.IsTrue(result.Success, result.Error);
@@ -206,7 +206,7 @@ public sealed class BuiltinFileToolTests
         var result = await ExecuteAsync(
             new BuiltinFsToolExecutor(),
             BuiltinToolRegistry.FileWriteToolId,
-            """{"path":"existing.txt","content":"replacement"}""",
+            """{"path":"existing.txt","content":"replacement","encoding":"utf-8","mode":"overwrite","expectedHash":"0000000000000000000000000000000000000000000000000000000000000000"}""",
             CreatePermission());
 
         Assert.IsFalse(result.Success);
@@ -218,46 +218,54 @@ public sealed class BuiltinFileToolTests
     }
 
     [TestMethod]
-    public async Task ContentRead_TextAndBinary_ReturnsPagesMetadataAndDigest()
+    public async Task FileRead_ExplicitEncodingSupportsGb2312AndLineRange()
     {
-        var textPath = Path.Join(_root, "page.txt");
-        await File.WriteAllTextAsync(textPath, "hello world", TestContext.CancellationToken);
-        var executor = new BuiltinContentToolExecutor();
-        var permission = CreatePermission();
-
-        var textResult = await ExecuteAsync(
-            executor,
-            BuiltinToolRegistry.ContentReadToolId,
-            """{"path":"page.txt","offset":0,"length":5}""",
-            permission);
-        Assert.IsTrue(textResult.Success, textResult.Error);
-        using (var output = JsonDocument.Parse(textResult.OutputJson!))
-        {
-            Assert.AreEqual("hello", output.RootElement.GetProperty("content").GetString());
-            Assert.AreEqual("utf-8", output.RootElement.GetProperty("encoding").GetString());
-            Assert.AreEqual(5L, output.RootElement.GetProperty("nextOffset").GetInt64());
-            Assert.AreEqual(
-                Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("hello world"))),
-                output.RootElement.GetProperty("sha256").GetString());
-        }
-
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        var path = Path.Join(_root, "gb2312.txt");
         await File.WriteAllBytesAsync(
-            Path.Join(_root, "image.png"),
-            [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00],
+            path,
+            Encoding.GetEncoding(936).GetBytes("第一行\r\n第二行"),
             TestContext.CancellationToken);
-        var binaryResult = await ExecuteAsync(
-            executor,
-            BuiltinToolRegistry.ContentReadToolId,
-            """{"path":"image.png","length":9}""",
-            permission);
-        Assert.IsTrue(binaryResult.Success, binaryResult.Error);
-        using var binaryOutput = JsonDocument.Parse(binaryResult.OutputJson!);
-        Assert.AreEqual("base64", binaryOutput.RootElement.GetProperty("encoding").GetString());
-        Assert.AreEqual("image/png", binaryOutput.RootElement.GetProperty("mediaType").GetString());
+
+        var result = await ExecuteAsync(
+            new BuiltinFsToolExecutor(),
+            BuiltinToolRegistry.FileReadToolId,
+            """{"path":"gb2312.txt","encoding":"gb2312","startLine":2,"endLine":2}""",
+            CreatePermission());
+
+        Assert.IsTrue(result.Success, result.Error);
+        using var output = JsonDocument.Parse(result.OutputJson!);
+        Assert.AreEqual("2| 第二行", output.RootElement.GetProperty("content").GetString());
+        Assert.AreEqual(936, output.RootElement.GetProperty("codePage").GetInt32());
+        Assert.AreEqual(2, output.RootElement.GetProperty("totalLines").GetInt32());
+    }
+
+    [TestMethod]
+    public async Task FileAppend_RequiresExpectedHashAndPreservesEncoding()
+    {
+        var path = Path.Join(_root, "append.txt");
+        await File.WriteAllTextAsync(
+            path,
+            "one\n",
+            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+            TestContext.CancellationToken);
+        var hash = Convert.ToHexString(
+            SHA256.HashData(await File.ReadAllBytesAsync(path, TestContext.CancellationToken)));
+
+        var result = await ExecuteAsync(
+            new BuiltinFsToolExecutor(),
+            BuiltinToolRegistry.FileAppendToolId,
+            $$"""{"path":"append.txt","content":"two\n","encoding":"utf-8","expectedHash":"{{hash}}"}""",
+            CreatePermission(allowOverwrite: true));
+
+        Assert.IsTrue(result.Success, result.Error);
+        Assert.AreEqual(
+            "one\ntwo\n",
+            await File.ReadAllTextAsync(path, TestContext.CancellationToken));
     }
 
     private Task<ToolResult> ExecuteAsync(
-        IToolExecutor executor,
+        BuiltinFsToolExecutor executor,
         string toolId,
         string argumentsJson,
         ToolPermissionContext permission) => executor.ExecuteAsync(

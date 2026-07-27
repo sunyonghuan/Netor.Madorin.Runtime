@@ -89,7 +89,7 @@ internal static class DoctorCommand
         StandaloneRuntimeContext context;
         try
         {
-            context = StandaloneRuntimeContext.Create(
+            context = await StandaloneRuntimeContext.CreatePreparedAsync(
                 workspace,
                 parseResult.GetValue(dataDirectoryOption),
                 configDirectory);
@@ -98,6 +98,11 @@ internal static class DoctorCommand
         {
             WriteArgumentError(parseResult, jsonOption, output, ex.Message);
             return ExitCodes.InvalidArguments;
+        }
+        catch (StandaloneWorkspaceDataMigrationException ex)
+        {
+            WriteWorkspaceError(parseResult, jsonOption, output, ex.Message);
+            return ExitCodes.WorkspaceError;
         }
 
         var loader = new StandaloneConfigLoader(context.ConfigDirectory);
@@ -795,6 +800,22 @@ internal static class DoctorCommand
         if (CliOutput.IsJson(parseResult, jsonOption))
         {
             CliOutput.WriteFailure(output, "InvalidArguments", message);
+        }
+        else
+        {
+            output.WriteLine($"doctor: {message}");
+        }
+    }
+
+    private static void WriteWorkspaceError(
+        ParseResult parseResult,
+        Option<bool> jsonOption,
+        TextWriter output,
+        string message)
+    {
+        if (CliOutput.IsJson(parseResult, jsonOption))
+        {
+            CliOutput.WriteFailure(output, "WorkspaceDataUnavailable", message);
         }
         else
         {

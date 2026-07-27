@@ -27,6 +27,7 @@ namespace Madorin.AI.Runtime.Providers.Kimi;
 /// </summary>
 public sealed class KimiProviderAdapter : IRuntimeProviderAdapter
 {
+    private const int DefaultMaxTools = 128;
     private const string ProviderRequestFailed = nameof(ProviderRequestFailed);
     private const string ProviderRateLimited = nameof(ProviderRateLimited);
 
@@ -34,21 +35,37 @@ public sealed class KimiProviderAdapter : IRuntimeProviderAdapter
 
     private readonly ConcurrentDictionary<string, IChatClient> _chatClients =
         new(StringComparer.Ordinal);
+    private static readonly Action<ILogger, int, int, string, Exception?> ToolsTrimmedLog =
+        LoggerMessage.Define<int, int, string>(
+            LogLevel.Warning,
+            new EventId(1, "KimiToolsTrimmed"),
+            "Kimi tool definitions were trimmed from {OriginalCount} to {RetainedCount}; removed tools: {RemovedTools}");
 
     private readonly Func<string, IChatClient> _chatClientFactory;
+    private readonly ILogger<KimiProviderAdapter> _logger;
+    private readonly int _maxTools;
 
     public KimiProviderAdapter(
         string apiKey,
         string? baseUrl = null,
         ILoggerFactory? loggerFactory = null,
         IReadOnlyList<ProviderModel>? models = null,
-        string providerId = "kimi")
+        string providerId = "kimi",
+        int? maxTools = DefaultMaxTools)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(apiKey);
         ArgumentException.ThrowIfNullOrWhiteSpace(providerId);
+        if (maxTools is < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxTools),
+                "Max tools must be zero, a positive integer, or null.");
+        }
 
         var logFactory = loggerFactory
             ?? Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance;
+        _logger = logFactory.CreateLogger<KimiProviderAdapter>();
+        _maxTools = maxTools ?? DefaultMaxTools;
         Models = models ?? KimiModelCatalog.All;
         ProviderId = providerId;
 
@@ -220,7 +237,7 @@ public sealed class KimiProviderAdapter : IRuntimeProviderAdapter
         return [.. messages];
     }
 
-    private static List<AITool>? CreateTools(ToolDescriptor[]? tools)
+    private List<AITool>? CreateTools(ToolDescriptor[]? tools)
     {
         if (tools is not { Length: > 0 })
         {
@@ -228,9 +245,27 @@ public sealed class KimiProviderAdapter : IRuntimeProviderAdapter
         }
 
         ProviderToolNamePolicy.ValidateUniqueNames(tools);
-        var declarations = new List<AITool>(tools.Length);
-        foreach (var tool in tools)
+        var retainedCount = _maxTools > 0
+            ? Math.Min(tools.Length, _maxTools)
+            : tools.Length;
+        if (retainedCount < tools.Length)
         {
+            var removedNames = tools
+                .Skip(retainedCount)
+                .Take(20)
+                .Select(ProviderToolNamePolicy.GetName);
+            ToolsTrimmedLog(
+                _logger,
+                tools.Length,
+                retainedCount,
+                string.Join(", ", removedNames),
+                null);
+        }
+
+        var declarations = new List<AITool>(retainedCount);
+        for (var index = 0; index < retainedCount; index++)
+        {
+            var tool = tools[index];
             using var schema = JsonDocument.Parse(tool.InputSchemaJson);
             declarations.Add(AIFunctionFactory.CreateDeclaration(
                 ProviderToolNamePolicy.GetName(tool),

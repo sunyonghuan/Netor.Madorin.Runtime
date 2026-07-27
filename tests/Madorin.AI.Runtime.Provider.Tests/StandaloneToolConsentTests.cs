@@ -3,8 +3,11 @@ using System.Text;
 using Madorin.AI.Runtime.Cli.Config;
 using Madorin.AI.Runtime.Cli.Tools;
 using Madorin.AI.Runtime.Contracts;
+using Madorin.AI.Runtime.Persistence.Sqlite;
 using Madorin.AI.Runtime.Services.Tools;
 using Madorin.AI.Runtime.Tools.Abstractions;
+using Madorin.AI.Runtime.Tools.Builtin;
+using Microsoft.Data.Sqlite;
 
 namespace Madorin.AI.Runtime.Provider.Tests;
 
@@ -108,6 +111,25 @@ public sealed class StandaloneToolConsentTests
     }
 
     [TestMethod]
+    public void Create_RunDeleteGrantAllowsOnlyWorkspaceDeletesForCurrentRunAndAgent()
+    {
+        var context = CreateDeletePermissionContext("call-delete-1", "logs/001.log");
+        var factory = new StandaloneToolGrantFactory(new FixedTimeProvider(FixedNow));
+
+        var grant = factory.Create(context, StandaloneToolGrantLifetime.Run);
+
+        Assert.AreEqual(context.Invocation.RunId, grant.RunId);
+        Assert.AreEqual(context.Invocation.AgentId, grant.AgentId);
+        Assert.IsNull(grant.AllowedCallIds);
+        CollectionAssert.AreEqual(new[] { context.Invocation.ToolId }, grant.AllowedToolIds);
+        CollectionAssert.AreEqual(
+            new[] { Path.GetFullPath(_workspace) },
+            grant.AllowedWriteRoots);
+        Assert.IsTrue(grant.AllowDelete);
+        Assert.IsFalse(grant.AllowDelegation);
+    }
+
+    [TestMethod]
     public void Create_RunGrantForOnceOnlyScope_Throws()
     {
         var context = CreatePermissionContext(canGrantForRun: false);
@@ -159,7 +181,96 @@ public sealed class StandaloneToolConsentTests
 
         Assert.AreEqual(ToolAuthorizationDecision.Denied, response.Decision);
         Assert.AreEqual(3, terminal.ReadCount);
-        Assert.AreEqual(3, Count(terminal.Output, "Enter 1, 2, or 3."));
+        Assert.AreEqual(3, Count(terminal.Output, "Select [1/3]:"));
+        Assert.AreEqual(
+            3,
+            Count(
+                terminal.Output,
+                "Option 2 is unavailable for this tool request. Enter 1 or 3."));
+        Assert.DoesNotContain("Select [1/2/3]:", terminal.Output, StringComparison.Ordinal);
+    }
+
+    [TestMethod]
+    [DataRow("1", true)]
+    [DataRow("2", false)]
+    public async Task RequestPermissionAsync_DeleteChoicesExecuteWithExpectedLifetime(
+        string input,
+        bool expectedCallBound)
+    {
+        var firstPath = Path.Combine(_workspace, "logs", "001.log");
+        var secondPath = Path.Combine(_workspace, "logs", "002.log");
+        Directory.CreateDirectory(Path.GetDirectoryName(firstPath)!);
+        await File.WriteAllTextAsync(firstPath, "first", TestContext.CancellationToken);
+        await File.WriteAllTextAsync(secondPath, "second", TestContext.CancellationToken);
+        var firstContext = CreateDeletePermissionContext("call-delete-1", "logs/001.log");
+        var secondContext = CreateDeletePermissionContext("call-delete-2", "logs/002.log");
+        var terminal = new ScriptedTerminal(true, input);
+        using var handler = new StandaloneToolConsentHandler(
+            terminal,
+            new StandaloneToolGrantFactory());
+
+        var response = await handler.RequestPermissionAsync(
+            firstContext,
+            TestContext.CancellationToken);
+
+        Assert.AreEqual(ToolAuthorizationDecision.Granted, response.Decision);
+        Assert.IsNotNull(response.Grant);
+        Assert.AreEqual(expectedCallBound, response.Grant.AllowedCallIds is not null);
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync(TestContext.CancellationToken);
+        await SqliteSchema.EnsureCreatedAsync(connection, TestContext.CancellationToken);
+        using var store = new SqliteToolIntentRepository(connection);
+        var authorization = new ToolAuthorizationService(
+            store,
+            RuntimeToolPolicy.CreateRestricted(_workspace));
+        await authorization.SaveGrantAsync(
+            response.Grant,
+            ct: TestContext.CancellationToken);
+
+        var firstAuthorization = await authorization.AuthorizeAsync(
+            firstContext.Invocation,
+            firstContext.Descriptor,
+            ct: TestContext.CancellationToken);
+        Assert.AreEqual(ToolAuthorizationDecision.Granted, firstAuthorization.Decision);
+        Assert.IsNotNull(firstAuthorization.EffectivePermission);
+        var executor = new BuiltinFsToolExecutor();
+        var firstResult = await executor.ExecuteAsync(
+            firstContext.Invocation with
+            {
+                PermissionContext = firstAuthorization.EffectivePermission
+            },
+            TestContext.CancellationToken);
+        Assert.IsTrue(firstResult.Success, firstResult.Error);
+        Assert.IsFalse(File.Exists(firstPath));
+
+        var secondAuthorization = await authorization.AuthorizeAsync(
+            secondContext.Invocation,
+            secondContext.Descriptor,
+            ct: TestContext.CancellationToken);
+        Assert.AreEqual(
+            expectedCallBound
+                ? ToolAuthorizationDecision.Denied
+                : ToolAuthorizationDecision.Granted,
+            secondAuthorization.Decision);
+        if (expectedCallBound)
+        {
+            Assert.IsTrue(File.Exists(secondPath));
+            return;
+        }
+
+        Assert.IsNotNull(secondAuthorization.EffectivePermission);
+        var secondResult = await executor.ExecuteAsync(
+            secondContext.Invocation with
+            {
+                PermissionContext = secondAuthorization.EffectivePermission
+            },
+            TestContext.CancellationToken);
+        Assert.IsTrue(secondResult.Success, secondResult.Error);
+        Assert.IsFalse(File.Exists(secondPath));
+        Assert.Contains(
+            "2  Allow workspace deletes for this Run",
+            terminal.Output,
+            StringComparison.Ordinal);
     }
 
     [TestMethod]
@@ -355,6 +466,50 @@ public sealed class StandaloneToolConsentTests
             _workspace);
     }
 
+    private ToolPermissionConsentContext CreateDeletePermissionContext(
+        string callId,
+        string path)
+    {
+        var descriptor = new BuiltinToolRegistry()
+            .GetTools([BuiltinToolRegistry.FileDeleteToolId])
+            .Single();
+        var invocation = new ToolInvocation(
+            callId,
+            descriptor.ToolId,
+            "agent-1",
+            ParentAgentId: null,
+            $"{{\"path\":\"{path.Replace("\\", "/", StringComparison.Ordinal)}\"}}",
+            "run-1",
+            "session-1",
+            $"invocation-{callId}");
+        var scopeResolution = new BuiltinToolConsentScopeResolver().Resolve(
+            invocation,
+            descriptor,
+            _workspace);
+        Assert.IsTrue(scopeResolution.IsSuccess, scopeResolution.Error);
+        var argumentsHash = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(
+                Encoding.UTF8.GetBytes(invocation.ArgumentsJson)))
+            .ToLowerInvariant();
+        return new ToolPermissionConsentContext(
+            new ToolPermissionRequest(
+                $"permission-{callId}",
+                invocation.AgentId,
+                invocation.ParentAgentId,
+                invocation.ToolId,
+                invocation.CallId,
+                argumentsHash,
+                descriptor.Risk.ToString(),
+                "call-or-run",
+                "Permission required.",
+                CorrelationId: $"correlation-{callId}",
+                RunId: invocation.RunId),
+            invocation,
+            descriptor,
+            scopeResolution,
+            _workspace);
+    }
+
     private ToolApprovalConsentContext CreateApprovalContext()
     {
         var permission = CreatePermissionContext(canGrantForRun: false);
@@ -380,7 +535,7 @@ public sealed class StandaloneToolConsentTests
     private static ToolInvocation CreateInvocation(string callId, string argumentsJson) =>
         new(
             callId,
-            "builtin.fs.read",
+            "mcli_fs_read",
             "agent-1",
             ParentAgentId: null,
             argumentsJson,
@@ -390,7 +545,7 @@ public sealed class StandaloneToolConsentTests
 
     private static ToolDescriptor CreateDescriptor() =>
         new(
-            "builtin.fs.read",
+            "mcli_fs_read",
             "builtin",
             "Read file",
             "Reads a file.",

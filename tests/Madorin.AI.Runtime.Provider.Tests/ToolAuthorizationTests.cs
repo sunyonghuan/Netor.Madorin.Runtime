@@ -548,7 +548,7 @@ public sealed class ToolAuthorizationTests
             RuntimeToolPolicy.CreateRestricted(_workspace));
         var invocation = new ToolInvocation(
             "call-process",
-            "builtin.process.run",
+            "mcli_process",
             "agent-root",
             ParentAgentId: null,
             "{}",

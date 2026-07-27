@@ -193,12 +193,14 @@ public static class CliApplication
             workspaceOption,
             dataDirectoryOption,
             commandInput,
-            commandOutput));
+            commandOutput,
+            configDirectory));
         rootCommand.Subcommands.Add(StorageCommands.Create(
             jsonOption,
             workspaceOption,
             dataDirectoryOption,
-            commandOutput));
+            commandOutput,
+            configDirectory));
         rootCommand.Subcommands.Add(ControlCommands.Create(
             jsonOption,
             workspaceOption,

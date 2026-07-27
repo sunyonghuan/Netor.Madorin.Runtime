@@ -112,7 +112,7 @@ public sealed class ProviderConformanceTests
         ToolDescriptor[] tools =
         [
             new(
-                "builtin.fs.read",
+                "mcli_fs_read",
                 "builtin",
                 "Read file",
                 "Reads one file.",
@@ -126,7 +126,7 @@ public sealed class ProviderConformanceTests
 
         Assert.ContainsSingle(events.OfType<InvocationCompletedProviderEvent>());
         var request = Assert.ContainsSingle(server.Requests);
-        Assert.Contains("builtin__fs__read", request.Body, StringComparison.Ordinal);
+        Assert.Contains("mcli_fs_read", request.Body, StringComparison.Ordinal);
         Assert.DoesNotContain("\"name\":\"Read file\"", request.Body, StringComparison.Ordinal);
     }
 

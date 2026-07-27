@@ -1,6 +1,6 @@
-# Madorin AI Runtime V1 执行步骤总览 : 91.9%
+# Madorin AI Runtime V1 执行步骤总览 : 92.0%
 
-> 文档状态：执行中 · 总进度：91.9%
+> 文档状态：执行中 · 总进度：92.0%
 >
 > 本目录只定义后续实施顺序、交付物和验收门禁，不表示对应业务能力已经实现。
 >
@@ -10,10 +10,10 @@
 
 | 统计项 | 已完成 | 总数 | 进度 |
 | --- | ---: | ---: | ---: |
-| 全部检查项 | 965 | 1050 | 91.9% |
+| 全部检查项 | 966 | 1050 | 92.0% |
 | 已完成阶段 | 8 | 15 | 53.3% |
 
-总进度按 15 份阶段文档中的全部执行任务、测试要求和完成标准计算，不按阶段数量平均计算。阶段 0、阶段 1、阶段 3、阶段 4、阶段 6B、阶段 6C、阶段 7 和阶段 7A 已完成，阶段 2 已完成 Windows 与 Linux x64 实机项，仅等待 macOS 实机权限验证；阶段 4A、阶段 4B、阶段 5、阶段 5A、阶段 6A 和阶段 8 正在执行。阶段 5A 的 112 个检查项已有 106 项完成，剩余 macOS/全 RID 实机路径、性能统计、全 RID Native AOT/发布、六解释器真实成功矩阵和真实 Provider 冒烟。阶段 8 已完成协议、正常业务、取消/超时/竞争、断线/崩溃/重放、持久化/恢复、工具安全及 Windows/Linux 全量回归的对应检查项，尚待发布候选基线、macOS/全 RID 实机、安装升级回退、性能归档和发布评审。阶段 6B 已闭合会议配置、Schema、角色编排、轮次/超时/终止条件、HITL、动态参与者及并发版本控制、投影、摘要、恢复和显式崩溃注入门禁；阶段 6C 已闭合 Work 计划/修订、步骤调度、子智能体、工具与审批、两级幂等、权限边界、ContextProjection、后台作业生命周期、宿主断线与事件重放、Provider 凭据等待、崩溃恢复、三模式 Resume、损坏诊断和全部故障注入门禁。阶段 7 已闭合 Client SDK、Session/数据库/存储维护、`ctl` 在线控制、统一输出、完整 REPL、工作区互斥、三 Runtime 参考宿主、Doctor、Session 维护审计、使用运维文档、完整命令与 JSON Schema 快照、记忆工具模型续调、SDK 特殊字符串往返、Client 公共传输边界、Schema 并发隔离、Client 生命周期联合矩阵、完整多进程拓扑和同标识多实例隔离，以及记忆、宿主配置隔离、维护故障矩阵、CLI 进程矩阵和 Windows 发布实测。阶段 7A 已闭合并发 Run 故障隔离、可靠终态、进度快照、Runtime/Client 生命周期、HITL 恢复和 SampleHost 宿主状态闭环。
+总进度按 15 份阶段文档中的全部执行任务、测试要求和完成标准计算，不按阶段数量平均计算。阶段 0、阶段 1、阶段 3、阶段 4、阶段 6B、阶段 6C、阶段 7 和阶段 7A 已完成，阶段 2 已完成 Windows 与 Linux x64 实机项，仅等待 macOS 实机权限验证；阶段 4A、阶段 4B、阶段 5、阶段 5A、阶段 6A 和阶段 8 正在执行。阶段 5A 的 112 个检查项已有 106 项完成，剩余 macOS/全 RID 实机路径、性能统计、全 RID Native AOT/发布、六解释器真实成功矩阵和真实 Provider 冒烟。阶段 8 已完成协议、正常业务、取消/超时/竞争、断线/崩溃/重放、持久化/恢复、工具安全、Windows Debug 全量测试和 Windows `win-x64` Native AOT；首发发布基线已调整为 Windows-only，macOS/Linux/其他 RID 不在本轮继续推进。阶段 8 距离 Windows-only 首发仍待安装/PATH/Windows 双击/升级/回退、性能归档、发布交付物、发布评审和真实 Provider 冒烟证据。阶段 6B 已闭合会议配置、Schema、角色编排、轮次/超时/终止条件、HITL、动态参与者及并发版本控制、投影、摘要、恢复和显式崩溃注入门禁；阶段 6C 已闭合 Work 计划/修订、步骤调度、子智能体、工具与审批、两级幂等、权限边界、ContextProjection、后台作业生命周期、宿主断线与事件重放、Provider 凭据等待、崩溃恢复、三模式 Resume、损坏诊断和全部故障注入门禁。阶段 7 已闭合 Client SDK、Session/数据库/存储维护、`ctl` 在线控制、统一输出、完整 REPL、工作区互斥、三 Runtime 参考宿主、Doctor、Session 维护审计、使用运维文档、完整命令与 JSON Schema 快照、记忆工具模型续调、SDK 特殊字符串往返、Client 公共传输边界、Schema 并发隔离、Client 生命周期联合矩阵、完整多进程拓扑和同标识多实例隔离，以及记忆、宿主配置隔离、维护故障矩阵、CLI 进程矩阵和 Windows 发布实测。阶段 7A 已闭合并发 Run 故障隔离、可靠终态、进度快照、Runtime/Client 生命周期、HITL 恢复和 SampleHost 宿主状态闭环。
 
 进度更新规则：
 
@@ -96,7 +96,7 @@ Terminal D -> madorin -> Workspace D
 4. `runtimeInstanceId` 标识 Runtime 进程实例，`hostInstanceId` 标识宿主进程。每条连接在认证后固定绑定这两个标识，不能在连接存续期间切换。
 5. GSN 只在单个 Runtime 实例内单调。宿主必须按 `(runtimeInstanceId, gsn)` 保存游标，按 `(runtimeInstanceId, runId)` 路由查询、取消和事件，不能把多个 Runtime 的 GSN 或 Run ID 放进同一无实例归属的键空间。
 6. 每个宿主到 Runtime 子进程的启动关系使用独立认证 secret、独立 Client 句柄和独立进程所有权；关闭、取消、重连或认证失败只能影响目标实例。
-7. 独立 CLI 默认把运行数据写入 `~/.madorin/data/workspaces/{workspaceKey}`；`workspaceKey` 由规范化工作区路径稳定派生，不在目录名中暴露原始路径。
+7. 独立 CLI 默认把运行数据写入 `<workspace>/.madorin`；`workspaceKey` 仅用于工作区写锁和旧版用户级数据迁移识别。
 8. `config.json`、`agents/` 和全局 `memory.md` 仍由同一系统用户的多个 CLI 共享。并发读取允许；修改必须使用跨进程写锁、重新读取最新内容和原子替换。
 9. V1 不为独立 CLI 引入自动守护进程或复杂实例池，也不自动附着到首个独立 CLI 进程。相同工作区的第二个进程直接返回明确占用错误和持锁实例信息。
 10. 单个 Runtime 内部仍按后续阶段实现多 Run，但进程级隔离测试必须独立存在，不能用单进程多 Run 测试替代。
@@ -125,9 +125,9 @@ Skills 加载与调用作为阶段 5A 横切专项执行，不重开已归档的
 | 6C | [06C-工作模式与故障恢复](../备档/执行步骤/06C-工作模式与故障恢复.md) | 已完成 | 77 / 77 | 100% | Work 计划/步骤/子智能体/工具/审批闭环、两级幂等、权限边界、投影、后台作业生命周期、凭据等待、断线重放、崩溃恢复和三模式统一 Resume 已通过全量测试与故障注入门禁 |
 | 7 | [07-CLI-ClientSDK与参考宿主](../备档/执行步骤/07-CLI-ClientSDK与参考宿主.md) | 已完成 | 96 / 96 | 100% | Client、CLI/REPL、维护与在线控制、三 Runtime 参考宿主、统一输出、文档、完整测试矩阵及 Windows 发布实测全部闭合 |
 | 7A | [07A-并发故障隔离与宿主状态闭环](./07A-并发故障隔离与宿主状态闭环.md) | 已完成 | 26 / 26 | 100% | 并发 Run 故障隔离、可靠终态、进度快照、Runtime/Client 生命周期和宿主恢复闭环 |
-| 8 | [08-验收发布与质量门禁](./08-验收发布与质量门禁.md) | 执行中 | 64 / 111 | 57.7% | Windows Debug/Release、Linux ext4 E2E、协议/安全/恢复矩阵已验收；Linux Provider 仍受 `pwsh` 环境限制，等待 macOS/全 RID、安装升级回退、性能和发布评审 |
+| 8 | [08-验收发布与质量门禁](./08-验收发布与质量门禁.md) | 执行中 | 65 / 111 | 58.6% | Windows-only 首发基线已确认；Windows Debug 全量、Windows `win-x64` AOT、协议/安全/恢复矩阵已验收，等待 Windows 安装升级回退、性能、交付物和发布评审 |
 
-阶段 0、阶段 1、阶段 3、阶段 4、阶段 6B、阶段 6C 已完成，阶段 2 已完成 Windows 与 Linux x64 安全链路，当前只等待 macOS 实机的不同用户 peer credential 拒绝验证。阶段 3 已完成 32 MiB 内存与 512 MiB 磁盘 replay、Delta 丢弃通知、终态文本查询、容量指标、凭据等待单次重试、状态机终态竞争、Outbox 故障恢复、全历史 Schema v7 迁移、Runtime 重启后 rehydrate、Selection Invocation Snapshot 隔离、Session 消息索引分页和 10 万 Session 游标分页基线；JSONL 正文与三模式专属快照的完整恢复已在阶段 6 闭合。阶段 4 的三个正式 Adapter 已完成离线一致性、故障注入、生命周期、脱敏、Blob/Provider 扩展、能力探测、远端取消声明、真实 Provider 冒烟测试分层和 Native AOT 门禁。阶段 4A 已完成独立配置、Agent CRUD、选择优先级、工作区锁、本地 Runtime 专家对话、配置安全及 Windows Native AOT 本机门禁，真正的多进程隔离、Linux/macOS 实机权限、Windows 双击、PATH 安装和阶段 7/8 发布验收仍未勾选；阶段 4B 已闭合 CLI/REPL 命令、双进程追加、配置凭据隔离、宿主/独立 Runtime 一致性及生产 Tool Catalog/Gateway 装配，剩余 Linux/macOS 实机路径矩阵、真实 Provider 调用及阶段 7/8 发布制品联合验收。阶段 5 已闭合协议 1.1、Schema v8、版本化目录、权限/审批/委派、统一网关、内置与反向 RPC 工具、重连恢复和 Expert 工具续调，剩余 Unix 目录句柄相对文件后端、`UnrestrictedShell`、完整安全测试矩阵和真实 Provider 闭环。阶段 5A 已在 Windows Debug/Release 和 Linux ext4 E2E 通过 Skills Catalog、MAF 注入、脚本授权、刷新隔离、CLI/REPL/SDK 和安全回归；剩余 macOS/全 RID 实机路径、性能统计、全 RID Native AOT/发布、六解释器真实成功矩阵和真实 Provider 冒烟。阶段 6C 已闭合 Work 计划正文与修订、原子步骤启动、Stop/Continue/Retry/AskHost、循环审批、两级幂等、子智能体权限、ContextProjection、后台作业生命周期、断线继续与重放、Provider 凭据等待、永久活动态恢复、三模式统一 Resume、损坏诊断和五个崩溃边界；独立后台 worker、跨进程调度与分布式 Worker 不属于 06C/V1 范围。阶段 6A、6B、6C 虽然分文档管理，仍按 6A -> 6B -> 6C 顺序推进。阶段 8 已记录 Windows Debug/Release、Linux ext4 E2E、Linux Provider 环境限制和 Windows AOT 证据，但“全部测试”门禁保留未完成，尚未进入发布评审。宿主通过 Client SDK/协议调用 Runtime 始终是主要使用路径。
+阶段 0、阶段 1、阶段 3、阶段 4、阶段 6B、阶段 6C 已完成，阶段 2 已完成 Windows 与 Linux x64 安全链路，当前只等待 macOS 实机的不同用户 peer credential 拒绝验证。阶段 3 已完成 32 MiB 内存与 512 MiB 磁盘 replay、Delta 丢弃通知、终态文本查询、容量指标、凭据等待单次重试、状态机终态竞争、Outbox 故障恢复、全历史 Schema v7 迁移、Runtime 重启后 rehydrate、Selection Invocation Snapshot 隔离、Session 消息索引分页和 10 万 Session 游标分页基线；JSONL 正文与三模式专属快照的完整恢复已在阶段 6 闭合。阶段 4 的三个正式 Adapter 已完成离线一致性、故障注入、生命周期、脱敏、Blob/Provider 扩展、能力探测、远端取消声明、真实 Provider 冒烟测试分层和 Native AOT 门禁。阶段 4A 已完成独立配置、Agent CRUD、选择优先级、工作区锁、本地 Runtime 专家对话、配置安全及 Windows Native AOT 本机门禁，真正的多进程隔离、Linux/macOS 实机权限、Windows 双击、PATH 安装和阶段 7/8 发布验收仍未勾选；阶段 4B 已闭合 CLI/REPL 命令、双进程追加、配置凭据隔离、宿主/独立 Runtime 一致性及生产 Tool Catalog/Gateway 装配，剩余 Linux/macOS 实机路径矩阵、真实 Provider 调用及阶段 7/8 发布制品联合验收。阶段 5 已闭合协议 1.1、Schema v8、版本化目录、权限/审批/委派、统一网关、内置与反向 RPC 工具、重连恢复和 Expert 工具续调，剩余 Unix 目录句柄相对文件后端、`UnrestrictedShell`、完整安全测试矩阵和真实 Provider 闭环。阶段 5A 已在 Windows Debug/Release 和 Linux ext4 E2E 通过 Skills Catalog、MAF 注入、脚本授权、刷新隔离、CLI/REPL/SDK 和安全回归；剩余 macOS/全 RID 实机路径、性能统计、全 RID Native AOT/发布、六解释器真实成功矩阵和真实 Provider 冒烟。阶段 6C 已闭合 Work 计划正文与修订、原子步骤启动、Stop/Continue/Retry/AskHost、循环审批、两级幂等、子智能体权限、ContextProjection、后台作业生命周期、断线继续与重放、Provider 凭据等待、永久活动态恢复、三模式统一 Resume、损坏诊断和五个崩溃边界；独立后台 worker、跨进程调度与分布式 Worker 不属于 06C/V1 范围。阶段 6A、6B、6C 虽然分文档管理，仍按 6A -> 6B -> 6C 顺序推进。阶段 8 已记录 Windows Debug/Release、Windows Debug 全量测试、Linux 历史 E2E、Linux Provider 环境限制和 Windows AOT 证据；首发门禁已收敛为 Windows-only，macOS/Linux/其他 RID 暂不继续推进。阶段 8 仍未进入发布评审，剩余阻断集中在 Windows 安装/PATH/双击、升级/回退、性能归档、发布制品/哈希/说明和真实 Provider 冒烟。宿主通过 Client SDK/协议调用 Runtime 始终是主要使用路径。
 
 ## 5. 全程不变量
 
@@ -141,7 +141,7 @@ Skills 加载与调用作为阶段 5A 横切专项执行，不重开已归档的
 - 一个宿主进程可以持有多个实例绑定的 Client 句柄，多个宿主进程也可以分别启动多个 Runtime；不得使用进程全局的“当前 Runtime”静态状态。
 - 查询、取消、事件去重和回调路由使用 `(runtimeInstanceId, runId)` 或实例绑定 Client，不能只按 `runId` 在多个 Runtime 之间查找。
 - 每个 Runtime 子进程使用独立 IPC 端点、认证 secret 和所有权记录；停止或释放一个实例不得关闭其他实例。
-- 用户主目录 `~/.madorin/config.json` 和 `~/.madorin/agents/*.json` 只服务直接启动的个人 CLI；独立运行数据写入 `~/.madorin/data/workspaces/{workspaceKey}`，宿主运行数据写入宿主工作区 `.madorin`。
+- 用户主目录 `~/.madorin/config.json`、`~/.madorin/agents/*.json` 和全局 `memory.md` 只服务直接启动的个人 CLI；独立与宿主运行数据默认都写入各自绑定工作区的 `.madorin`，显式数据目录覆盖除外。
 - 不同工作区的 Runtime/CLI 实例可以并行；同一规范化工作区只允许一个写实例，修改实例名、Pipe 前缀或数据目录不得绕过工作区锁。
 - 独立 CLI 不依赖宿主或 IPC，但必须复用 Runtime 的 Provider、Agent、Run 和持久化服务；宿主模式不得隐式依赖或自动加载个人 CLI 配置。
 - 独立配置在启动时一次性加载，V1 不实现 Profile、模式配置目录、远程配置中心或配置热更新。

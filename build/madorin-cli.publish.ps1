@@ -16,7 +16,7 @@ $ProjectFile = Join-Path $SolutionDir 'src\Madorin.AI.Runtime.Cli\Madorin.AI.Run
 $BrandReleaseDirectoryName = 'Madorin-Cli'
 $ReleasesDir = Join-Path $SolutionDir 'releases'
 $OutputDir = Join-Path $ReleasesDir $BrandReleaseDirectoryName
-$CliName = 'madorin-ai-cli'
+$CliName = 'madorin'
 $PackageName = 'Madorin.Cli'
 
 if (-not (Test-Path -LiteralPath $SolutionFile -PathType Leaf)) {

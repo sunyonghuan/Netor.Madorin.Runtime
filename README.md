@@ -1,33 +1,80 @@
 # Madorin.AI.Runtime
 
-Madorin.AI.Runtime 是基于 .NET 10 的独立 AI Runtime、命令行工具和 .NET Client SDK。
-它不依赖现有 Madorin 内部程序集，可独立安装、运行和升级，并通过版本化协议为 CLI、桌面程序、
-服务程序及其他宿主提供 AI 执行能力。
+Madorin.AI.Runtime 是一个面向 .NET 10 的 AI 运行时平台、命令行工作台和 .NET Client SDK。它不是只会发请求的聊天壳，而是一套把模型接入、任务执行、工具调用、会话恢复、状态持久化和发布交付全部串起来的完整工程底座。
 
-当前解决方案包含 36 个项目：29 个源码项目、1 个参考宿主和 6 个测试项目，已经覆盖从
-Provider 调用、三种工作模式、工具权限到会话持久化、Runtime IPC 和宿主集成的 V1 主闭环。
+它的目标很直接：让 AI 能力真正进入 CLI、桌面程序、服务端和宿主流程里，并且可以长期运行、可恢复、可扩展、可交付。
 
-## 核心能力
+与常见的脚本式 Agent、单一 Provider 封装或只提供 API 的轻量 SDK 相比，它更强调三件事：
 
-- **CLI 与常驻 Runtime**：支持交互式 REPL、单次任务、持久服务、诊断、配置和在线控制。
-- **三种工作模式**：Expert、Meeting 和 Work，统一使用 Session、Run、Selection 和事件协议。
-- **Provider 适配**：OpenAI、Anthropic、OpenAI Compatible、DeepSeek、Kimi、Aliyun / DashScope、
-  Gemini、GLM、Ollama，以及实验性的 Azure OpenAI。
-- **可恢复执行**：支持流式事件、取消、超时、事件确认与重放、断线重连、Session 恢复和检查点。
-- **工具系统**：提供受权限约束的内置文件、内容、进程、HTTP 和记忆工具，并支持宿主 / MCP
-  工具通过反向 RPC 执行。
-- **本地数据层**：SQLite + WAL 保存状态和索引，JSONL 保存权威消息正文，Blob Store 保存大型内容。
-- **公开 Client SDK**：封装 Runtime 启动、连接、认证、事件消费、回调、恢复和生命周期管理。
-- **工程质量**：启用可空引用、严格分析、警告即错误、确定性构建、中央包管理和 Native AOT。
+- 运行时能力完整，不只是模型调用
+- 执行链路可恢复，不只是一次性对话
+- 本地状态可治理，不只是临时缓存
+
+## 核心优势
+
+- **一体化 Runtime**：CLI、常驻 Server、Client SDK、Provider 适配器、工具系统和持久化层统一设计。
+- **多 Provider 接入**：OpenAI、Anthropic、OpenAI Compatible、DeepSeek、Kimi、阿里云 / DashScope、Gemini、GLM、Ollama，以及 Azure OpenAI。
+- **三种工作模式**：Expert、Meeting、Work，统一使用 Session、Run、Selection 与事件协议。
+- **可恢复执行**：支持流式事件、取消、超时、确认、重放、断线重连、Session 恢复和检查点。
+- **本地数据层**：SQLite + WAL、JSONL、Blob Store、Checkpoints、Locks、Logs，全都围绕可控和可追踪设计。
+- **开放 Client SDK**：支持启动、连接、认证、事件消费、回调、恢复和生命周期管理。
+- **工程质量优先**：可空引用、严格分析、警告即错误、确定性构建、集中包管理、Native AOT。
+
+## 核心功能
+
+### 1. CLI 与常驻 Runtime
+
+Madorin.AI.Runtime 同时提供交互式 REPL、单次任务执行、持久化服务和在线控制能力。它既能快速跑通一个命令，也能作为长期运行的 AI 执行宿主。
+
+### 2. 三种工作模式
+
+- `Expert`：更偏深度分析和复杂决策
+- `Meeting`：更适合会议纪要、协作和信息整理
+- `Work`：更贴近日常任务执行和流程编排
+
+### 3. Provider 适配层
+
+统一抽象不同模型供应商的差异，让上层只关注“怎么做”，而不是“每家接口怎么拼”。
+
+### 4. 断点恢复与事件协议
+
+支持流式事件、取消、超时、确认、重放、断线重连、Session 恢复和检查点。
+这意味着任务不是跑完就散，而是可以接着跑、回头看、继续跑。
+
+### 5. 工具系统
+
+内置受权限约束的文件、内容、进程、HTTP 和记忆工具，并支持宿主 / MCP 的反向 RPC 执行。
+这让 Runtime 不只是“会说话”，而是能真正动手处理工作。
+
+### 6. 本地数据层
+
+状态、消息、二进制内容和恢复点都落在本地，结构清晰，适合长期运行、排障和运维。
+
+### 7. Client SDK
+
+对外封装 Runtime 的启动、连接、认证、事件消费、回调、恢复和生命周期管理，方便把同一套能力嵌进外部应用。
+
+### 8. 工程化交付
+
+面向可发布、可升级、可诊断的实际项目，而不是一次性 demo。发布目标默认面向 `win-x64` Native AOT，适合做稳定的本地交付物。
+
+## 与常见方案对比
+
+| 方案 | 常见短板 | Madorin.AI.Runtime |
+| --- | --- | --- |
+| 只做 Prompt 拼接的脚本 | 不能恢复、不能治理状态、不能长期运行 | 完整 Runtime + 持久化 + 检查点 |
+| 只提供 Provider SDK | 只能调模型，缺少执行编排 | CLI / Server / Tools / Storage 一体化 |
+| 临时 Agent 壳 | 能跑一次，但难以交付和维护 | 可升级、可发布、可诊断 |
 
 ## 快速开始
 
 ### 环境要求
 
-- .NET 10 SDK；仓库的 [`global.json`](./global.json) 当前固定为 `10.0.301`。
-- Windows 是当前发布和端到端验证的主要平台，Native AOT 发布目标为 `win-x64`。
+- .NET 10 SDK，以仓库 `global.json` 为准
+- Windows 是当前发布和端到端验证的主要平台
+- Native AOT 默认面向 `win-x64`
 
-### 构建并初始化
+### 构建与初始化
 
 ```powershell
 dotnet restore .\Madorin.AI.Runtime.slnx
@@ -55,11 +102,10 @@ dotnet run --project .\src\Madorin.AI.Runtime.Cli -- run `
   --provider OpenAI `
   --model gpt-5 `
   --mode expert `
-  --input "用三句话说明这个项目的职责"
+  --input "用三句话说明这个项目的价值"
 ```
 
-`run` 还支持 `--session` 续接会话、`--input-file`、`--output-file`、`--no-stream`、
-`--timeout`，以及 `text`、`json`、`jsonl` 三种输出格式。完整参数以命令帮助为准：
+`run` 还支持 `--session` 续接会话、`--input-file`、`--output-file`、`--no-stream`、`--timeout`，以及 `text`、`json`、`jsonl` 三种输出格式。完整参数以命令帮助为准：
 
 ```powershell
 dotnet run --project .\src\Madorin.AI.Runtime.Cli -- run --help
@@ -69,32 +115,26 @@ dotnet run --project .\src\Madorin.AI.Runtime.Cli -- run --help
 
 | 命令 | 用途 |
 | --- | --- |
-| `serve` | 启动持久 Runtime Server，配置实例、Pipe 前缀和最大并发 Run 数 |
+| `serve` | 启动持久化 Runtime Server，配置实例、Pipe 前缀和并发量 |
 | `run` | 执行一次任务或进入交互模式 |
 | `version` | 查看程序、协议、运行时和平台版本 |
-| `doctor` | 检查配置、Provider 访问、数据库和运行状态，可修复已识别问题 |
+| `doctor` | 检查配置、Provider 访问、数据库和运行状态 |
 | `config` | 初始化、编辑、查看和验证独立配置 |
 | `agent` | 列出、创建、编辑和删除 Agent 定义 |
 | `memory` | 管理全局与项目记忆文件 |
 | `session` | 列出、查看、导出、删除、压缩、归档和恢复 Session |
 | `db` | 检查、修复、重建、压缩、备份和迁移 Runtime 数据库 |
 | `storage` | 检查消息 / Blob 一致性并回收未引用 Blob |
-| `ctl` | 查询运行实例、活动 Session / Run，取消 Run 和更新在线凭据 |
+| `ctl` | 查询运行实例、活动 Session / Run，获取和更新在线凭据 |
 
-所有命令共享以下全局选项：
+所有命令共享这些全局选项：
 
 ```text
---workspace <path>   指定业务工作区
+--workspace <path>   指定任务工作区
 --data-dir <path>    指定 Runtime 数据目录
 --log-level <level>  Debug、Information、Warning 或 Error
 --no-color           禁用彩色输出
---json               输出统一的机器可读 JSON 信封
-```
-
-使用 `--help` 查看完整命令树：
-
-```powershell
-dotnet run --project .\src\Madorin.AI.Runtime.Cli -- --help
+--json               输出统一的机器可读 JSON
 ```
 
 ## 配置与数据
@@ -107,7 +147,15 @@ dotnet run --project .\src\Madorin.AI.Runtime.Cli -- --help
 └── agents/           独立 Agent 定义
 ```
 
-独立 CLI 还会读取固定的 `<workspace>/.madorin/config.json` 作为可选的工作区选择配置。它只接受 `schemaVersion` 以及 `selection.provider/model/agent`，不保存 Provider 地址、API Key 或 Agent 正文，也不会向父目录扫描。最终选择优先级为：命令行覆盖 > Agent 绑定 > 工作区选择 > 全局默认；Agent 本身为命令行 > 工作区 > 全局。
+它还会读取工作区内的可选配置：
+
+```text
+<workspace>/.madorin/config.json
+```
+
+优先级规则是：命令行覆盖 > Agent 绑定 > 工作区选择 > 全局默认。Agent 本身也会优先于工作区和全局配置。
+
+示例配置：
 
 ```json
 {
@@ -120,14 +168,12 @@ dotnet run --project .\src\Madorin.AI.Runtime.Cli -- --help
 }
 ```
 
-使用 `config show --workspace <path>`、`config validate --workspace <path>` 或 `doctor --workspace <path>` 查看最终值及来源。不传 `--workspace` 的 `config show/validate` 保持只检查全局配置。
-
-Runtime 默认将工作区数据保存到 `<workspace>/.madorin`；可以使用 `--data-dir` 覆盖：
+Runtime 默认把工作区数据保存到 `<workspace>/.madorin`：
 
 ```text
 <workspace>/.madorin/
 ├── state.db          SQLite + WAL 状态、元数据和索引
-├── messages/         Session 的 JSONL 消息正文及上下文投影缓存
+├── messages/         Session 的 JSONL 消息正文和上下文缓存
 ├── blobs/            按内容哈希保存的大型内容
 ├── checkpoints/      可恢复检查点
 ├── staging/          未完成传输的暂存区
@@ -135,8 +181,9 @@ Runtime 默认将工作区数据保存到 `<workspace>/.madorin`；可以使用 
 └── logs/             Runtime 日志
 ```
 
-`.madorin` 是 Runtime 保留目录。宿主应通过 CLI 或 Client SDK 查询和维护其中的数据，
-不应直接修改数据库、消息文件或 Blob。唯一的团队配置例外是上述工作区 `config.json`；如需提交它，可在仓库忽略规则中使用 `.madorin/*` 和 `!.madorin/config.json`，根 `.gitignore` 不会自动替团队修改。
+`.madorin` 是 Runtime 保留目录。宿主应通过 CLI 或 Client SDK 访问和维护其中的数据，不要直接修改数据库、消息文件或 Blob。
+
+团队如果需要提交工作区配置，唯一建议保留的是上面的 `<workspace>/.madorin/config.json`。在仓库里可以用 `.madorin/*` 配合 `!.madorin/config.json` 进行精确保留。
 
 ## 项目结构
 
@@ -167,50 +214,35 @@ tests/
 ├── Madorin.AI.Runtime.Provider.Tests
 ├── Madorin.AI.Runtime.Modes.Tests
 └── Madorin.AI.Runtime.EndToEnd.Tests
-docs/                    设计、命令规范、执行记录和使用指南备档
-build/                   发布脚本
-publish/                 Native AOT 运行时指令
 ```
 
 ## 架构边界
 
 ```text
 Host / CLI
-    │
     ├── Client SDK ── Contracts ── Transport.Abstractions
-    │                              └── Transport.NamedPipes
-    │
-    └── Runtime Server（组合根）
-         ├── Modes / Orchestration
-         ├── Provider Adapters
-         ├── Tools
-         ├── Services
-         └── Persistence
+    │                           └── Transport.NamedPipes
+    └── Runtime Server（组合根） ── Modes / Orchestration
+                                   ├── Provider Adapters
+                                   ├── Tools
+                                   ├── Services
+                                   └── Persistence
 ```
 
 - `Entities` 和 `Contracts` 定义稳定的数据模型与公开协议，不依赖具体 Provider、存储或 UI。
-- `Providers.Abstractions`、`Tools.Abstractions`、`Persistence.Abstractions` 和
-  `Transport.Abstractions` 隔离扩展实现。
-- `Server` 是 Runtime 具体实现的组合根；`Client` 只通过公开协议与传输抽象访问 Runtime。
+- `Providers.Abstractions`、`Tools.Abstractions`、`Persistence.Abstractions` 和 `Transport.Abstractions` 隔离扩展实现。
+- `Server` 是 Runtime 的具体组合根，`Client` 只通过公开协议和传输抽象访问 Runtime。
 - `SampleHost` 只引用公开 Client SDK 和 Contracts，不引用 Server、Provider 或 SQLite 实现。
-- `Contracts` 和 `Core` 不得引用现有 Madorin 内部程序集，也不得直接绑定具体 Provider SDK、
-  数据库实现或 UI 框架。
+- `Contracts` 和 `Core` 不应直接绑定现有内部程序集、具体 Provider SDK、数据库实现或 UI 框架。
 
 ## 文档导航
 
 - [总体方案与总需求](./docs/README.md)
-- [实施方案 V1](./docs/方案设计/01-实施方案-V1.md)
-- [架构修订 V1](./docs/方案设计/02-架构修订-V1.md)
-- [实现框架参考](./docs/方案设计/03-实现框架参考.md)
-- [Skills 加载与调用方案](./docs/方案设计/05-Skills加载与调用方案.md)
-- [CLI 命令规范](./docs/命令规范/04-CLI命令规范.md)
-- [CLI 命令矩阵](./docs/命令规范/09-CLI命令矩阵.md)
 - [执行步骤与当前状态](./docs/执行步骤/README.md)
 - [参考宿主说明](./samples/Madorin.AI.Runtime.SampleHost/README.md)
-- [已完成使用指南与历史资料](./docs/备档/README.md)
+- [历史资料与备档](./docs/备档/README.md)
 
-设计文档存在冲突时，以架构修订和后续已批准的协议变更为准；实现状态以源码、测试和
-执行步骤记录为准。
+设计文档与实现发生冲突时，以架构修订、代码、测试和执行记录为准。
 
 ## 构建、测试与发布
 
@@ -231,5 +263,4 @@ dotnet publish .\src\Madorin.AI.Runtime.Cli `
   --self-contained true
 ```
 
-Release 可执行项目默认启用 Native AOT。发布必须保持零 IL 裁剪 / AOT 警告；协议 JSON
-继续使用 `RuntimeJsonContext` 等源生成上下文，不得回退到反射序列化。
+Release 版本默认启用 Native AOT。发布时需要保持零 IL 裁剪 / AOT 警告，并继续使用源生成上下文来保证协议 JSON 的稳定性。

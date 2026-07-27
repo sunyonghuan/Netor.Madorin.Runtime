@@ -82,7 +82,7 @@ public sealed class StandaloneCliProcessStage7Tests
         try
         {
             var executableDirectory = AppContext.BaseDirectory;
-            var executablePath = Path.Combine(executableDirectory, "madorin-ai-cli.exe");
+            var executablePath = Path.Combine(executableDirectory, "madorin.exe");
             Assert.IsTrue(File.Exists(executablePath), $"CLI apphost not found: {executablePath}");
 
             var startInfo = new ProcessStartInfo(
@@ -97,7 +97,7 @@ public sealed class StandaloneCliProcessStage7Tests
             startInfo.ArgumentList.Add("/d");
             startInfo.ArgumentList.Add("/s");
             startInfo.ArgumentList.Add("/c");
-            startInfo.ArgumentList.Add("madorin-ai-cli version --json");
+            startInfo.ArgumentList.Add("madorin version --json");
             startInfo.Environment["PATH"] = string.Join(
                 Path.PathSeparator,
                 executableDirectory,
@@ -143,7 +143,7 @@ public sealed class StandaloneCliProcessStage7Tests
             Directory.CreateDirectory(workspace);
             await WriteStandaloneConfigurationAsync(configDirectory);
 
-            var executablePath = Path.Combine(AppContext.BaseDirectory, "madorin-ai-cli.exe");
+            var executablePath = Path.Combine(AppContext.BaseDirectory, "madorin.exe");
             Assert.IsTrue(File.Exists(executablePath), $"CLI apphost not found: {executablePath}");
             var startInfo = new ProcessStartInfo(executablePath)
             {
@@ -184,8 +184,8 @@ public sealed class StandaloneCliProcessStage7Tests
                 workspace,
                 configDirectory: configDirectory);
             Assert.IsTrue(Directory.Exists(context.DataDirectory), context.DataDirectory);
-            Assert.IsTrue(
-                context.DataDirectory.StartsWith(configDirectory, StringComparison.OrdinalIgnoreCase),
+            Assert.AreEqual(
+                Path.Combine(workspace, ".madorin"),
                 context.DataDirectory);
         }
         finally
@@ -226,7 +226,7 @@ public sealed class StandaloneCliProcessStage7Tests
                 """,
                 _testContext.CancellationToken);
 
-            var executablePath = Path.Combine(AppContext.BaseDirectory, "madorin-ai-cli.exe");
+            var executablePath = Path.Combine(AppContext.BaseDirectory, "madorin.exe");
             Assert.IsTrue(File.Exists(executablePath), $"CLI apphost not found: {executablePath}");
             var startInfo = new ProcessStartInfo(executablePath)
             {
@@ -346,7 +346,7 @@ public sealed class StandaloneCliProcessStage7Tests
             RedirectStandardError = true,
             WorkingDirectory = workspace
         };
-        startInfo.ArgumentList.Add(Path.Combine(AppContext.BaseDirectory, "madorin-ai-cli.dll"));
+        startInfo.ArgumentList.Add(Path.Combine(AppContext.BaseDirectory, "madorin.dll"));
         startInfo.ArgumentList.Add("serve");
         startInfo.ArgumentList.Add("--workspace");
         startInfo.ArgumentList.Add(workspace);

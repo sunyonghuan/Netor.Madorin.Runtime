@@ -15,7 +15,7 @@
 | 参数 | 值 | 默认值 / 语义 |
 | --- | --- | --- |
 | `--workspace` | 路径 | 独立命令默认当前目录；`serve` 必须显式传入 |
-| `--data-dir` | 路径 | 独立命令默认用户数据区中的工作区隔离目录；`serve` 默认 `<workspace>/.madorin` |
+| `--data-dir` | 路径 | 独立命令与 `serve` 均默认 `<workspace>/.madorin`；显式值保持调用方指定路径 |
 | `--log-level` | 枚举 | 使用当前配置的日志级别 |
 | `--no-color` | 开关 | 非 TTY 自动禁用 ANSI；显式传入时始终禁用 |
 | `--json` | 开关 | 使用统一 JSON 信封；`run` 的 JSONL 使用 `--output-format jsonl` |

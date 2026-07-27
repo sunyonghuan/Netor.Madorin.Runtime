@@ -22,5 +22,6 @@ public sealed class ProviderEntry
     public ProviderCapabilities? Capabilities { get; set; }
     public string ConfigurationVersion { get; set; } = "1";
     public string? ProbePath { get; set; } = "models";
+    public int? MaxTools { get; set; }
     public List<string> Models { get; set; } = [];
 }

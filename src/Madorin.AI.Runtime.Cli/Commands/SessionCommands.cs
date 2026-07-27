@@ -144,7 +144,7 @@ internal static class SessionCommands
 
             try
             {
-                var context = StandaloneRuntimeContext.Create(
+                var context = await StandaloneRuntimeContext.CreatePreparedAsync(
                     parseResult.GetValue(workspaceOption),
                     parseResult.GetValue(dataDirectoryOption),
                     configDirectory);
@@ -210,7 +210,7 @@ internal static class SessionCommands
 
             try
             {
-                var context = StandaloneRuntimeContext.Create(
+                var context = await StandaloneRuntimeContext.CreatePreparedAsync(
                     parseResult.GetValue(workspaceOption),
                     parseResult.GetValue(dataDirectoryOption),
                     configDirectory);
@@ -346,7 +346,7 @@ internal static class SessionCommands
 
             try
             {
-                var context = StandaloneRuntimeContext.Create(
+                var context = await StandaloneRuntimeContext.CreatePreparedAsync(
                     parseResult.GetValue(workspaceOption),
                     parseResult.GetValue(dataDirectoryOption),
                     configDirectory);
@@ -507,7 +507,7 @@ internal static class SessionCommands
 
             try
             {
-                var context = StandaloneRuntimeContext.Create(
+                var context = await StandaloneRuntimeContext.CreatePreparedAsync(
                     parseResult.GetValue(workspaceOption),
                     parseResult.GetValue(dataDirectoryOption),
                     configDirectory);
@@ -634,7 +634,7 @@ internal static class SessionCommands
 
             try
             {
-                var context = StandaloneRuntimeContext.Create(
+                var context = await StandaloneRuntimeContext.CreatePreparedAsync(
                     parseResult.GetValue(workspaceOption),
                     parseResult.GetValue(dataDirectoryOption),
                     configDirectory);
@@ -702,7 +702,7 @@ internal static class SessionCommands
 
             try
             {
-                var context = StandaloneRuntimeContext.Create(
+                var context = await StandaloneRuntimeContext.CreatePreparedAsync(
                     parseResult.GetValue(workspaceOption),
                     parseResult.GetValue(dataDirectoryOption),
                     configDirectory);

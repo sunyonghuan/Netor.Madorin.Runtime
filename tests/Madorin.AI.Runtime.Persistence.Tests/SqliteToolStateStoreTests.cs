@@ -79,7 +79,7 @@ public sealed class SqliteToolStateStoreTests
                     'call-v14',
                     'run-v14',
                     'agent-v14',
-                    'builtin.fs.read',
+                    'mcli_fs_read',
                     'HASH-V14',
                     'granted',
                     '2026-07-22T00:00:00.0000000+00:00');

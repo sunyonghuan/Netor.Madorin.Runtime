@@ -131,7 +131,7 @@ public sealed class Stage6BProtocolTests
                 "agent-tools",
                 "v1",
                 "Use only the assigned capabilities.",
-                AllowedToolIds: ["builtin.fs.read", "host.erp.lookup"],
+                AllowedToolIds: ["mcli_fs_read", "host.erp.lookup"],
                 SkillIds: ["finance", "risk-review"]),
             "Tool participant",
             0);

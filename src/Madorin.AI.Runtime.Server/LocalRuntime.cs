@@ -100,6 +100,13 @@ public sealed class LocalRuntime : IAsyncDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(options.LogDirectory);
         ArgumentException.ThrowIfNullOrWhiteSpace(options.RuntimeInstanceId);
         ArgumentNullException.ThrowIfNull(options.ProviderResolver);
+        if (options.RuntimeLimits.MaxToolCallsPerRound is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                "MaxToolCallsPerRound must be a positive integer or null.");
+        }
+
         if (options.WorkspaceLockTimeout < TimeSpan.Zero)
         {
             throw new ArgumentOutOfRangeException(nameof(options));
@@ -868,21 +875,12 @@ public sealed class LocalRuntime : IAsyncDisposable
             var prepared = await PrepareNewSessionAsync(request, provider, ct)
                 .ConfigureAwait(false);
             yield return prepared.Accepted;
-            await foreach (var envelope in _executionCore.RunAsync(
-                    prepared.RunId,
-                    prepared.SessionId,
+            await foreach (var envelope in ExecuteRunWithFailureBoundaryAsync(
+                    prepared,
                     request,
                     provider,
-                    _toolCatalogStore,
-                    _toolCatalogStore.CaptureSnapshot(),
-                    controlPeer: null,
-                    localToolConsentHandler: _toolConsentHandler,
-                    credentialRefreshHandler: null,
-                    providerFactory: providerId => ResolveProvider(
-                        request.Selection,
-                        providerId),
-                    skillCatalog: _skillCatalog,
-                    ct: ct)
+                    providerId => ResolveProvider(request.Selection, providerId),
+                    ct)
                 .ConfigureAwait(false))
             {
                 yield return envelope;
@@ -961,21 +959,12 @@ public sealed class LocalRuntime : IAsyncDisposable
                     ct)
                 .ConfigureAwait(false);
             yield return prepared.Accepted;
-            await foreach (var envelope in _executionCore.RunAsync(
-                    prepared.RunId,
-                    prepared.SessionId,
+            await foreach (var envelope in ExecuteRunWithFailureBoundaryAsync(
+                    prepared,
                     executionRequest,
                     provider,
-                    _toolCatalogStore,
-                    _toolCatalogStore.CaptureSnapshot(),
-                    controlPeer: null,
-                    localToolConsentHandler: _toolConsentHandler,
-                    credentialRefreshHandler: null,
-                    providerFactory: providerId => ResolveProvider(
-                        effectiveSelection,
-                        providerId),
-                    skillCatalog: _skillCatalog,
-                    ct: ct)
+                    providerId => ResolveProvider(effectiveSelection, providerId),
+                    ct)
                 .ConfigureAwait(false))
             {
                 yield return envelope;
@@ -985,6 +974,147 @@ public sealed class LocalRuntime : IAsyncDisposable
         {
             _runGate.Release();
         }
+    }
+
+    private async IAsyncEnumerable<RuntimeEventEnvelope> ExecuteRunWithFailureBoundaryAsync(
+        PreparedRun prepared,
+        NewSessionRunRequest request,
+        IRuntimeProviderAdapter provider,
+        Func<string, IRuntimeProviderAdapter> providerFactory,
+        [EnumeratorCancellation] CancellationToken ct)
+    {
+        await using var enumerator = _executionCore.RunAsync(
+                prepared.RunId,
+                prepared.SessionId,
+                request,
+                provider,
+                _toolCatalogStore,
+                _toolCatalogStore.CaptureSnapshot(),
+                controlPeer: null,
+                localToolConsentHandler: _toolConsentHandler,
+                credentialRefreshHandler: null,
+                providerFactory: providerFactory,
+                skillCatalog: _skillCatalog,
+                ct: ct)
+            .GetAsyncEnumerator(ct);
+        RuntimeEventEnvelope? terminalEnvelope = null;
+        while (true)
+        {
+            RuntimeEventEnvelope envelope;
+            try
+            {
+                if (!await enumerator.MoveNextAsync().ConfigureAwait(false))
+                {
+                    break;
+                }
+
+                envelope = enumerator.Current;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                terminalEnvelope = await CompleteLocalTerminalRunAsync(
+                    prepared,
+                    exception: null,
+                    isCancelled: true).ConfigureAwait(false);
+                break;
+            }
+            catch (Exception exception)
+            {
+                terminalEnvelope = await CompleteLocalTerminalRunAsync(
+                    prepared,
+                    exception,
+                    isCancelled: false).ConfigureAwait(false);
+                break;
+            }
+
+            yield return envelope;
+        }
+
+        if (terminalEnvelope is not null)
+        {
+            yield return terminalEnvelope;
+        }
+    }
+
+    private async Task<RuntimeEventEnvelope?> CompleteLocalTerminalRunAsync(
+        PreparedRun prepared,
+        Exception? exception,
+        bool isCancelled)
+    {
+        _ = exception;
+        var error = isCancelled
+            ? null
+            : new RuntimeError(
+                "RunExecutionFailed",
+                "runtime",
+                "Run execution failed.",
+                IsRetryable: false,
+                ProviderDetails: null,
+                Guid.NewGuid().ToString("N"));
+        var messageType = isCancelled ? MessageTypes.RunCancelled : MessageTypes.RunFailed;
+        var payload = isCancelled
+            ? JsonSerializer.SerializeToElement(
+                new RunCancelledEvent(prepared.RunId, prepared.SessionId),
+                RuntimeJsonContext.Default.RunCancelledEvent)
+            : JsonSerializer.SerializeToElement(
+                new RunFailedEvent(prepared.RunId, prepared.SessionId, error!),
+                RuntimeJsonContext.Default.RunFailedEvent);
+        var status = isCancelled ? RunStatus.Cancelled : RunStatus.Failed;
+        var errorJson = error is null
+            ? null
+            : JsonSerializer.Serialize(error, RuntimeJsonContext.Default.RuntimeError);
+
+        int[] retryDelaysMilliseconds = [0, 100, 500];
+        foreach (var delayMilliseconds in retryDelaysMilliseconds)
+        {
+            if (delayMilliseconds > 0)
+            {
+                await Task.Delay(delayMilliseconds).ConfigureAwait(false);
+            }
+
+            try
+            {
+                await using var connection = await OpenDatabaseConnectionAsync(CancellationToken.None)
+                    .ConfigureAwait(false);
+                var repository = new SqliteSessionRepository(connection);
+                var gsn = await repository.TryCommitTerminalRunAsync(
+                    prepared.RunId,
+                    status,
+                    terminalText: null,
+                    errorJson,
+                    messageType,
+                    payload.GetRawText(),
+                    CancellationToken.None).ConfigureAwait(false);
+                if (gsn is null)
+                {
+                    return null;
+                }
+
+                var snapshot = await repository.GetRunSnapshotAsync(
+                    prepared.RunId,
+                    CancellationToken.None).ConfigureAwait(false);
+                return new RuntimeEventEnvelope(
+                    RuntimeInstanceId,
+                    gsn.Value,
+                    prepared.RunId,
+                    snapshot?.LastRunSequence ?? 1,
+                    messageType,
+                    DateTimeOffset.UtcNow,
+                    payload);
+            }
+            catch (Exception)
+            {
+            }
+        }
+
+        return new RuntimeEventEnvelope(
+            RuntimeInstanceId,
+            Gsn: 0,
+            prepared.RunId,
+            RunSequence: 1,
+            messageType,
+            DateTimeOffset.UtcNow,
+            payload);
     }
 
     private async Task<PreparedRun> PrepareNewSessionAsync(
@@ -1299,7 +1429,10 @@ public sealed class LocalRuntime : IAsyncDisposable
             CancellationToken: ct);
         var summary = new StringBuilder();
         var completed = false;
-        await foreach (var providerEvent in provider.CompleteStreamingAsync(request, ct)
+        await foreach (var providerEvent in ProviderInvocationBoundary.CompleteStreamingAsync(
+                provider,
+                request,
+                ct)
             .ConfigureAwait(false))
         {
             switch (providerEvent)

@@ -37,7 +37,7 @@ public sealed class ProviderMessageMapperTests
                 [
                     new ToolCallContentBlock(
                         "call-1",
-                        "builtin.fs.read",
+                        "mcli_fs_read",
                         "Read file",
                         arguments.RootElement.Clone())
                 ])
@@ -61,6 +61,6 @@ public sealed class ProviderMessageMapperTests
         var message = Assert.ContainsSingle(messages);
         var functionCall = Assert.IsInstanceOfType<FunctionCallContent>(
             Assert.ContainsSingle(message.Contents));
-        Assert.AreEqual("builtin__fs__read", functionCall.Name);
+        Assert.AreEqual("mcli_fs_read", functionCall.Name);
     }
 }

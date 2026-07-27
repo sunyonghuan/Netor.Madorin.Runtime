@@ -49,6 +49,8 @@ public sealed class RuntimeServer : IAsyncDisposable
         new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, NextTurnSelection> _sessionSelections =
         new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, PendingTerminalRun> _pendingTerminalRuns =
+        new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, AuthenticatedSession> _sessions = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, long> _seenClientNonces = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _eventDispatchGate = new(1, 1);
@@ -165,6 +167,13 @@ public sealed class RuntimeServer : IAsyncDisposable
                 "The Run timeout must be positive.");
         }
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.HeartbeatIntervalSeconds);
+        if (options.BlobLimits.MaxToolCallsPerRound is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                "MaxToolCallsPerRound must be a positive integer or null.");
+        }
+
         if (options.HostLeaseTimeout <= TimeSpan.Zero)
         {
             throw new ArgumentOutOfRangeException(
@@ -304,6 +313,7 @@ public sealed class RuntimeServer : IAsyncDisposable
                     stoppingToken),
                 MonitorHostLeasesAsync(stoppingToken),
                 RecoverPersistedMeetingApprovalsAsync(stoppingToken),
+                ReconcilePendingTerminalRunsAsync(stoppingToken),
                 _fatalSignal.Task
             };
 
@@ -375,6 +385,7 @@ public sealed class RuntimeServer : IAsyncDisposable
 
         await DrainConnectionsAsync().ConfigureAwait(false);
         await DrainRunsAsync().ConfigureAwait(false);
+        await ReconcilePendingTerminalRunsOnceAsync().ConfigureAwait(false);
         _disconnectedHostLeases.Clear();
         _sessions.Clear();
         await _blobStore.DisposeAsync().ConfigureAwait(false);
@@ -998,7 +1009,9 @@ public sealed class RuntimeServer : IAsyncDisposable
             }
 
             var result = JsonSerializer.SerializeToElement(
-                CreateRunQueryResult(snapshot),
+                CreateRunQueryResult(
+                    snapshot,
+                    GetQueryableRunStatus(snapshot)),
                 RuntimeJsonContext.Default.RunQueryResult);
             return new JsonRpcResponse("2.0", request.Id, result);
         }
@@ -1051,10 +1064,11 @@ public sealed class RuntimeServer : IAsyncDisposable
                 ct).ConfigureAwait(false);
             foreach (var snapshot in snapshots)
             {
+                var status = GetQueryableRunStatus(snapshot);
                 activeRuns.Add(new RunListItem(
                     snapshot.RunId,
                     snapshot.SessionId,
-                    snapshot.Status,
+                    status,
                     snapshot.CreatedAt ?? snapshot.UpdatedAt ?? DateTimeOffset.UtcNow)
                 {
                     Mode = snapshot.Mode,
@@ -1467,7 +1481,7 @@ public sealed class RuntimeServer : IAsyncDisposable
             frame,
             isResponse: true);
 
-    private static async Task<JsonRpcResponse> CreateSessionGetResponseAsync(
+    private async Task<JsonRpcResponse> CreateSessionGetResponseAsync(
         JsonRpcRequest request,
         SqliteSessionRepository repository,
         CancellationToken ct)
@@ -1496,7 +1510,9 @@ public sealed class RuntimeServer : IAsyncDisposable
             snapshot.CreatedAt,
             snapshot.UpdatedAt,
             selection,
-            CreateRunQueryResult(snapshot.LatestRun),
+            CreateRunQueryResult(
+                snapshot.LatestRun,
+                snapshot.LatestRun is null ? null : GetQueryableRunStatus(snapshot.LatestRun)),
             IsFullyRecoverable: diagnostics.Count == 0,
             [.. diagnostics]);
         var payload = JsonSerializer.SerializeToElement(
@@ -1662,7 +1678,9 @@ public sealed class RuntimeServer : IAsyncDisposable
             snapshot.SelectionVersion,
             selection,
             neededDefinitions,
-            CreateRunQueryResult(snapshot.LatestRun),
+            CreateRunQueryResult(
+                snapshot.LatestRun,
+                snapshot.LatestRun is null ? null : GetQueryableRunStatus(snapshot.LatestRun)),
             snapshot.LastGsn,
             LastCheckpoint: lastCheckpoint,
             IsFullyRecoverable: diagnostics.Count == 0,
@@ -3571,101 +3589,184 @@ public sealed class RuntimeServer : IAsyncDisposable
         }
     }
 
-    private async Task CompleteCancelledRunAsync(
+    private Task<TerminalCommitResult> CompleteCancelledRunAsync(
         string runId,
         string sessionId,
         AuthenticatedSession session)
     {
-        try
-        {
-            await using var repositoryConnection = await OpenDatabaseConnectionAsync(CancellationToken.None)
-                .ConfigureAwait(false);
-            var repository = new SqliteSessionRepository(repositoryConnection);
-            await new SqliteWorkRepository(repositoryConnection).MarkSessionInterruptedAsync(
-                sessionId,
-                "The parent Run was cancelled.",
-                CancellationToken.None).ConfigureAwait(false);
-            await TryTransitionMeetingToTerminalAsync(
-                repositoryConnection,
-                sessionId,
-                "Cancelled").ConfigureAwait(false);
-            var payload = JsonSerializer.SerializeToElement(
-                new RunCancelledEvent(runId, sessionId),
-                RuntimeJsonContext.Default.RunCancelledEvent);
-            var gsn = await repository.TryCommitTerminalRunAsync(
-                runId,
-                RunStatus.Cancelled,
-                terminalText: null,
-                errorJson: null,
-                MessageTypes.RunCancelled,
-                payload.GetRawText(),
-                CancellationToken.None).ConfigureAwait(false);
-            if (gsn is null)
-            {
-                return;
-            }
-
-            using var outbox = CreateEventOutbox(repositoryConnection);
-            await DispatchPendingEventsAsync(session, outbox, CancellationToken.None)
-                .ConfigureAwait(false);
-        }
-        catch (Exception exception)
-        {
-            TriggerRuntimeFatal(exception);
-            throw;
-        }
+        var payload = JsonSerializer.SerializeToElement(
+            new RunCancelledEvent(runId, sessionId),
+            RuntimeJsonContext.Default.RunCancelledEvent);
+        var pending = new PendingTerminalRun(
+            runId,
+            sessionId,
+            session,
+            RunStatus.Cancelled,
+            MessageTypes.RunCancelled,
+            payload.GetRawText(),
+            ErrorJson: null,
+            MeetingStatus: "Cancelled",
+            InterruptWorkSession: true);
+        return CompleteTerminalRunAsync(pending);
     }
 
-    private async Task CompleteFailedRunAsync(
+    private Task<TerminalCommitResult> CompleteFailedRunAsync(
         string runId,
         string sessionId,
         AuthenticatedSession session,
         Exception exception,
         string errorCode = "RunExecutionFailed")
     {
+        ArgumentNullException.ThrowIfNull(exception);
+        var error = new RuntimeError(
+            errorCode,
+            "runtime",
+            "Run execution failed.",
+            IsRetryable: false,
+            ProviderDetails: null,
+            Guid.NewGuid().ToString("N"));
+        var payload = JsonSerializer.SerializeToElement(
+            new RunFailedEvent(runId, sessionId, error),
+            RuntimeJsonContext.Default.RunFailedEvent);
+        var errorJson = JsonSerializer.Serialize(
+            error,
+            RuntimeJsonContext.Default.RuntimeError);
+        var pending = new PendingTerminalRun(
+            runId,
+            sessionId,
+            session,
+            RunStatus.Failed,
+            MessageTypes.RunFailed,
+            payload.GetRawText(),
+            errorJson,
+            MeetingStatus: "Failed",
+            InterruptWorkSession: false);
+        return CompleteTerminalRunAsync(pending);
+    }
+
+    private async Task<TerminalCommitResult> CompleteTerminalRunAsync(
+        PendingTerminalRun pending)
+    {
+        int[] retryDelaysMilliseconds = [0, 100, 500];
+        foreach (var delayMilliseconds in retryDelaysMilliseconds)
+        {
+            if (delayMilliseconds > 0)
+            {
+                await Task.Delay(delayMilliseconds).ConfigureAwait(false);
+            }
+
+            var result = await TryCommitTerminalRunOnceAsync(pending).ConfigureAwait(false);
+            if (result is not TerminalCommitResult.RetryPending)
+            {
+                _pendingTerminalRuns.TryRemove(pending.RunId, out _);
+                return result;
+            }
+        }
+
+        _pendingTerminalRuns[pending.RunId] = pending;
+        await TryMarkPendingRunPersistingAsync(pending.RunId).ConfigureAwait(false);
+        return TerminalCommitResult.RetryPending;
+    }
+
+    private async Task<TerminalCommitResult> TryCommitTerminalRunOnceAsync(
+        PendingTerminalRun pending)
+    {
         try
         {
             await using var repositoryConnection = await OpenDatabaseConnectionAsync(CancellationToken.None)
                 .ConfigureAwait(false);
-            var repository = new SqliteSessionRepository(repositoryConnection);
+            if (pending.InterruptWorkSession)
+            {
+                await new SqliteWorkRepository(repositoryConnection).MarkSessionInterruptedAsync(
+                    pending.SessionId,
+                    "The parent Run was cancelled.",
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+
             await TryTransitionMeetingToTerminalAsync(
                 repositoryConnection,
-                sessionId,
-                "Failed").ConfigureAwait(false);
-            var error = new RuntimeError(
-                errorCode,
-                "runtime",
-                "Run execution failed.",
-                IsRetryable: false,
-                ProviderDetails: null,
-                Guid.NewGuid().ToString("N"));
-            var payload = JsonSerializer.SerializeToElement(
-                new RunFailedEvent(runId, sessionId, error),
-                RuntimeJsonContext.Default.RunFailedEvent);
-            var errorJson = JsonSerializer.Serialize(
-                error,
-                RuntimeJsonContext.Default.RuntimeError);
+                pending.SessionId,
+                pending.MeetingStatus).ConfigureAwait(false);
+            var repository = new SqliteSessionRepository(repositoryConnection);
             var gsn = await repository.TryCommitTerminalRunAsync(
-                runId,
-                RunStatus.Failed,
+                pending.RunId,
+                pending.Status,
                 terminalText: null,
-                errorJson,
-                MessageTypes.RunFailed,
-                payload.GetRawText(),
+                pending.ErrorJson,
+                pending.MessageType,
+                pending.PayloadJson,
                 CancellationToken.None).ConfigureAwait(false);
             if (gsn is null)
             {
-                return;
+                return TerminalCommitResult.AlreadyTerminal;
             }
 
             using var outbox = CreateEventOutbox(repositoryConnection);
-            await DispatchPendingEventsAsync(session, outbox, CancellationToken.None)
-                .ConfigureAwait(false);
+            try
+            {
+                await DispatchPendingEventsAsync(
+                    pending.Session,
+                    outbox,
+                    CancellationToken.None).ConfigureAwait(false);
+                return TerminalCommitResult.Committed;
+            }
+            catch (Exception)
+            {
+                return TerminalCommitResult.DispatchPending;
+            }
         }
-        catch (Exception terminalException)
+        catch (Exception)
         {
-            TriggerRuntimeFatal(terminalException);
-            throw;
+            return TerminalCommitResult.RetryPending;
+        }
+    }
+
+    private async Task TryMarkPendingRunPersistingAsync(string runId)
+    {
+        try
+        {
+            await using var connection = await OpenDatabaseConnectionAsync(CancellationToken.None)
+                .ConfigureAwait(false);
+            await new SqliteSessionRepository(connection).UpdateRunProgressAsync(
+                runId,
+                RunStatus.Persisting,
+                "persisting",
+                currentStep: null,
+                completedUnits: null,
+                totalUnits: null,
+                lastRunSequence: null,
+                errorJson: null,
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+        }
+    }
+
+    private async Task ReconcilePendingTerminalRunsAsync(CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(5), ct).ConfigureAwait(false);
+                await ReconcilePendingTerminalRunsOnceAsync().ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+        }
+    }
+
+    private async Task ReconcilePendingTerminalRunsOnceAsync()
+    {
+        foreach (var pending in _pendingTerminalRuns.Values.ToArray())
+        {
+            var result = await TryCommitTerminalRunOnceAsync(pending).ConfigureAwait(false);
+            if (result is not TerminalCommitResult.RetryPending)
+            {
+                _pendingTerminalRuns.TryRemove(pending.RunId, out _);
+            }
         }
     }
 
@@ -3911,7 +4012,7 @@ public sealed class RuntimeServer : IAsyncDisposable
         {
             MaxEventFrameBytes = NamedPipeTransport.MaxEventMessageBytes,
             MaxToolRounds = supportsStage5 ? _limits.MaxToolRounds ?? 8 : null,
-            MaxToolCallsPerRound = supportsStage5 ? _limits.MaxToolCallsPerRound ?? 8 : null,
+            MaxToolCallsPerRound = supportsStage5 ? _limits.MaxToolCallsPerRound : null,
             MaxToolResultBytesPerInvocation = supportsStage5
                 ? _limits.MaxToolResultBytesPerInvocation ?? 4L * 1024 * 1024
                 : null
@@ -3925,13 +4026,20 @@ public sealed class RuntimeServer : IAsyncDisposable
         || string.Equals(messageType, MessageTypes.RunFailed, StringComparison.Ordinal)
         || string.Equals(messageType, MessageTypes.RunCancelled, StringComparison.Ordinal);
 
-    private static RunQueryResult? CreateRunQueryResult(RunSnapshot? snapshot) =>
+    private RunStatus GetQueryableRunStatus(RunSnapshot snapshot) =>
+        _pendingTerminalRuns.ContainsKey(snapshot.RunId)
+            ? RunStatus.Persisting
+            : snapshot.Status;
+
+    private static RunQueryResult? CreateRunQueryResult(
+        RunSnapshot? snapshot,
+        RunStatus? statusOverride = null) =>
         snapshot is null
             ? null
             : new RunQueryResult(
                 snapshot.RunId,
                 snapshot.SessionId,
-                snapshot.Status,
+                statusOverride ?? snapshot.Status,
                 snapshot.TerminalText)
             {
                 Mode = snapshot.Mode,
@@ -4592,6 +4700,25 @@ public sealed class RuntimeServer : IAsyncDisposable
             await Task.WhenAll(tasks).ConfigureAwait(false);
         }
     }
+
+    private enum TerminalCommitResult
+    {
+        Committed,
+        AlreadyTerminal,
+        DispatchPending,
+        RetryPending
+    }
+
+    private sealed record PendingTerminalRun(
+        string RunId,
+        string SessionId,
+        AuthenticatedSession Session,
+        RunStatus Status,
+        string MessageType,
+        string PayloadJson,
+        string? ErrorJson,
+        string MeetingStatus,
+        bool InterruptWorkSession);
 
     private sealed class ActiveRun(
         RunRegistry.RunLease lease,

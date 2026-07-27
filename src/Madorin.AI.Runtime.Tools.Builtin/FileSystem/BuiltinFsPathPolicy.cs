@@ -79,6 +79,25 @@ internal sealed class BuiltinFsPathPolicy
             BuiltinFsHandle.Open(parent, isDirectory: true));
     }
 
+    public PinnedPath PinWriteAncestor(string path)
+    {
+        var resolvedPath = ResolveWritePath(path);
+        var ancestor = Path.GetDirectoryName(resolvedPath)
+            ?? throw new InvalidDataException("The path has no parent directory.");
+        while (!Directory.Exists(ancestor))
+        {
+            ancestor = Path.GetDirectoryName(ancestor)
+                ?? throw new DirectoryNotFoundException(
+                    $"No existing parent directory was found for '{path}'.");
+        }
+
+        EnsureNoLinks(ancestor);
+        return new PinnedPath(
+            resolvedPath,
+            ancestor,
+            BuiltinFsHandle.Open(ancestor, isDirectory: true));
+    }
+
     public string GetTargetSummary(string path)
         => GetRequestedTargetSummary(_workspaceRoot, path);
 

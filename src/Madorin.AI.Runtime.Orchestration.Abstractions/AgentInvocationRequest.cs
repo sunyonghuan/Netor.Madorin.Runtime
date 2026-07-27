@@ -18,4 +18,5 @@ public sealed record AgentInvocationRequest(
     RuntimeStructuredOutput? StructuredOutput = null,
     bool IsIdempotent = true,
     bool HasIrreversibleToolSideEffects = false,
-    string? ParentAgentId = null);
+    string? ParentAgentId = null,
+    int HistoryMessageCount = 0);

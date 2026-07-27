@@ -67,6 +67,10 @@ internal sealed class StandaloneToolGrantFactory(TimeProvider? timeProvider = nu
         }
 
         var grantId = $"standalone-{Guid.NewGuid():N}";
+        var allowedWriteRoots = lifetime is StandaloneToolGrantLifetime.Run
+            && scope.AllowDelete
+                ? [Path.GetFullPath(workspaceRoot)]
+                : scope.AllowedWriteRoots;
         string[]? scriptKeys = null;
         string? skillCatalogVersion = null;
         if (string.Equals(descriptor.ToolId, SkillScriptAuthorization.ToolId, StringComparison.Ordinal)
@@ -85,7 +89,7 @@ internal sealed class StandaloneToolGrantFactory(TimeProvider? timeProvider = nu
             invocation.RunId,
             Path.GetFullPath(workspaceRoot),
             scope.AllowedReadRoots,
-            scope.AllowedWriteRoots,
+            allowedWriteRoots,
             scope.AllowOverwrite,
             scope.AllowMove,
             scope.AllowDelete,

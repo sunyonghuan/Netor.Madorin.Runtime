@@ -1,0 +1,13 @@
+<Project>
+  <PropertyGroup Condition="'$(Configuration)' == 'Release' and
+                            '$(OutputType)' == 'Exe' and
+                            '$(PublishAot)' == 'true' and
+                            '$(RuntimeIdentifier)' != ''">
+    <SelfContained>true</SelfContained>
+    <JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>
+    <OptimizationPreference>Size</OptimizationPreference>
+    <IlcGenerateStackTraceData>false</IlcGenerateStackTraceData>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+</Project>

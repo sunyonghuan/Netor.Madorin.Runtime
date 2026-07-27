@@ -530,7 +530,9 @@ public sealed class SessionResumeRecoveryTests
     {
         public string ProviderId => "resume-provider";
 
-        public ProviderCapabilities Capabilities { get; } = new(Streaming: true);
+        public ProviderCapabilities Capabilities { get; } = new(
+            Streaming: true,
+            Files: true);
 
         public IReadOnlyList<ProviderModel> Models { get; } =
             [new("resume-model", "Resume Model", ContextWindow: 8192)];

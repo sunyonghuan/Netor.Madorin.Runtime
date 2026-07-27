@@ -81,6 +81,15 @@ public static class StandaloneConfigValidator
                 Add(errors, configPath, $"{prefix}.baseUrl", "Base URL must be an absolute HTTP or HTTPS URL.");
             }
 
+            if (provider.MaxTools is < 0)
+            {
+                Add(
+                    errors,
+                    configPath,
+                    $"{prefix}.maxTools",
+                    "Max tools must be zero, a positive integer, or null.");
+            }
+
             if (protocolDefinition?.IsBaseUrlRequired is true
                 && string.IsNullOrWhiteSpace(provider.BaseUrl))
             {

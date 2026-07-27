@@ -23,6 +23,10 @@ public sealed record RuntimeProviderRequest(
     [property: JsonIgnore] CancellationToken CancellationToken = default,
     [property: JsonIgnore] SkillsInvocationContext? Skills = null)
 {
+    /// <summary>Gets the number of leading messages that belong to canonical history.</summary>
+    [JsonIgnore]
+    public int HistoryMessageCount { get; init; }
+
     public RuntimeProviderRequest CreateAttempt(int attemptNumber)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(attemptNumber);

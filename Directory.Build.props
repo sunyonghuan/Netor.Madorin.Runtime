@@ -9,24 +9,36 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <Deterministic>true</Deterministic>
     <IsAotCompatible>true</IsAotCompatible>
-  </PropertyGroup>
-
-  <PropertyGroup Condition="'$(Configuration)' == 'Release' and '$(OutputType)' == 'Exe'">
-    <PublishAot>true</PublishAot>
-    <SelfContained>true</SelfContained>
-    <JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>
-    <IlcOptimizationPreference>Speed</IlcOptimizationPreference>
-    <IlcGenerateStackTraceData>false</IlcGenerateStackTraceData>
-    <DebugType>none</DebugType>
-    <DebugSymbols>false</DebugSymbols>
+    <AgentFrameworkRootProfile Condition="'$(AgentFrameworkRootProfile)' == ''">Full</AgentFrameworkRootProfile>
   </PropertyGroup>
 
   <ItemGroup Condition="'$(Configuration)' == 'Release' and '$(UseAgentFrameworkRuntimeDirectives)' == 'true'">
-    <RdXmlFile Include="$(MSBuildThisFileDirectory)publish\rd.xml" />
-    <TrimmerRootAssembly Include="Microsoft.Agents.AI" />
-    <TrimmerRootAssembly Include="Microsoft.Agents.AI.Abstractions" />
-    <TrimmerRootAssembly Include="Microsoft.Agents.AI.OpenAI" />
-    <TrimmerRootAssembly Include="Microsoft.Extensions.AI" />
-    <TrimmerRootAssembly Include="Microsoft.Extensions.AI.Abstractions" />
+    <RdXmlFile Include="$(MSBuildThisFileDirectory)publish\rd.xml"
+               Condition="'$(AgentFrameworkRootProfile)' == 'Full'" />
+    <RdXmlFile Include="$(MSBuildThisFileDirectory)publish\rd.no-agents-openai.xml"
+               Condition="'$(AgentFrameworkRootProfile)' == 'WithoutAgentsOpenAI'" />
+    <RdXmlFile Include="$(MSBuildThisFileDirectory)publish\rd.extensions-only.xml"
+               Condition="'$(AgentFrameworkRootProfile)' == 'ExtensionsOnly'" />
+
+    <TrimmerRootAssembly Include="Microsoft.Agents.AI"
+                         Condition="'$(AgentFrameworkRootProfile)' == 'Full' or '$(AgentFrameworkRootProfile)' == 'WithoutAgentsOpenAI'" />
+    <TrimmerRootAssembly Include="Microsoft.Agents.AI.Abstractions"
+                         Condition="'$(AgentFrameworkRootProfile)' == 'Full' or '$(AgentFrameworkRootProfile)' == 'WithoutAgentsOpenAI'" />
+    <TrimmerRootAssembly Include="Microsoft.Agents.AI.OpenAI"
+                         Condition="'$(AgentFrameworkRootProfile)' == 'Full'" />
+    <TrimmerRootAssembly Include="Microsoft.Extensions.AI"
+                         Condition="'$(AgentFrameworkRootProfile)' != 'None'" />
+    <TrimmerRootAssembly Include="Microsoft.Extensions.AI.Abstractions"
+                         Condition="'$(AgentFrameworkRootProfile)' != 'None'" />
   </ItemGroup>
+
+  <Target Name="ValidateAgentFrameworkRootProfile"
+          BeforeTargets="PrepareForILLink"
+          Condition="'$(Configuration)' == 'Release' and '$(UseAgentFrameworkRuntimeDirectives)' == 'true'">
+    <Error Condition="'$(AgentFrameworkRootProfile)' != 'Full' and
+                      '$(AgentFrameworkRootProfile)' != 'WithoutAgentsOpenAI' and
+                      '$(AgentFrameworkRootProfile)' != 'ExtensionsOnly' and
+                      '$(AgentFrameworkRootProfile)' != 'None'"
+           Text="Unsupported AgentFrameworkRootProfile '$(AgentFrameworkRootProfile)'. Use Full, WithoutAgentsOpenAI, ExtensionsOnly, or None." />
+  </Target>
 </Project>

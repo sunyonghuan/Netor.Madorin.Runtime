@@ -88,7 +88,6 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         _scriptInvoker = scriptInvoker;
         _runtimeLimits = runtimeLimits ?? new RuntimeLimits(
             MaxToolRounds: 8,
-            MaxToolCallsPerRound: 8,
             MaxToolResultBytesPerInvocation: 4 * 1024 * 1024);
         if (workRepo is not null)
         {
@@ -1145,13 +1144,14 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         [EnumeratorCancellation] CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(request);
+        ValidateToolCallLimit(_runtimeLimits.MaxToolCallsPerRound);
         var provider = _providerFactory(request.ProviderId)
             ?? throw new InvalidOperationException($"Provider '{request.ProviderId}' was not found.");
 
         var messages = request.Messages.ToList();
         var tools = request.AvailableTools;
         var maxToolRounds = _runtimeLimits.MaxToolRounds ?? 8;
-        var maxToolCallsPerRound = _runtimeLimits.MaxToolCallsPerRound ?? 8;
+        var maxToolCallsPerRound = _runtimeLimits.MaxToolCallsPerRound;
         var maxToolResultBytes = _runtimeLimits.MaxToolResultBytesPerInvocation
             ?? 4L * 1024 * 1024;
         long totalToolResultBytes = 0;
@@ -1169,7 +1169,10 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 IsIdempotent: !hasIrreversibleToolSideEffects,
                 HasIrreversibleToolSideEffects: hasIrreversibleToolSideEffects,
                 CancellationToken: ct,
-                Skills: CreateSkillsContext(request));
+                Skills: CreateSkillsContext(request))
+            {
+                HistoryMessageCount = request.HistoryMessageCount
+            };
 
             List<ContentBlock> assistantContent;
             RuntimeError? failure;
@@ -1181,7 +1184,10 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 completed = false;
                 var hasObservedProviderOutput = false;
                 var attemptRequest = providerRequest.CreateAttempt(providerAttempt);
-                await foreach (var providerEvent in provider.CompleteStreamingAsync(attemptRequest, ct)
+                await foreach (var providerEvent in ProviderInvocationBoundary.CompleteStreamingAsync(
+                        provider,
+                        attemptRequest,
+                        ct)
                     .ConfigureAwait(false))
                 {
                     switch (providerEvent)
@@ -1320,13 +1326,14 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 yield break;
             }
 
-            if (toolCalls.Length > maxToolCallsPerRound)
+            if (maxToolCallsPerRound is { } toolCallLimit
+                && toolCalls.Length > toolCallLimit)
             {
                 yield return new InvocationFailedProviderEvent(
                     request.InvocationId,
                     CreateRuntimeError(
                         RuntimeErrorCodes.LimitsIncompatible,
-                        $"The Provider requested {toolCalls.Length} tools in one round; the limit is {maxToolCallsPerRound}."));
+                        $"The Provider requested {toolCalls.Length} tools in one round; the limit is {toolCallLimit}."));
                 yield break;
             }
 
@@ -1613,6 +1620,16 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             ProviderDetails: null,
             Guid.NewGuid().ToString("N"));
 
+    private static void ValidateToolCallLimit(int? maxToolCallsPerRound)
+    {
+        if (maxToolCallsPerRound is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxToolCallsPerRound),
+                "MaxToolCallsPerRound must be a positive integer or null.");
+        }
+    }
+
     private static bool IsAuthenticationFailure(RuntimeError error) =>
         string.Equals(error.Code, RuntimeErrorCodes.AuthenticationFailed, StringComparison.Ordinal)
         || string.Equals(error.Category, "authentication", StringComparison.Ordinal);
@@ -1763,7 +1780,8 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             ],
             snapshot,
             AvailableTools: availableTools,
-            ParentAgentId: parentAgentId);
+            ParentAgentId: parentAgentId,
+            HistoryMessageCount: Math.Max(0, projectedMessages.Length));
     }
 
     private static string BuildManagerPlanningInput(

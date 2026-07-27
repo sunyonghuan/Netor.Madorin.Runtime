@@ -59,7 +59,7 @@ public sealed class BuiltinToolConsentScopeResolverTests
 
         var resolution = Resolve(
             BuiltinToolRegistry.FileWriteToolId,
-            """{"path":"output/result.txt","content":"secret"}""");
+            """{"path":"output/result.txt","content":"secret","encoding":"utf-8","mode":"create"}""");
 
         Assert.IsTrue(resolution.IsSuccess, resolution.Error);
         Assert.IsNotNull(resolution.Scope);
@@ -79,7 +79,7 @@ public sealed class BuiltinToolConsentScopeResolverTests
 
         var resolution = Resolve(
             BuiltinToolRegistry.FileWriteToolId,
-            """{"path":"existing.txt","content":"replacement"}""");
+            """{"path":"existing.txt","content":"replacement","encoding":"utf-8","mode":"overwrite","expectedHash":"0000000000000000000000000000000000000000000000000000000000000000"}""");
 
         Assert.IsTrue(resolution.IsSuccess, resolution.Error);
         Assert.IsNotNull(resolution.Scope);
@@ -220,8 +220,8 @@ public sealed class BuiltinToolConsentScopeResolverTests
             BuiltinToolRegistry.FileDeleteToolId,
             """{"path":"source.txt"}""");
         var patch = Resolve(
-            BuiltinToolRegistry.FilePatchToolId,
-            """{"path":"source.txt","expectedHash":"hash","startLine":1,"endLine":1,"replacement":"secret"}""");
+            BuiltinToolRegistry.FileEditToolId,
+            """{"path":"source.txt","encoding":"utf-8","expectedHash":"hash","operations":[{"type":"replace","startLine":1,"endLine":1,"content":"secret"}]}""");
 
         Assert.IsTrue(move.IsSuccess, move.Error);
         Assert.IsNotNull(move.Scope);
@@ -241,7 +241,7 @@ public sealed class BuiltinToolConsentScopeResolverTests
             new[] { Path.GetFullPath(source) },
             delete.Scope.AllowedWriteRoots);
         Assert.IsTrue(delete.Scope.AllowDelete);
-        Assert.IsFalse(delete.Scope.CanGrantForRun);
+        Assert.IsTrue(delete.Scope.CanGrantForRun);
 
         Assert.IsTrue(patch.IsSuccess, patch.Error);
         Assert.IsNotNull(patch.Scope);

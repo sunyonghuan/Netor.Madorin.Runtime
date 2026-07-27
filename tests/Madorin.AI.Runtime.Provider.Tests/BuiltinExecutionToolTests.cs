@@ -64,112 +64,6 @@ public sealed class BuiltinExecutionToolTests
     }
 
     [TestMethod]
-    public async Task PowerShellRun_DefaultDisabled_IsRejected()
-    {
-        var result = await ExecuteAsync(
-            new BuiltinPowerShellToolExecutor(),
-            BuiltinToolRegistry.PowerShellRunToolId,
-            """{"script":"Write-Output 'blocked'"}""",
-            CreatePermission());
-
-        Assert.IsFalse(result.Success);
-        StringAssert.Contains(result.Error, "disabled");
-    }
-
-    [TestMethod]
-    public async Task PowerShellRun_ApprovedScript_ExecutesThroughStandardInput()
-    {
-        var result = await ExecuteAsync(
-            new BuiltinPowerShellToolExecutor(),
-            BuiltinToolRegistry.PowerShellRunToolId,
-            """{"script":"Write-Output 'stage5-stdin'"}""",
-            CreatePermission(allowPowerShell: true));
-
-        Assert.IsTrue(result.Success, result.Error);
-        using var output = JsonDocument.Parse(result.OutputJson!);
-        Assert.AreEqual(0, output.RootElement.GetProperty("exitCode").GetInt32());
-        StringAssert.Contains(
-            output.RootElement.GetProperty("stdout").GetString(),
-            "stage5-stdin");
-    }
-
-    [TestMethod]
-    public async Task PowerShellRun_OutputExceedsLimit_ReturnsTruncationMarker()
-    {
-        var result = await ExecuteAsync(
-            new BuiltinPowerShellToolExecutor(),
-            BuiltinToolRegistry.PowerShellRunToolId,
-            """{"script":"[Console]::Out.Write('x' * (1024 * 1024 + 4096))"}""",
-            CreatePermission(allowPowerShell: true));
-
-        Assert.IsTrue(result.Success, result.Error);
-        using var output = JsonDocument.Parse(result.OutputJson!);
-        Assert.IsTrue(output.RootElement.GetProperty("stdoutTruncated").GetBoolean());
-        Assert.IsFalse(output.RootElement.GetProperty("stderrTruncated").GetBoolean());
-        Assert.IsLessThanOrEqualTo(
-            1024 * 1024,
-            Encoding.UTF8.GetByteCount(
-                output.RootElement.GetProperty("stdout").GetString() ?? string.Empty));
-    }
-
-    [TestMethod]
-    public async Task PowerShellRun_Cancellation_KillsEntireProcessTree()
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            Assert.Inconclusive("Process-tree termination is exercised on Windows in this test.");
-        }
-
-        var windowsDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
-        var childExecutable = Path.Join(
-            windowsDirectory,
-            "System32",
-            "WindowsPowerShell",
-            "v1.0",
-            "powershell.exe");
-        Assert.IsTrue(File.Exists(childExecutable), "Windows PowerShell was not found.");
-        var pidPath = Path.Join(_root, "child.pid");
-        var script = $$"""
-            $child = Start-Process -FilePath '{{EscapePowerShellLiteral(childExecutable)}}' -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 60') -PassThru
-            [System.IO.File]::WriteAllText('{{EscapePowerShellLiteral(pidPath)}}', [string]$child.Id)
-            Wait-Process -Id $child.Id
-            """;
-        var invocation = new ToolInvocation(
-            "call-process-tree",
-            BuiltinToolRegistry.PowerShellRunToolId,
-            "agent-1",
-            ParentAgentId: null,
-            CreateArguments(("script", script)),
-            "run-1",
-            "session-1",
-            PermissionContext: CreatePermission(allowPowerShell: true));
-        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(
-            TestContext.CancellationToken);
-        var execution = new BuiltinPowerShellToolExecutor().ExecuteAsync(
-            invocation,
-            cancellation.Token);
-        var childPid = 0;
-
-        try
-        {
-            await WaitForFileAsync(pidPath, TestContext.CancellationToken);
-            childPid = int.Parse(
-                await File.ReadAllTextAsync(pidPath, TestContext.CancellationToken),
-                CultureInfo.InvariantCulture);
-
-            cancellation.Cancel();
-            await Assert.ThrowsAsync<OperationCanceledException>(
-                async () => await execution);
-            await WaitForProcessExitAsync(childPid, TestContext.CancellationToken);
-        }
-        finally
-        {
-            cancellation.Cancel();
-            TryTerminateProcess(childPid);
-        }
-    }
-
-    [TestMethod]
     public async Task HttpRequest_DefaultDeny_IsRejectedBeforeConnect()
     {
         var result = await ExecuteAsync(
@@ -287,7 +181,6 @@ public sealed class BuiltinExecutionToolTests
 
     private ToolPermissionContext CreatePermission(
         string[]? allowedExecutables = null,
-        bool allowPowerShell = false,
         NetworkPolicy? networkPolicy = null) => new(
         "grant-1",
         "run-1",
@@ -295,7 +188,6 @@ public sealed class BuiltinExecutionToolTests
         [_root],
         [_root],
         AllowedExecutables: allowedExecutables ?? [],
-        AllowPowerShell: allowPowerShell,
         DenyNetwork: networkPolicy?.DenyAll ?? true,
         AllowedEnvironmentVariables: [],
         NetworkPolicy: networkPolicy);
@@ -308,68 +200,6 @@ public sealed class BuiltinExecutionToolTests
         AllowedAddressRanges: ["127.0.0.0/8"],
         MaxRedirects: 0,
         MaxResponseBytes: maxResponseBytes);
-
-    private static string CreateArguments(params (string Name, string Value)[] values)
-    {
-        var buffer = new ArrayBufferWriter<byte>();
-        using (var writer = new Utf8JsonWriter(buffer))
-        {
-            writer.WriteStartObject();
-            foreach (var (name, value) in values)
-            {
-                writer.WriteString(name, value);
-            }
-
-            writer.WriteEndObject();
-        }
-
-        return Encoding.UTF8.GetString(buffer.WrittenSpan);
-    }
-
-    private static string EscapePowerShellLiteral(string value) =>
-        value.Replace("'", "''", StringComparison.Ordinal);
-
-    private static async Task WaitForFileAsync(string path, CancellationToken ct)
-    {
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeout.CancelAfter(TimeSpan.FromSeconds(10));
-        while (!File.Exists(path))
-        {
-            await Task.Delay(TimeSpan.FromMilliseconds(50), timeout.Token);
-        }
-    }
-
-    private static async Task WaitForProcessExitAsync(int processId, CancellationToken ct)
-    {
-        try
-        {
-            using var process = Process.GetProcessById(processId);
-            await process.WaitForExitAsync(ct).WaitAsync(TimeSpan.FromSeconds(10), ct);
-        }
-        catch (ArgumentException)
-        {
-        }
-    }
-
-    private static void TryTerminateProcess(int processId)
-    {
-        if (processId <= 0)
-        {
-            return;
-        }
-
-        try
-        {
-            using var process = Process.GetProcessById(processId);
-            process.Kill(entireProcessTree: true);
-        }
-        catch (ArgumentException)
-        {
-        }
-        catch (InvalidOperationException)
-        {
-        }
-    }
 
     private static TestHttpServer StartServer(string response)
     {

@@ -74,24 +74,26 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
             workspaceRoot,
             BuiltinFsToolExecutor.GetRequiredString(arguments, "path"),
             "bounded text search"),
-        BuiltinToolRegistry.ContentReadToolId => FileReadScope(
-            workspaceRoot,
-            BuiltinFsToolExecutor.GetRequiredString(arguments, "path"),
-            "content page read"),
         BuiltinToolRegistry.FileWriteToolId => FileWriteScope(
             workspaceRoot,
             BuiltinFsToolExecutor.GetRequiredString(arguments, "path")),
+        BuiltinToolRegistry.FileAppendToolId => FileModifyScope(
+            workspaceRoot,
+            arguments,
+            "append text"),
         BuiltinToolRegistry.DirectoryCreateToolId => DirectoryCreateScope(
             workspaceRoot,
             BuiltinFsToolExecutor.GetRequiredString(arguments, "path")),
         BuiltinToolRegistry.FileCopyToolId => FileCopyScope(workspaceRoot, arguments),
         BuiltinToolRegistry.FileMoveToolId => FileMoveScope(workspaceRoot, arguments),
         BuiltinToolRegistry.FileDeleteToolId => FileDeleteScope(workspaceRoot, arguments),
-        BuiltinToolRegistry.FilePatchToolId => FilePatchScope(workspaceRoot, arguments),
+        BuiltinToolRegistry.FileEditToolId => FileModifyScope(
+            workspaceRoot,
+            arguments,
+            "edit lines"),
         BuiltinToolRegistry.MemoryReadToolId => MemoryScope(arguments, isAppend: false),
         BuiltinToolRegistry.MemoryAppendToolId => MemoryScope(arguments, isAppend: true),
         BuiltinToolRegistry.ProcessRunToolId => ProcessScope(workspaceRoot, arguments),
-        BuiltinToolRegistry.PowerShellRunToolId => PowerShellScope(workspaceRoot, arguments),
         BuiltinToolRegistry.HttpRequestToolId => HttpScope(arguments),
         SkillScriptAuthorization.ToolId => ScriptScope(arguments, workspaceRoot),
         _ => throw new NotSupportedException("The built-in tool scope is unknown.")
@@ -191,15 +193,19 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
             BuiltinFsPathPolicy.GetRequestedTargetSummary(workspaceRoot, path),
             "delete path",
             writeRoots: [path],
-            allowDelete: true);
+            allowDelete: true,
+            canGrantForRun: true);
     }
 
-    private static ToolRequestedScope FilePatchScope(string workspaceRoot, JsonElement arguments)
+    private static ToolRequestedScope FileModifyScope(
+        string workspaceRoot,
+        JsonElement arguments,
+        string detail)
     {
         var path = ResolvePath(workspaceRoot, arguments, "path");
         return Create(
             BuiltinFsPathPolicy.GetRequestedTargetSummary(workspaceRoot, path),
-            "replace a bounded line range",
+            detail,
             readRoots: [path],
             writeRoots: [path],
             allowOverwrite: true);
@@ -236,23 +242,6 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
             readRoots: [workingDirectory],
             allowedExecutables: [executable],
             allowedEnvironmentVariables: environmentNames);
-    }
-
-    private static ToolRequestedScope PowerShellScope(
-        string workspaceRoot,
-        JsonElement arguments)
-    {
-        var script = BuiltinProcessToolExecutor.GetRequiredString(arguments, "script");
-        BuiltinProcessRunner.ValidateStandardInput(script);
-        var workingDirectory = BuiltinFsPathPolicy.ResolveRequestedPath(
-            workspaceRoot,
-            BuiltinProcessToolExecutor.GetOptionalString(arguments, "workingDirectory")
-                ?? workspaceRoot);
-        return Create(
-            $"powershell:{BuiltinFsPathPolicy.GetRequestedTargetSummary(workspaceRoot, workingDirectory)}",
-            $"script {script.Length} characters",
-            readRoots: [workingDirectory],
-            allowPowerShell: true);
     }
 
     private static ToolRequestedScope HttpScope(JsonElement arguments)

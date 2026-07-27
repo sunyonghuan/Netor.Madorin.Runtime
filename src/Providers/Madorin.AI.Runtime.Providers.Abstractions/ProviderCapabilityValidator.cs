@@ -57,7 +57,7 @@ public static class ProviderCapabilityValidator
         ArgumentNullException.ThrowIfNull(input);
         ct.ThrowIfCancellationRequested();
 
-        foreach (var block in input)
+        foreach (var block in Flatten(input))
         {
             ct.ThrowIfCancellationRequested();
 
@@ -65,13 +65,9 @@ public static class ProviderCapabilityValidator
             {
                 ReasoningContentBlock when !capabilities.Reasoning => "reasoning",
                 ToolCallContentBlock or ToolResultContentBlock when !capabilities.ToolCalling => "tool_calling",
-                BlobRefContentBlock { Blob.ContentType: var contentType }
-                    when contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)
-                         && !capabilities.Vision => "vision",
-                BlobRefContentBlock { Blob.ContentType: var contentType }
-                    when contentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase)
-                         && !capabilities.Audio => "audio",
-                BlobRefContentBlock when !capabilities.Files => "files",
+                BlobRefContentBlock blob => GetUnsupportedBlobCapability(
+                    capabilities,
+                    blob.Blob.ContentType),
                 _ => null
             };
 
@@ -84,7 +80,8 @@ public static class ProviderCapabilityValidator
         return Task.CompletedTask;
     }
 
-    private static ProviderCapabilities GetEffectiveCapabilities(
+    /// <summary>Combines Provider-level and model-level capabilities for one request.</summary>
+    public static ProviderCapabilities GetEffectiveCapabilities(
         ProviderCapabilities providerCapabilities,
         string modelId,
         IReadOnlyList<ProviderModel> models)
@@ -111,6 +108,38 @@ public static class ProviderCapabilityValidator
             Embeddings: providerCapabilities.Embeddings && modelCapabilities.Embeddings,
             Usage: providerCapabilities.Usage && modelCapabilities.Usage,
             RemoteCancellation: providerCapabilities.RemoteCancellation && modelCapabilities.RemoteCancellation);
+    }
+
+    private static IEnumerable<ContentBlock> Flatten(IEnumerable<ContentBlock> input)
+    {
+        foreach (var block in input)
+        {
+            yield return block;
+            if (block is ToolResultContentBlock result)
+            {
+                foreach (var nested in Flatten(result.Content))
+                {
+                    yield return nested;
+                }
+            }
+        }
+    }
+
+    private static string? GetUnsupportedBlobCapability(
+        ProviderCapabilities capabilities,
+        string contentType)
+    {
+        if (contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+        {
+            return capabilities.Vision ? null : "vision";
+        }
+
+        if (contentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase))
+        {
+            return capabilities.Audio ? null : "audio";
+        }
+
+        return capabilities.Files ? null : "files";
     }
 
     private static RuntimeProviderException CreateCapabilityException(string capability)

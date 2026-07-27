@@ -10,8 +10,8 @@ namespace Madorin.AI.Runtime.Provider.Tests;
 [TestClass]
 public sealed class DedicatedOpenAICompatibleProviderToolTests
 {
-    private const string ProviderToolName = "builtin__fs__list";
-    private const string RuntimeToolId = "builtin.fs.list";
+    private const string ProviderToolName = "mcli_fs_list";
+    private const string RuntimeToolId = "mcli_fs_list";
 
     public TestContext TestContext { get; set; }
 
@@ -140,7 +140,7 @@ public sealed class DedicatedOpenAICompatibleProviderToolTests
         ToolDescriptor[] tools =
         [
             new(
-                "builtin.fs.read",
+                "mcli_fs_read",
                 "builtin",
                 "Read file",
                 "Reads one file.",
@@ -156,7 +156,7 @@ public sealed class DedicatedOpenAICompatibleProviderToolTests
         var captured = Assert.ContainsSingle(server.Requests);
         using var body = JsonDocument.Parse(captured.Body);
         var declaration = body.RootElement.GetProperty("tools")[0].GetProperty("function");
-        Assert.AreEqual("builtin__fs__read", declaration.GetProperty("name").GetString());
+        Assert.AreEqual("mcli_fs_read", declaration.GetProperty("name").GetString());
     }
 
     private static ToolDescriptor[] CreateTools() =>

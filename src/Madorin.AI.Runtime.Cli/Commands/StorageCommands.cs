@@ -11,19 +11,22 @@ internal static class StorageCommands
         Option<bool> jsonOption,
         Option<string?> workspaceOption,
         Option<string?> dataDirectoryOption,
-        TextWriter output)
+        TextWriter output,
+        string? configDirectory = null)
     {
         var command = new Command("storage", "Maintain messages and Blob storage.");
         command.Subcommands.Add(CreateCheck(
             jsonOption,
             workspaceOption,
             dataDirectoryOption,
-            output));
+            output,
+            configDirectory));
         command.Subcommands.Add(CreateGc(
             jsonOption,
             workspaceOption,
             dataDirectoryOption,
-            output));
+            output,
+            configDirectory));
         return command;
     }
 
@@ -31,7 +34,8 @@ internal static class StorageCommands
         Option<bool> jsonOption,
         Option<string?> workspaceOption,
         Option<string?> dataDirectoryOption,
-        TextWriter output)
+        TextWriter output,
+        string? configDirectory)
     {
         var command = new Command(
             "check",
@@ -44,9 +48,10 @@ internal static class StorageCommands
         {
             try
             {
-                var context = StandaloneRuntimeContext.Create(
+                var context = await StandaloneRuntimeContext.CreatePreparedAsync(
                     parseResult.GetValue(workspaceOption),
-                    parseResult.GetValue(dataDirectoryOption));
+                    parseResult.GetValue(dataDirectoryOption),
+                    configDirectory);
                 var result = await StorageMaintenanceService.CheckAsync(
                         context.DataDirectory,
                         parseResult.GetValue(verifyHashesOption))
@@ -75,7 +80,8 @@ internal static class StorageCommands
         Option<bool> jsonOption,
         Option<string?> workspaceOption,
         Option<string?> dataDirectoryOption,
-        TextWriter output)
+        TextWriter output,
+        string? configDirectory)
     {
         var command = new Command(
             "gc",
@@ -122,9 +128,10 @@ internal static class StorageCommands
 
             try
             {
-                var context = StandaloneRuntimeContext.Create(
+                var context = await StandaloneRuntimeContext.CreatePreparedAsync(
                     parseResult.GetValue(workspaceOption),
-                    parseResult.GetValue(dataDirectoryOption));
+                    parseResult.GetValue(dataDirectoryOption),
+                    configDirectory);
                 if (!confirm)
                 {
                     var plan = await StorageMaintenanceService.PlanGcAsync(

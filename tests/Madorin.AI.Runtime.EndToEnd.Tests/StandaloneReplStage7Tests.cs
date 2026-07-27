@@ -75,11 +75,11 @@ public sealed class StandaloneReplStage7Tests
                 error.ToString(),
                 StringComparison.Ordinal);
             Assert.Contains(
-                "builtin.memory.read [read-only]",
+                "mcli_memory_read [read-only]",
                 output.ToString(),
                 StringComparison.Ordinal);
             Assert.Contains(
-                "builtin.memory.append [approval required]",
+                "mcli_memory_append [approval required]",
                 output.ToString(),
                 StringComparison.Ordinal);
             Assert.Contains("/resume", output.ToString(), StringComparison.Ordinal);

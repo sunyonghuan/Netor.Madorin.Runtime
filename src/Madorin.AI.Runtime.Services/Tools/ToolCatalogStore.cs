@@ -130,7 +130,7 @@ public sealed partial class ToolCatalogStore : IToolCatalogStore
         foreach (var descriptor in descriptors)
         {
             ArgumentNullException.ThrowIfNull(descriptor);
-            if (!descriptor.ToolId.StartsWith("builtin.", StringComparison.Ordinal)
+            if (!descriptor.ToolId.StartsWith("mcli_", StringComparison.Ordinal)
                 || !ids.Add(descriptor.ToolId))
             {
                 throw new InvalidOperationException(

@@ -30,7 +30,6 @@ internal sealed class MeetingInvocationExecutor(
     private readonly ToolConsentCoordinator? _toolConsentCoordinator = toolConsentCoordinator;
     private readonly RuntimeLimits _runtimeLimits = runtimeLimits ?? new RuntimeLimits(
         MaxToolRounds: 8,
-        MaxToolCallsPerRound: 8,
         MaxToolResultBytesPerInvocation: 4 * 1024 * 1024);
 
     public async Task<MeetingInvocationExecutionResult> ExecuteAsync(
@@ -40,11 +39,12 @@ internal sealed class MeetingInvocationExecutor(
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentOutOfRangeException.ThrowIfNegative(maxRetries);
+        ValidateToolCallLimit(_runtimeLimits.MaxToolCallsPerRound);
 
         var providerEvents = new List<RuntimeProviderEvent>();
         var currentRequest = request;
         var maxToolRounds = _runtimeLimits.MaxToolRounds ?? 8;
-        var maxToolCallsPerRound = _runtimeLimits.MaxToolCallsPerRound ?? 8;
+        var maxToolCallsPerRound = _runtimeLimits.MaxToolCallsPerRound;
         var maxToolResultBytes = _runtimeLimits.MaxToolResultBytesPerInvocation
             ?? 4L * 1024 * 1024;
         long totalToolResultBytes = 0;
@@ -85,11 +85,12 @@ internal sealed class MeetingInvocationExecutor(
                     providerEvents);
             }
 
-            if (toolCalls.Length > maxToolCallsPerRound)
+            if (maxToolCallsPerRound is { } toolCallLimit
+                && toolCalls.Length > toolCallLimit)
             {
                 return Failed(
                     RuntimeErrorCodes.LimitsIncompatible,
-                    $"The Provider requested {toolCalls.Length} tools in one round; the limit is {maxToolCallsPerRound}.",
+                    $"The Provider requested {toolCalls.Length} tools in one round; the limit is {toolCallLimit}.",
                     providerEvents);
             }
 
@@ -409,6 +410,16 @@ internal sealed class MeetingInvocationExecutor(
             IsRetryable: false,
             ProviderDetails: null,
             Guid.NewGuid().ToString("N"));
+
+    private static void ValidateToolCallLimit(int? maxToolCallsPerRound)
+    {
+        if (maxToolCallsPerRound is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxToolCallsPerRound),
+                "MaxToolCallsPerRound must be a positive integer or null.");
+        }
+    }
 
     private static string CreateStableId(params string[] components) =>
         Convert.ToHexString(SHA256.HashData(

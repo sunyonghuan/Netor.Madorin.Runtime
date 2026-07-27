@@ -133,14 +133,14 @@ public sealed class ToolGatewayTests
         var executor = new BuiltinFsToolExecutor();
         var invocation = CreateFileInvocation(
             BuiltinToolRegistry.FileReadToolId,
-            CreateArguments(("path", "notes.txt")));
+            CreateArguments(("path", "notes.txt"), ("encoding", "utf-8")));
 
         var result = await executor.ExecuteAsync(invocation, TestContext.CancellationToken);
 
         Assert.IsTrue(result.Success, result.Error);
         using var output = JsonDocument.Parse(result.OutputJson!);
         Assert.AreEqual(
-            "hello tools",
+            "1| hello tools",
             output.RootElement.GetProperty("content").GetString());
         Assert.AreEqual(
             "utf-8",
@@ -170,7 +170,7 @@ public sealed class ToolGatewayTests
         var permission = CreatePermission();
         var invocation = CreateFileInvocation(
             BuiltinToolRegistry.FileReadToolId,
-            CreateArguments(("path", "notes.txt")),
+            CreateArguments(("path", "notes.txt"), ("encoding", "utf-8")),
             callId: "call-idempotent");
 
         var first = await gateway.ExecuteAsync(
@@ -223,7 +223,7 @@ public sealed class ToolGatewayTests
         };
         var invocation = CreateFileInvocation(
             BuiltinToolRegistry.FileReadToolId,
-            CreateArguments(("path", "notes.txt")),
+            CreateArguments(("path", "notes.txt"), ("encoding", "utf-8")),
             callId: "call-work-lineage") with
         {
             PermissionContext = workPermission
@@ -266,7 +266,7 @@ public sealed class ToolGatewayTests
             outbox);
         var invocation = CreateFileInvocation(
             BuiltinToolRegistry.FileReadToolId,
-            CreateArguments(("path", "notes.txt")),
+            CreateArguments(("path", "notes.txt"), ("encoding", "utf-8")),
             callId: "call-work-fields") with
         {
             WorkStepId = "step-fields-1",
@@ -416,7 +416,7 @@ public sealed class ToolGatewayTests
             runtimeLimits: new RuntimeLimits(MaxInlineContentBytes: 32));
         var invocation = CreateFileInvocation(
             BuiltinToolRegistry.FileReadToolId,
-            CreateArguments(("path", "large.txt")),
+            CreateArguments(("path", "large.txt"), ("encoding", "utf-8")),
             callId: "call-large-result");
 
         var first = await gateway.ExecuteAsync(
@@ -467,7 +467,7 @@ public sealed class ToolGatewayTests
             outbox);
         var invocation = CreateFileInvocation(
             BuiltinToolRegistry.FileReadToolId,
-            CreateArguments(("path", "notes.txt")),
+            CreateArguments(("path", "notes.txt"), ("encoding", "utf-8")),
             callId: "call-prepare-failed");
 
         var result = await gateway.ExecuteAsync(
@@ -638,7 +638,7 @@ public sealed class ToolGatewayTests
         var invocation = CreateChildInvocation(
             BuiltinToolRegistry.FileReadToolId,
             "call-revoked-before-send",
-            CreateArguments(("path", "notes.txt")));
+            CreateArguments(("path", "notes.txt"), ("encoding", "utf-8")));
         await SaveDelegatedGrantChainAsync(
             authorization,
             invocation,
@@ -825,7 +825,7 @@ public sealed class ToolGatewayTests
             outbox);
         var invocation = CreateFileInvocation(
             BuiltinToolRegistry.FileReadToolId,
-            CreateArguments(("path", "notes.txt")),
+            CreateArguments(("path", "notes.txt"), ("encoding", "utf-8")),
             "call-recovered");
         await SeedSentIntentAsync(repository, invocation, catalog.EffectiveVersion);
 
@@ -930,7 +930,7 @@ public sealed class ToolGatewayTests
             outbox);
         var invocation = CreateFileInvocation(
             BuiltinToolRegistry.FileReadToolId,
-            CreateArguments(("path", "notes.txt")),
+            CreateArguments(("path", "notes.txt"), ("encoding", "utf-8")),
             "call-resend");
         await SeedSentIntentAsync(repository, invocation, catalog.EffectiveVersion);
 
@@ -1251,12 +1251,12 @@ public sealed class ToolGatewayTests
             CancellationToken ct = default)
         {
             ct.ThrowIfCancellationRequested();
-            var count = Interlocked.Increment(ref _executionCount);
+            Interlocked.Increment(ref _executionCount);
             return Task.FromResult(new ToolResult(
                 invocation.CallId,
                 invocation.ToolId,
                 true,
-                $"{{\"content\":\"\",\"encoding\":\"utf-8\",\"byteLength\":0,\"executionCount\":{count}}}"));
+                "{\"content\":\"\",\"encoding\":\"utf-8\",\"codePage\":65001,\"byteLength\":0,\"startLine\":1,\"endLine\":0,\"totalLines\":0,\"sha256\":\"\",\"hasBom\":false,\"lineEnding\":\"none\",\"endsWithNewline\":false,\"truncated\":false}"));
         }
     }
 
@@ -1422,7 +1422,7 @@ public sealed class ToolGatewayTests
                 invocation.CallId,
                 invocation.ToolId,
                 true,
-                $"{{\"content\":\"{new string('x', 128)}\",\"encoding\":\"utf-8\",\"byteLength\":128}}"));
+                $"{{\"content\":\"{new string('x', 128)}\",\"encoding\":\"utf-8\",\"codePage\":65001,\"byteLength\":128,\"startLine\":1,\"endLine\":1,\"totalLines\":1,\"sha256\":\"\",\"hasBom\":false,\"lineEnding\":\"none\",\"endsWithNewline\":false,\"truncated\":false}}"));
         }
     }
 
@@ -1506,6 +1506,6 @@ public sealed class ToolGatewayTests
                 invocation.CallId,
                 invocation.ToolId,
                 true,
-                "{\"content\":\"\",\"encoding\":\"utf-8\",\"byteLength\":0}");
+                "{\"content\":\"\",\"encoding\":\"utf-8\",\"codePage\":65001,\"byteLength\":0,\"startLine\":1,\"endLine\":0,\"totalLines\":0,\"sha256\":\"\",\"hasBom\":false,\"lineEnding\":\"none\",\"endsWithNewline\":false,\"truncated\":false}");
     }
 }

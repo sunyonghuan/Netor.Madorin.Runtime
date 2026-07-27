@@ -22,7 +22,6 @@ public sealed record LocalRuntimeOptions(
 
     public RuntimeLimits RuntimeLimits { get; init; } = new(
         MaxToolRounds: 8,
-        MaxToolCallsPerRound: 8,
         MaxToolResultBytesPerInvocation: 4 * 1024 * 1024);
 
     public long MaxGlobalBlobBytes { get; init; } = 8L * 1024 * 1024 * 1024;

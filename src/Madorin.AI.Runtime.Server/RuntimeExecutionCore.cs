@@ -126,9 +126,7 @@ internal sealed class RuntimeExecutionCore(
         var executors = new List<IToolExecutor>
         {
             new BuiltinFsToolExecutor(),
-            new BuiltinContentToolExecutor(),
             new BuiltinProcessToolExecutor(),
-            new BuiltinPowerShellToolExecutor(),
             new BuiltinHttpToolExecutor(),
             new BuiltinMemoryToolExecutor(_memoryFiles, _memorySnapshots)
         };

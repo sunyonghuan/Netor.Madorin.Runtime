@@ -18,12 +18,13 @@ public sealed partial class BuiltinFsToolExecutor : IToolExecutor
         || string.Equals(toolId, BuiltinToolRegistry.FileStatusToolId, StringComparison.Ordinal)
         || string.Equals(toolId, BuiltinToolRegistry.FileReadToolId, StringComparison.Ordinal)
         || string.Equals(toolId, BuiltinToolRegistry.FileWriteToolId, StringComparison.Ordinal)
+        || string.Equals(toolId, BuiltinToolRegistry.FileAppendToolId, StringComparison.Ordinal)
         || string.Equals(toolId, BuiltinToolRegistry.DirectoryCreateToolId, StringComparison.Ordinal)
         || string.Equals(toolId, BuiltinToolRegistry.FileCopyToolId, StringComparison.Ordinal)
         || string.Equals(toolId, BuiltinToolRegistry.FileMoveToolId, StringComparison.Ordinal)
         || string.Equals(toolId, BuiltinToolRegistry.FileDeleteToolId, StringComparison.Ordinal)
         || string.Equals(toolId, BuiltinToolRegistry.FileSearchToolId, StringComparison.Ordinal)
-        || string.Equals(toolId, BuiltinToolRegistry.FilePatchToolId, StringComparison.Ordinal);
+        || string.Equals(toolId, BuiltinToolRegistry.FileEditToolId, StringComparison.Ordinal);
 
     public ValueTask<IPreparedToolExecution> PrepareAsync(
         ToolInvocation invocation,

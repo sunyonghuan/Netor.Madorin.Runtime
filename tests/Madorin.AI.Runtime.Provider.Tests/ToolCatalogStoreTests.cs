@@ -48,7 +48,7 @@ public sealed class ToolCatalogStoreTests
         Assert.ThrowsExactly<ArgumentException>(() =>
             store.ReplaceHostCatalog(new ToolCatalogReplaceRequest(
                 "host-v2",
-                [CreateHostTool("builtin.fs.escape")])));
+                [CreateHostTool("mcli_fs_escape")])));
         Assert.ThrowsExactly<ArgumentException>(() =>
             store.ReplaceHostCatalog(new ToolCatalogReplaceRequest(
                 "host-v2",

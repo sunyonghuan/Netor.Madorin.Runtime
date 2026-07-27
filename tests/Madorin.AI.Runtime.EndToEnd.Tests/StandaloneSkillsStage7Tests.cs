@@ -88,7 +88,7 @@ public sealed class StandaloneSkillsStage7Tests
             + "name: workspace-demo\n"
             + "description: Workspace Skill\n"
             + "allowed-tools:\n"
-            + "  - builtin.memory.read\n"
+            + "  - mcli_memory_read\n"
             + "  - host.missing\n"
             + "---\n"
             + "Workspace demo body.\n");
