@@ -7,6 +7,8 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
 {
     public const string MemoryReadToolId = "mcli_memory_read";
     public const string MemoryAppendToolId = "mcli_memory_append";
+    public const string MemoryUpdateToolId = "mcli_memory_update";
+    public const string MemoryDeleteToolId = "mcli_memory_delete";
     public const string FileListToolId = "mcli_fs_list";
     public const string FileStatusToolId = "mcli_fs_stat";
     public const string FileReadToolId = "mcli_fs_read";
@@ -27,21 +29,43 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
             MemoryReadToolId,
             "mcli",
             "Read memory",
-            "Reads Runtime memory.",
-            """{"type":"object","properties":{"scope":{"type":"string","enum":["global","project","effective"]}},"required":["scope"],"additionalProperties":false}""",
-            """{"type":"object","properties":{"content":{"type":["string","null"]},"hash":{"type":["string","null"]}},"required":["content","hash"],"additionalProperties":false}""",
+            "Reads every line of global or project memory with line numbers and a hash.",
+            """{"type":"object","properties":{"scope":{"type":"string","enum":["global","project"]}},"required":["scope"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"scope":{"type":"string"},"lineCount":{"type":"integer"},"lines":{"type":"array","items":{"type":"object","properties":{"line":{"type":"integer"},"text":{"type":"string"}},"required":["line","text"],"additionalProperties":false}},"hash":{"type":["string","null"]}},"required":["scope","lineCount","lines","hash"],"additionalProperties":false}""",
             Capabilities: ["memory.read"]),
         new(
             MemoryAppendToolId,
             "mcli",
             "Append memory",
-            "Appends an item to Runtime memory.",
-            """{"type":"object","properties":{"scope":{"type":"string","enum":["global","project"]},"item":{"type":"string"}},"required":["scope","item"],"additionalProperties":false}""",
-            """{"type":"object","properties":{"appended":{"type":"boolean"},"hash":{"type":"string"},"appliesFrom":{"type":"string","const":"nextInvocation"}},"required":["appended","hash","appliesFrom"],"additionalProperties":false}""",
+            "Appends complete Markdown lines to global or project memory. Read first and pass its hash.",
+            """{"type":"object","properties":{"scope":{"type":"string","enum":["global","project"]},"lines":{"type":"array","minItems":1,"items":{"type":"string","minLength":1}},"expectedHash":{"type":["string","null"]}},"required":["scope","lines","expectedHash"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"appended":{"type":"boolean"},"lineCount":{"type":"integer"},"hash":{"type":"string"},"appliesFrom":{"type":"string","const":"nextInvocation"}},"required":["appended","lineCount","hash","appliesFrom"],"additionalProperties":false}""",
             RiskLevel: "medium",
             RequiresApproval: true,
             Capabilities: ["memory.write"],
             Risk: ToolRiskLevel.Write),
+        new(
+            MemoryUpdateToolId,
+            "mcli",
+            "Update memory",
+            "Replaces an inclusive line range in global or project memory. Read first and pass its hash.",
+            """{"type":"object","properties":{"scope":{"type":"string","enum":["global","project"]},"startLine":{"type":"integer","minimum":1},"endLine":{"type":"integer","minimum":1},"lines":{"type":"array","minItems":1,"items":{"type":"string","minLength":1}},"expectedHash":{"type":"string"}},"required":["scope","startLine","endLine","lines","expectedHash"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"updated":{"type":"boolean"},"lineCount":{"type":"integer"},"hash":{"type":"string"},"appliesFrom":{"type":"string","const":"nextInvocation"}},"required":["updated","lineCount","hash","appliesFrom"],"additionalProperties":false}""",
+            RiskLevel: "medium",
+            RequiresApproval: true,
+            Capabilities: ["memory.write"],
+            Risk: ToolRiskLevel.Write),
+        new(
+            MemoryDeleteToolId,
+            "mcli",
+            "Delete memory",
+            "Deletes an inclusive line range from global or project memory. Read first and pass its hash.",
+            """{"type":"object","properties":{"scope":{"type":"string","enum":["global","project"]},"startLine":{"type":"integer","minimum":1},"endLine":{"type":"integer","minimum":1},"expectedHash":{"type":"string"}},"required":["scope","startLine","endLine","expectedHash"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"deleted":{"type":"boolean"},"lineCount":{"type":"integer"},"hash":{"type":"string"},"appliesFrom":{"type":"string","const":"nextInvocation"}},"required":["deleted","lineCount","hash","appliesFrom"],"additionalProperties":false}""",
+            RiskLevel: "high",
+            RequiresApproval: true,
+            Capabilities: ["memory.write"],
+            Risk: ToolRiskLevel.Destructive),
         new(
             FileListToolId,
             "mcli",

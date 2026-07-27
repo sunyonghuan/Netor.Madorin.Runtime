@@ -6,32 +6,29 @@ namespace Madorin.AI.Runtime.Tools.Builtin;
 
 public sealed class BuiltinMemoryToolExecutor(
     MemoryFileService memoryFileService,
-    MemoryInvocationSnapshotStore invocationSnapshots) : IToolExecutor
+    MemoryInvocationSnapshotStore? legacySnapshots = null) : IToolExecutor
 {
     private readonly MemoryFileService _memoryFileService = memoryFileService
         ?? throw new ArgumentNullException(nameof(memoryFileService));
-    private readonly MemoryInvocationSnapshotStore _invocationSnapshots = invocationSnapshots
-        ?? throw new ArgumentNullException(nameof(invocationSnapshots));
 
     public bool CanExecute(string toolId) =>
-        string.Equals(toolId, BuiltinToolRegistry.MemoryReadToolId, StringComparison.Ordinal)
-        || string.Equals(toolId, BuiltinToolRegistry.MemoryAppendToolId, StringComparison.Ordinal);
+        toolId is BuiltinToolRegistry.MemoryReadToolId
+            or BuiltinToolRegistry.MemoryAppendToolId
+            or BuiltinToolRegistry.MemoryUpdateToolId
+            or BuiltinToolRegistry.MemoryDeleteToolId;
 
     public async Task<ToolResult> ExecuteAsync(
         ToolInvocation invocation,
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(invocation);
+        _ = legacySnapshots;
         if (!CanExecute(invocation.ToolId))
         {
             return Failure(invocation, "The memory executor cannot execute this tool.");
         }
 
-        if (string.Equals(
-                invocation.ToolId,
-                BuiltinToolRegistry.MemoryAppendToolId,
-                StringComparison.Ordinal)
-            && !HasValidApproval(invocation))
+        if (IsWriteTool(invocation.ToolId) && !HasValidApproval(invocation))
         {
             return Failure(invocation, "An explicit user approval grant is required.");
         }
@@ -47,9 +44,13 @@ public sealed class BuiltinMemoryToolExecutor(
             return invocation.ToolId switch
             {
                 BuiltinToolRegistry.MemoryReadToolId =>
-                    Read(invocation, arguments.RootElement, ct),
+                    await ReadAsync(invocation, arguments.RootElement, ct).ConfigureAwait(false),
                 BuiltinToolRegistry.MemoryAppendToolId =>
                     await AppendAsync(invocation, arguments.RootElement, ct).ConfigureAwait(false),
+                BuiltinToolRegistry.MemoryUpdateToolId =>
+                    await UpdateAsync(invocation, arguments.RootElement, ct).ConfigureAwait(false),
+                BuiltinToolRegistry.MemoryDeleteToolId =>
+                    await DeleteAsync(invocation, arguments.RootElement, ct).ConfigureAwait(false),
                 _ => Failure(invocation, "The memory tool is not implemented.")
             };
         }
@@ -59,6 +60,7 @@ public sealed class BuiltinMemoryToolExecutor(
         }
         catch (Exception ex) when (ex is JsonException
             or ArgumentException
+            or ArgumentOutOfRangeException
             or InvalidOperationException
             or IOException
             or UnauthorizedAccessException
@@ -68,32 +70,36 @@ public sealed class BuiltinMemoryToolExecutor(
         }
     }
 
-    private ToolResult Read(
+    private async Task<ToolResult> ReadAsync(
         ToolInvocation invocation,
         JsonElement arguments,
         CancellationToken ct)
     {
-        ct.ThrowIfCancellationRequested();
-        var scope = ReadScope(arguments, allowEffective: true);
-        if (invocation.InvocationId is null
-            || !_invocationSnapshots.TryGet(invocation.InvocationId, out var context))
-        {
-            throw new InvalidOperationException(
-                "The Invocation memory snapshot is unavailable or has expired.");
-        }
-
-        var snapshot = context.Get(scope);
+        var scope = ReadScope(arguments);
+        var snapshot = await _memoryFileService.ReadSnapshotAsync(scope, ct)
+            .ConfigureAwait(false);
+        var lines = MemoryFileService.SplitLines(snapshot?.Content);
         var output = ToolJson.Write(writer =>
         {
             writer.WriteStartObject();
+            writer.WriteString("scope", scope.ToString().ToLowerInvariant());
+            writer.WriteNumber("lineCount", lines.Count);
+            writer.WriteStartArray("lines");
+            for (var index = 0; index < lines.Count; index++)
+            {
+                writer.WriteStartObject();
+                writer.WriteNumber("line", index + 1);
+                writer.WriteString("text", lines[index]);
+                writer.WriteEndObject();
+            }
+
+            writer.WriteEndArray();
             if (snapshot is null)
             {
-                writer.WriteNull("content");
                 writer.WriteNull("hash");
             }
             else
             {
-                writer.WriteString("content", snapshot.Content);
                 writer.WriteString("hash", snapshot.Hash);
             }
 
@@ -107,14 +113,68 @@ public sealed class BuiltinMemoryToolExecutor(
         JsonElement arguments,
         CancellationToken ct)
     {
-        var scope = ReadScope(arguments, allowEffective: false);
-        var item = GetRequiredString(arguments, "item");
-        var snapshot = await _memoryFileService.AppendAsync(scope, item, ct)
+        var scope = ReadScope(arguments);
+        var lines = GetLines(arguments);
+        var expectedHash = GetNullableString(arguments, "expectedHash");
+        var snapshot = await _memoryFileService.AppendLinesAsync(
+                scope,
+                lines,
+                expectedHash,
+                ct)
             .ConfigureAwait(false);
+        return MutationResult(invocation, "appended", snapshot);
+    }
+
+    private async Task<ToolResult> UpdateAsync(
+        ToolInvocation invocation,
+        JsonElement arguments,
+        CancellationToken ct)
+    {
+        var scope = ReadScope(arguments);
+        var startLine = GetRequiredInt(arguments, "startLine");
+        var endLine = GetRequiredInt(arguments, "endLine");
+        var lines = GetLines(arguments);
+        var expectedHash = GetRequiredString(arguments, "expectedHash");
+        var snapshot = await _memoryFileService.UpdateLinesAsync(
+                scope,
+                startLine,
+                endLine,
+                lines,
+                expectedHash,
+                ct)
+            .ConfigureAwait(false);
+        return MutationResult(invocation, "updated", snapshot);
+    }
+
+    private async Task<ToolResult> DeleteAsync(
+        ToolInvocation invocation,
+        JsonElement arguments,
+        CancellationToken ct)
+    {
+        var scope = ReadScope(arguments);
+        var startLine = GetRequiredInt(arguments, "startLine");
+        var endLine = GetRequiredInt(arguments, "endLine");
+        var expectedHash = GetRequiredString(arguments, "expectedHash");
+        var snapshot = await _memoryFileService.DeleteLinesAsync(
+                scope,
+                startLine,
+                endLine,
+                expectedHash,
+                ct)
+            .ConfigureAwait(false);
+        return MutationResult(invocation, "deleted", snapshot);
+    }
+
+    private static ToolResult MutationResult(
+        ToolInvocation invocation,
+        string action,
+        MemoryFileSnapshot snapshot)
+    {
         var output = ToolJson.Write(writer =>
         {
             writer.WriteStartObject();
-            writer.WriteBoolean("appended", true);
+            writer.WriteBoolean(action, true);
+            writer.WriteNumber("lineCount", MemoryFileService.SplitLines(snapshot.Content).Count);
             writer.WriteString("hash", snapshot.Hash);
             writer.WriteString("appliesFrom", "nextInvocation");
             writer.WriteEndObject();
@@ -122,11 +182,11 @@ public sealed class BuiltinMemoryToolExecutor(
         return new ToolResult(invocation.CallId, invocation.ToolId, true, output);
     }
 
-    internal static MemoryScope ReadScope(JsonElement arguments, bool allowEffective)
+    internal static MemoryScope ReadScope(JsonElement arguments)
     {
         var value = GetRequiredString(arguments, "scope");
         if (!Enum.TryParse<MemoryScope>(value, ignoreCase: true, out var scope)
-            || (!allowEffective && scope == MemoryScope.Effective))
+            || scope is MemoryScope.Effective)
         {
             throw new ArgumentException($"Memory scope '{value}' is not supported.");
         }
@@ -137,13 +197,85 @@ public sealed class BuiltinMemoryToolExecutor(
     internal static string GetRequiredString(JsonElement arguments, string propertyName)
     {
         if (!arguments.TryGetProperty(propertyName, out var property)
-            || property.ValueKind != JsonValueKind.String)
+            || property.ValueKind != JsonValueKind.String
+            || string.IsNullOrWhiteSpace(property.GetString()))
         {
-            throw new ArgumentException($"Tool argument '{propertyName}' must be a string.");
+            throw new ArgumentException($"Tool argument '{propertyName}' must be a non-empty string.");
         }
 
         return property.GetString()!;
     }
+
+    private static string? GetNullableString(JsonElement arguments, string propertyName)
+    {
+        if (!arguments.TryGetProperty(propertyName, out var property))
+        {
+            throw new ArgumentException($"Tool argument '{propertyName}' is required.");
+        }
+
+        if (property.ValueKind == JsonValueKind.Null)
+        {
+            return null;
+        }
+
+        if (property.ValueKind != JsonValueKind.String)
+        {
+            throw new ArgumentException($"Tool argument '{propertyName}' must be a string or null.");
+        }
+
+        return property.GetString();
+    }
+
+    private static int GetRequiredInt(JsonElement arguments, string propertyName)
+    {
+        if (!arguments.TryGetProperty(propertyName, out var property)
+            || property.ValueKind != JsonValueKind.Number
+            || !property.TryGetInt32(out var value))
+        {
+            throw new ArgumentException($"Tool argument '{propertyName}' must be an integer.");
+        }
+
+        return value;
+    }
+
+    private static List<string> GetLines(JsonElement arguments)
+    {
+        if (!arguments.TryGetProperty("lines", out var property)
+            || property.ValueKind != JsonValueKind.Array)
+        {
+            throw new ArgumentException("Tool argument 'lines' must be an array.");
+        }
+
+        var lines = new List<string>();
+        foreach (var item in property.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(item.GetString()))
+            {
+                throw new ArgumentException("Each memory line must be a non-empty string.");
+            }
+
+            var line = item.GetString()!;
+            if (line.Contains('\r') || line.Contains('\n'))
+            {
+                throw new ArgumentException("Each memory line must contain no newline.");
+            }
+
+            lines.Add(line);
+        }
+
+        if (lines.Count == 0)
+        {
+            throw new ArgumentException("Tool argument 'lines' must not be empty.");
+        }
+
+        return lines;
+    }
+
+    private static bool IsWriteTool(string toolId) =>
+        toolId is BuiltinToolRegistry.MemoryAppendToolId
+            or BuiltinToolRegistry.MemoryUpdateToolId
+            or BuiltinToolRegistry.MemoryDeleteToolId;
 
     private static bool HasValidApproval(ToolInvocation invocation) =>
         invocation.PermissionContext is { } permission

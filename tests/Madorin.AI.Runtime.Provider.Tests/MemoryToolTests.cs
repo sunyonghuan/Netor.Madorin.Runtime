@@ -12,7 +12,9 @@ namespace Madorin.AI.Runtime.Provider.Tests;
 public sealed class MemoryToolTests
 {
     private static readonly string?[] AppendScopes = ["global", "project"];
-    private static readonly string?[] ReadScopes = ["global", "project", "effective"];
+    private static readonly string?[] ReadScopes = ["global", "project"];
+    private static readonly string[] UpdateRequired = ["scope", "startLine", "endLine", "lines", "expectedHash"];
+    private static readonly string[] DeleteRequired = ["scope", "startLine", "endLine", "expectedHash"];
 
     private string _root = null!;
 
@@ -45,13 +47,21 @@ public sealed class MemoryToolTests
             [BuiltinToolRegistry.MemoryReadToolId]));
         var append = Assert.ContainsSingle(registry.GetTools(
             [BuiltinToolRegistry.MemoryAppendToolId]));
+        var update = Assert.ContainsSingle(registry.GetTools(
+            [BuiltinToolRegistry.MemoryUpdateToolId]));
+        var delete = Assert.ContainsSingle(registry.GetTools(
+            [BuiltinToolRegistry.MemoryDeleteToolId]));
 
         Assert.IsFalse(read.RequiresApproval);
         Assert.IsTrue(append.RequiresApproval);
+        Assert.IsTrue(update.RequiresApproval);
+        Assert.IsTrue(delete.RequiresApproval);
         using var readInput = JsonDocument.Parse(read.InputSchemaJson);
         using var readOutput = JsonDocument.Parse(read.OutputSchemaJson);
         using var appendInput = JsonDocument.Parse(append.InputSchemaJson);
         using var appendOutput = JsonDocument.Parse(append.OutputSchemaJson);
+        using var updateInput = JsonDocument.Parse(update.InputSchemaJson);
+        using var deleteInput = JsonDocument.Parse(delete.InputSchemaJson);
         CollectionAssert.AreEquivalent(
             ReadScopes,
             readInput.RootElement
@@ -80,10 +90,24 @@ public sealed class MemoryToolTests
                 .GetProperty("appliesFrom")
                 .GetProperty("const")
                 .GetString());
+        CollectionAssert.AreEquivalent(
+            UpdateRequired,
+            updateInput.RootElement
+                .GetProperty("required")
+                .EnumerateArray()
+                .Select(static item => item.GetString())
+                .ToArray());
+        CollectionAssert.AreEquivalent(
+            DeleteRequired,
+            deleteInput.RootElement
+                .GetProperty("required")
+                .EnumerateArray()
+                .Select(static item => item.GetString())
+                .ToArray());
     }
 
     [TestMethod]
-    public async Task ExecuteAsync_Read_ReturnsContentAndHashFromFixedScope()
+    public async Task ExecuteAsync_Read_ReturnsCurrentLinesAndHashFromFixedScope()
     {
         var service = CreateMemoryService();
         const string content = "# Memory\n\n- Read this rule.\n";
@@ -91,16 +115,11 @@ public sealed class MemoryToolTests
             MemoryScope.Project,
             content,
             TestContext.CancellationToken);
-        var snapshots = new MemoryInvocationSnapshotStore();
-        var context = await new AgentContextComposer(service).ComposeAsync(
-            "System prompt.",
-            TestContext.CancellationToken);
-        snapshots.Capture("invocation-1", context);
         await service.ReplaceAsync(
             MemoryScope.Project,
             "# Memory\n\n- A newer rule.\n",
             TestContext.CancellationToken);
-        var executor = new BuiltinMemoryToolExecutor(service, snapshots);
+        var executor = new BuiltinMemoryToolExecutor(service);
         var invocation = CreateInvocation(
             BuiltinToolRegistry.MemoryReadToolId,
             "{\"scope\":\"project\"}");
@@ -111,11 +130,15 @@ public sealed class MemoryToolTests
 
         Assert.IsTrue(result.Success, result.Error);
         using var output = JsonDocument.Parse(result.OutputJson!);
-        Assert.AreEqual(content, output.RootElement.GetProperty("content").GetString());
+        Assert.AreEqual(3, output.RootElement.GetProperty("lineCount").GetInt32());
         Assert.AreEqual(
-            context.ProjectMemoryHash,
+            "- A newer rule.",
+            output.RootElement.GetProperty("lines")[2].GetProperty("text").GetString());
+        Assert.AreEqual(
+            await service.GetHashAsync(
+                MemoryScope.Project,
+                TestContext.CancellationToken),
             output.RootElement.GetProperty("hash").GetString());
-        Assert.IsTrue(snapshots.Release("invocation-1"));
     }
 
     [TestMethod]
@@ -127,7 +150,7 @@ public sealed class MemoryToolTests
             new MemoryInvocationSnapshotStore());
         var invocation = CreateInvocation(
             BuiltinToolRegistry.MemoryAppendToolId,
-            "{\"scope\":\"global\",\"item\":\"Do not write\"}");
+            "{\"scope\":\"global\",\"lines\":[\"- Do not write\"],\"expectedHash\":null}");
 
         var result = await executor.ExecuteAsync(
             invocation,
@@ -160,7 +183,7 @@ public sealed class MemoryToolTests
             outbox);
         var invocation = CreateInvocation(
             BuiltinToolRegistry.MemoryAppendToolId,
-            "{\"scope\":\"global\",\"item\":\"Approved rule\"}");
+            "{\"scope\":\"global\",\"lines\":[\"- Approved rule\"],\"expectedHash\":null}");
 
         var unapproved = await gateway.ExecuteAsync(
             invocation,
@@ -191,6 +214,76 @@ public sealed class MemoryToolTests
             "- Approved rule\n");
     }
 
+    [TestMethod]
+    public async Task ExecuteAsync_UpdateAndDelete_UseInclusiveLineRanges()
+    {
+        var service = CreateMemoryService();
+        const string original = "# Memory\n- First\n- Second\n- Temporary\n";
+        await service.ReplaceAsync(
+            MemoryScope.Project,
+            original,
+            TestContext.CancellationToken);
+        var executor = new BuiltinMemoryToolExecutor(service);
+        var originalHash = await service.GetHashAsync(
+            MemoryScope.Project,
+            TestContext.CancellationToken);
+
+        var updateInvocation = CreateInvocation(
+            BuiltinToolRegistry.MemoryUpdateToolId,
+            $"{{\"scope\":\"project\",\"startLine\":2,\"endLine\":3,\"lines\":[\"- Updated one\",\"- Updated two\"],\"expectedHash\":\"{originalHash}\"}}")
+            with { PermissionContext = CreatePermission("update-call") };
+        var updateResult = await executor.ExecuteAsync(
+            updateInvocation,
+            TestContext.CancellationToken);
+
+        Assert.IsTrue(updateResult.Success, updateResult.Error);
+        var updated = await service.ReadAsync(
+            MemoryScope.Project,
+            TestContext.CancellationToken);
+        Assert.AreEqual("# Memory\n- Updated one\n- Updated two\n- Temporary\n", updated);
+
+        var updateHash = await service.GetHashAsync(
+            MemoryScope.Project,
+            TestContext.CancellationToken);
+        var deleteInvocation = CreateInvocation(
+            BuiltinToolRegistry.MemoryDeleteToolId,
+            $"{{\"scope\":\"project\",\"startLine\":2,\"endLine\":3,\"expectedHash\":\"{updateHash}\"}}")
+            with { PermissionContext = CreatePermission("delete-call") };
+        var deleteResult = await executor.ExecuteAsync(
+            deleteInvocation,
+            TestContext.CancellationToken);
+
+        Assert.IsTrue(deleteResult.Success, deleteResult.Error);
+        Assert.AreEqual(
+            "# Memory\n- Temporary\n",
+            await service.ReadAsync(MemoryScope.Project, TestContext.CancellationToken));
+    }
+
+    [TestMethod]
+    public async Task ExecuteAsync_UpdateWithStaleHash_RejectsWithoutWriting()
+    {
+        var service = CreateMemoryService();
+        await service.ReplaceAsync(
+            MemoryScope.Project,
+            "# Memory\n- Original\n",
+            TestContext.CancellationToken);
+        var executor = new BuiltinMemoryToolExecutor(service);
+        var invocation = CreateInvocation(
+            BuiltinToolRegistry.MemoryUpdateToolId,
+            "{\"scope\":\"project\",\"startLine\":2,\"endLine\":2,\"lines\":[\"- Changed\"],\"expectedHash\":\"stale\"}")
+            with { PermissionContext = CreatePermission("update-call") };
+
+        var result = await executor.ExecuteAsync(
+            invocation,
+            TestContext.CancellationToken);
+
+        Assert.IsFalse(result.Success);
+        StringAssert.Contains(result.Error, "Read it again");
+        Assert.AreEqual(
+            "# Memory\n- Original\n",
+            await service.ReadAsync(MemoryScope.Project, TestContext.CancellationToken));
+    }
+
     private MemoryFileService CreateMemoryService() => new(
         Path.Join(_root, "home"),
         Path.Join(_root, "workspace"));
@@ -219,7 +312,9 @@ public sealed class MemoryToolTests
         private static readonly string[] MemoryToolIds =
         [
             BuiltinToolRegistry.MemoryReadToolId,
-            BuiltinToolRegistry.MemoryAppendToolId
+            BuiltinToolRegistry.MemoryAppendToolId,
+            BuiltinToolRegistry.MemoryUpdateToolId,
+            BuiltinToolRegistry.MemoryDeleteToolId
         ];
 
         private readonly IReadOnlyList<ToolDescriptor> _tools =

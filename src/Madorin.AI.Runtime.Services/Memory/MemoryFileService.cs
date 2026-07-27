@@ -108,6 +108,62 @@ public sealed class MemoryFileService
         return new MemoryFileSnapshot(content, ComputeHash(content));
     }
 
+    public async Task<MemoryFileSnapshot> AppendLinesAsync(
+        MemoryScope scope,
+        IReadOnlyList<string> lines,
+        string? expectedHash,
+        CancellationToken ct = default)
+    {
+        ValidateReplacementLines(lines);
+        var path = GetPath(scope);
+        await using var writeLock = await AcquireWriteLockAsync(path, ct).ConfigureAwait(false);
+        var current = await ReadFileAsync(path, ct).ConfigureAwait(false);
+        EnsureExpectedHash(current, expectedHash);
+
+        var lineEnding = GetLineEnding(current);
+        var content = current ?? $"{EmptyMemory}{lineEnding}";
+        if (content.Length > 0 && !EndsWithLineEnding(content))
+        {
+            content += lineEnding;
+        }
+
+        content += string.Join(lineEnding, lines) + lineEnding;
+        await AtomicWriteAsync(path, content, ct).ConfigureAwait(false);
+        return new MemoryFileSnapshot(content, ComputeHash(content));
+    }
+
+    public async Task<MemoryFileSnapshot> UpdateLinesAsync(
+        MemoryScope scope,
+        int startLine,
+        int endLine,
+        IReadOnlyList<string> lines,
+        string expectedHash,
+        CancellationToken ct = default)
+    {
+        ValidateReplacementLines(lines);
+        return await EditLinesAsync(
+            scope,
+            startLine,
+            endLine,
+            expectedHash,
+            replacementLines: lines,
+            ct).ConfigureAwait(false);
+    }
+
+    public Task<MemoryFileSnapshot> DeleteLinesAsync(
+        MemoryScope scope,
+        int startLine,
+        int endLine,
+        string expectedHash,
+        CancellationToken ct = default) =>
+        EditLinesAsync(
+            scope,
+            startLine,
+            endLine,
+            expectedHash,
+            replacementLines: [],
+            ct);
+
     public async Task ReplaceAsync(
         MemoryScope scope,
         string content,
@@ -165,6 +221,104 @@ public sealed class MemoryFileService
 
         return (await ReadSnapshotAsync(scope, ct).ConfigureAwait(false))?.Hash;
     }
+
+    public static IReadOnlyList<string> SplitLines(string? content)
+    {
+        if (string.IsNullOrEmpty(content))
+        {
+            return [];
+        }
+
+        var normalized = content
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n');
+        var lines = normalized.Split('\n');
+        return normalized.EndsWith('\n')
+            ? lines[..^1]
+            : lines;
+    }
+
+    private async Task<MemoryFileSnapshot> EditLinesAsync(
+        MemoryScope scope,
+        int startLine,
+        int endLine,
+        string expectedHash,
+        IReadOnlyList<string> replacementLines,
+        CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedHash);
+        if (startLine < 1 || endLine < startLine)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(startLine),
+                "Memory line ranges are 1-based and inclusive.");
+        }
+
+        var path = GetPath(scope);
+        await using var writeLock = await AcquireWriteLockAsync(path, ct).ConfigureAwait(false);
+        var current = await ReadFileAsync(path, ct).ConfigureAwait(false);
+        EnsureExpectedHash(current, expectedHash);
+        if (current is null)
+        {
+            throw new InvalidOperationException("The memory file does not exist.");
+        }
+
+        var lines = SplitLines(current).ToList();
+        if (endLine > lines.Count)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(endLine),
+                $"Memory line range {startLine}-{endLine} exceeds {lines.Count} lines.");
+        }
+
+        lines.RemoveRange(startLine - 1, endLine - startLine + 1);
+        lines.InsertRange(startLine - 1, replacementLines);
+        var lineEnding = GetLineEnding(current);
+        var content = string.Join(lineEnding, lines);
+        if (lines.Count > 0 && EndsWithLineEnding(current))
+        {
+            content += lineEnding;
+        }
+
+        await AtomicWriteAsync(path, content, ct).ConfigureAwait(false);
+        return new MemoryFileSnapshot(content, ComputeHash(content));
+    }
+
+    private static void ValidateReplacementLines(IReadOnlyList<string> lines)
+    {
+        ArgumentNullException.ThrowIfNull(lines);
+        if (lines.Count == 0)
+        {
+            throw new ArgumentException("At least one memory line is required.", nameof(lines));
+        }
+
+        foreach (var line in lines)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(line);
+            if (line.Contains('\r') || line.Contains('\n'))
+            {
+                throw new ArgumentException(
+                    "Each memory value must contain exactly one complete Markdown line.",
+                    nameof(lines));
+            }
+        }
+    }
+
+    private static void EnsureExpectedHash(string? current, string? expectedHash)
+    {
+        var actualHash = current is null ? null : ComputeHash(current);
+        if (!string.Equals(actualHash, expectedHash, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "Memory changed after it was read. Read it again before writing.");
+        }
+    }
+
+    private static string GetLineEnding(string? content) =>
+        content?.Contains("\r\n", StringComparison.Ordinal) is true ? "\r\n" : "\n";
+
+    private static bool EndsWithLineEnding(string content) =>
+        content.EndsWith('\n') || content.EndsWith('\r');
 
     private string GetPath(MemoryScope scope)
     {

@@ -186,26 +186,38 @@ public sealed class BuiltinToolConsentScopeResolverTests
     }
 
     [TestMethod]
-    public void Resolve_MemoryReadAllowsRunButAppendIsOnceOnlyAndRedacted()
+    public void Resolve_MemoryReadAllowsRunAndAllMemoryWritesAreOnceOnly()
     {
         var read = Resolve(
             BuiltinToolRegistry.MemoryReadToolId,
-            """{"scope":"effective"}""");
+            """{"scope":"project"}""");
         var append = Resolve(
             BuiltinToolRegistry.MemoryAppendToolId,
-            """{"scope":"project","item":"never print this memory value"}""");
+            """{"scope":"project","lines":["- never print this memory value"],"expectedHash":null}""");
+        var update = Resolve(
+            BuiltinToolRegistry.MemoryUpdateToolId,
+            """{"scope":"project","startLine":1,"endLine":1,"lines":["- changed"],"expectedHash":"hash"}""");
+        var delete = Resolve(
+            BuiltinToolRegistry.MemoryDeleteToolId,
+            """{"scope":"project","startLine":1,"endLine":2,"expectedHash":"hash"}""");
 
         Assert.IsTrue(read.IsSuccess, read.Error);
         Assert.IsNotNull(read.Scope);
-        Assert.AreEqual("memory:effective", read.Scope.TargetSummary);
+        Assert.AreEqual("memory:project", read.Scope.TargetSummary);
         Assert.IsTrue(read.Scope.CanGrantForRun);
 
         Assert.IsTrue(append.IsSuccess, append.Error);
         Assert.IsNotNull(append.Scope);
         Assert.AreEqual("memory:project", append.Scope.TargetSummary);
-        Assert.AreEqual("append 29 characters", append.Scope.DetailSummary);
+        Assert.AreEqual("append memory lines", append.Scope.DetailSummary);
         Assert.IsFalse(append.Scope.CanGrantForRun);
         Assert.DoesNotContain("never print", append.Scope.DetailSummary, StringComparison.Ordinal);
+        Assert.IsTrue(update.IsSuccess, update.Error);
+        Assert.AreEqual("memory:project", update.Scope!.TargetSummary);
+        Assert.IsFalse(update.Scope.CanGrantForRun);
+        Assert.IsTrue(delete.IsSuccess, delete.Error);
+        Assert.AreEqual("memory:project", delete.Scope!.TargetSummary);
+        Assert.IsFalse(delete.Scope.CanGrantForRun);
     }
 
     [TestMethod]

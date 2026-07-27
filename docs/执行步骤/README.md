@@ -147,7 +147,7 @@ Skills 加载与调用作为阶段 5A 横切专项执行，不重开已归档的
 - 独立配置在启动时一次性加载，V1 不实现 Profile、模式配置目录、远程配置中心或配置热更新。
 - Key 可以由向导写入当前用户的 `config.json`；输入不回显，文件限制为当前用户可读，展示、日志和错误全部脱敏。
 - 全局和项目记忆只使用 `~/.madorin/memory.md` 与 `<workspace>/.madorin/memory.md`；Agent 启动时自动注入全局后项目内容，项目规则更具体。
-- 记忆只由用户命令或经审批的 `builtin.memory` 写入，不自动从对话、项目文件或工具结果提取。
+- 记忆只由用户命令或经审批的 `mcli_memory_append` 写入，不自动从对话、项目文件或工具结果提取。
 - CanonicalHistory 是 append-only 权威历史；ContextProjection 是每次 Invocation 生成的模型视图。
 - 工具意图必须先落库再发送；有副作用调用按 `callId` 幂等。
 - 子智能体默认不继承权限；委派只能缩小作用域。

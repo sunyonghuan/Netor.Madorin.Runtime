@@ -31,7 +31,7 @@
 
 - 三个 Provider Adapter 能产生统一工具调用事件。
 - 个人 CLI 配置可以转换为现有 Provider、模型和 Agent 输入，宿主模式不依赖该配置。
-- Memory File Service、两个固定 `memory.md` 以及 `builtin.memory.read/append` 的工具契约已经冻结。
+- Memory File Service、两个固定 `memory.md` 以及 `mcli_memory_read`/`mcli_memory_append` 的工具契约已经冻结。
 - `WaitingForTool`、`WaitingForApproval`、取消和唯一终态已经稳定。
 - `state.db`、Blob Store 和 GSN Outbox 可以在故障后恢复。
 
@@ -40,7 +40,7 @@
 | 项目 | 本阶段职责 |
 | --- | --- |
 | `Madorin.AI.Runtime.Tools.Abstractions` | 工具目录、执行器、权限上下文和结果接口 |
-| `Madorin.AI.Runtime.Tools.Builtin` | memory、fs、content、process、powershell、http 实现 |
+| `Madorin.AI.Runtime.Tools.Builtin` | `mcli_memory_*`、`mcli_fs_*`、`mcli_process`、`mcli_http` 实现 |
 | `Madorin.AI.Runtime.Services` | 工具网关、Grant 计算、审批和反向 RPC 编排 |
 | `Madorin.AI.Runtime.Persistence.Sqlite` | 工具意图、结果、Grant、委派和审计记录 |
 | `Madorin.AI.Runtime.Transport.Abstractions` | 反向请求/响应和取消关联 |
@@ -56,16 +56,16 @@
 - [√] 宿主以 `tool.catalog.replace` 发布完整版本，以 `tool.catalog.patch` 增量更新。
 - [√] 每次 Invocation Snapshot 固定 `toolCatalogVersion`。
 - [√] 更新只在下一次模型请求或 Workflow 安全点生效；已发请求和已开始调用继续使用旧版本。
-- [√] toolId 使用 `builtin.*`、`host.*`、`mcp.<server>.*` 等明确命名空间，冲突时拒绝目录。
+- [√] toolId 使用 `mcli_*`、`host.*`、`mcp.<server>.*` 等明确命名空间，冲突时拒绝目录。
 - [√] 参数 Schema 在发送给模型前验证，模型返回参数在执行前再次验证。
-- [√] `builtin.memory.read/append` 纳入同一目录；`append` 标记为需要用户审批的写操作。
+- [√] `mcli_memory_read`、`mcli_memory_append` 纳入同一目录；`mcli_memory_append` 标记为需要用户审批的写操作。
 - [√] 两个记忆工具直接提供给 LLM 并在当前进程执行，不路由到宿主/MCP 反向 RPC。
 
 ### 4.2 建立最小权限计算器 : 100%
 
 - [√] 有效权限是宿主 Grant、父级可委派范围、Run 工具目录和 Runtime 安全策略的交集。
-- [√] 默认 Restricted：工作区内读/新建/写入允许；覆盖、移动、删除需额外权限；工作区外、任意进程、PowerShell 和任意网络拒绝。
-- [√] Grant 包含 grantId、runId、根目录、读写范围、危险动作、程序、PowerShell、网络、过期和委派字段。
+- [√] 默认 Restricted：工作区内受控文件读取和新建/写入允许；覆盖、移动、删除需额外权限；工作区外、任意进程、Shell 和任意网络拒绝。
+- [√] Grant 包含 grantId、runId、根目录、读写范围、危险动作、程序、Shell 拒绝策略、网络、过期和委派字段。
 - [√] 所有策略先规范化为同一内部模型，再执行交集；禁止用“后配置覆盖前配置”扩大权限。
 - [√] 权限失败返回稳定错误和所缺能力，不尝试其他目录、工具或更宽策略。
 
@@ -78,33 +78,33 @@
 - [√] 显式拒绝越权 `..`、未授权 UNC、设备路径、备用数据流和平台特殊路径。
 - [√] `.madorin` 及其真实目标路径始终由默认 Agent 工具拒绝，即使软链接从工作区其他位置指向它。
 - [√] 复制、移动、覆盖、删除同时检查源权限、目标权限和动作权限。
-- [√] Memory File Service 是访问两个固定 `memory.md` 的唯一例外，普通 `builtin.fs` 不获得该例外。
+- [√] Memory File Service 是访问两个固定 `memory.md` 的唯一例外，普通 `mcli_fs_*` 不获得该例外。
 
-### 4.4 实现 `builtin.fs` 与 `builtin.content` : 100%
+### 4.4 实现 `mcli_fs_*` 文件与目录工具 : 100%
 
-- [√] fs 覆盖列表、状态、读文本/Blob、写文本/Blob、建目录、复制、移动、删除、搜索和补丁。
-- [√] 所有大内容走流或 Blob，不一次性读取无限文件。
-- [√] 文本读取显式返回编码、截断、偏移和是否完整；无法可靠识别编码时按 Blob 处理。
-- [√] 写入优先使用临时文件加原子替换；覆盖和删除必须单独授权。
-- [√] content 提供分页、哈希、内容类型和摘要前处理，不修改原内容。
-- [√] 搜索限制根目录、结果数、总字节和耗时，支持取消。
+- [√] 提供 `mcli_fs_list`、`mcli_fs_stat`、`mcli_fs_read`、`mcli_fs_write`、`mcli_fs_append`、`mcli_fs_edit`、`mcli_fs_mkdir`、`mcli_fs_search`、`mcli_fs_copy`、`mcli_fs_move` 和 `mcli_fs_delete`。
+- [√] 文本读取和写入必须显式传入 `encoding`；支持 UTF-8、UTF-16、GB2312、GBK、GB18030、ASCII 和 Latin1，不把编码固定为 UTF-8。
+- [√] 行读取和编辑使用 1-based 起止行号；编辑支持 `expectedHash` 防止基于旧内容覆盖并发修改。
+- [√] 仅把可按文本编码解码的文件交给 read/write/append/edit/search；二进制文件只允许 stat、copy、move 和 delete。
+- [√] 写入优先使用临时文件加原子替换；覆盖、移动和删除必须单独授权。
+- [√] 搜索限制根目录、结果数、总字节和耗时，支持取消；大内容受大小上限约束。
 
-### 4.5 实现 `builtin.process` 与 `builtin.powershell` : 83.3%
+### 4.5 实现 `mcli_process` : 83.3%
 
 - [√] `AllowlistedProcess` 只运行 Grant 中的可执行程序，参数使用数组，环境变量使用白名单。
 - [√] WorkingDirectory 必须在允许范围内，但不得宣称它能限制子进程文件权限。
 - [√] stdout/stderr 并发读取，具有独立和总字节上限、截断标记、超时与取消。
 - [√] 使用平台进程树回收机制，取消或超时后不得遗留子进程。
-- [√] PowerShell 默认关闭；启用时使用 `-NoProfile`、`-NonInteractive`，脚本经 stdin 或受控文件传递。
+- [√] `mcli_process` 只运行 Grant 白名单中的具体可执行程序；拒绝 PowerShell、CMD、Bash 等 Shell 解释器及其脚本入口。
 - [×] V1 `UnrestrictedShell` 必须显式授权并报告没有 OS 级工作区隔离；不得标为 Sandboxed。
 
-### 4.6 实现 `builtin.http` : 100%
+### 4.6 实现 `mcli_http` : 100%
 
 - [√] 默认网络策略为 Deny；只允许 Grant 中的协议、主机、端口和地址范围。
 - [√] 每次重定向和 DNS 解析后重新校验目标，防止跳转到本地/保留网络。
 - [√] 限制请求体、响应头、响应体、重定向次数和总耗时。
 - [√] 大响应写入 Blob，日志不记录 Authorization、Cookie 或敏感正文。
-- [√] Provider 自身端点访问与 Agent `builtin.http` 权限分离，二者不可互相借用。
+- [√] Provider 自身端点访问与 Agent `mcli_http` 权限分离，二者不可互相借用。
 
 ### 4.7 实现工具意图执行前落库 : 100%
 
@@ -140,7 +140,7 @@
 - [√] 审计记录包含调用方、有效 Grant、规范化目标摘要、参数哈希、审批、结果、耗时和 diagnosticId。
 - [√] 默认不记录完整文件内容、Prompt、脚本、凭据和敏感工具结果。
 - [√] 审计写入失败时，高风险操作不得继续执行。
-- [√] 为读取敏感文件、覆盖、移动、删除、进程、PowerShell 和网络建立明确风险等级。
+- [√] 为读取敏感文件、覆盖、移动、删除、进程和网络建立明确风险等级；Shell 解释器当前不注册为模型工具。
 
 ## 5. 测试要求 : 55.6%
 
@@ -148,8 +148,8 @@
 - [√] 同一 callId 在正常、超时、响应丢失、重连和 Runtime 重启场景最多执行一次。
 - [×] 路径测试覆盖 `..`、大小写、尾分隔符、符号链接、联接点、UNC、设备路径、ADS 和竞态替换。
 - [√] `.madorin` 无法通过直接路径或链接绕过保护。
-- [√] `builtin.memory.append` 未经审批不能写入，且普通文件工具不能模拟该操作。
-- [×] Process/PowerShell 覆盖参数注入、环境泄漏、stdout/stderr 填满、超时和进程树清理。
+- [√] `mcli_memory_append` 未经审批不能写入，且普通文件工具不能模拟该操作。
+- [×] `mcli_process` 覆盖参数注入、环境泄漏、stdout/stderr 填满、超时和进程树清理。
 - [×] HTTP 覆盖 DNS rebinding、重定向、保留地址、超大响应和取消。
 - [√] 子智能体默认越权失败；显式委派后仍不能扩大任何权限维度。
 - [×] Grant 撤销和审批拒绝在所有等待阶段行为确定。
@@ -159,7 +159,7 @@
 - [×] 真实 Provider 可连续完成权限申请、工具调用、结果续调和最终回答。
 - [√] 内置与宿主/MCP 工具均通过统一网关和审计。
 - [√] 故障注入后不重复执行有副作用工具。
-- [×] 文件、进程、PowerShell、HTTP 和保留目录安全测试全部通过。
+- [×] 文件、进程、HTTP 和保留目录安全测试全部通过。
 - [√] 权限链可追溯到真实 Agent、父 Agent、Grant 和委派链。
 
 ## 7. 风险与禁止事项

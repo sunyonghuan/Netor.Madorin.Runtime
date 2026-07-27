@@ -91,8 +91,10 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
             workspaceRoot,
             arguments,
             "edit lines"),
-        BuiltinToolRegistry.MemoryReadToolId => MemoryScope(arguments, isAppend: false),
-        BuiltinToolRegistry.MemoryAppendToolId => MemoryScope(arguments, isAppend: true),
+        BuiltinToolRegistry.MemoryReadToolId => MemoryScope(arguments, "read memory", canGrantForRun: true),
+        BuiltinToolRegistry.MemoryAppendToolId => MemoryScope(arguments, "append memory lines"),
+        BuiltinToolRegistry.MemoryUpdateToolId => MemoryScope(arguments, "update memory lines"),
+        BuiltinToolRegistry.MemoryDeleteToolId => MemoryScope(arguments, "delete memory lines"),
         BuiltinToolRegistry.ProcessRunToolId => ProcessScope(workspaceRoot, arguments),
         BuiltinToolRegistry.HttpRequestToolId => HttpScope(arguments),
         SkillScriptAuthorization.ToolId => ScriptScope(arguments, workspaceRoot),
@@ -211,16 +213,16 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
             allowOverwrite: true);
     }
 
-    private static ToolRequestedScope MemoryScope(JsonElement arguments, bool isAppend)
+    private static ToolRequestedScope MemoryScope(
+        JsonElement arguments,
+        string detail,
+        bool canGrantForRun = false)
     {
-        var scope = BuiltinMemoryToolExecutor.ReadScope(arguments, allowEffective: !isAppend);
-        var detail = isAppend
-            ? $"append {BuiltinMemoryToolExecutor.GetRequiredString(arguments, "item").Length} characters"
-            : "read memory snapshot";
+        var scope = BuiltinMemoryToolExecutor.ReadScope(arguments);
         return Create(
             $"memory:{scope.ToString().ToLowerInvariant()}",
             detail,
-            canGrantForRun: !isAppend);
+            canGrantForRun: canGrantForRun);
     }
 
     private static ToolRequestedScope ProcessScope(
