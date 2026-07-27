@@ -1338,7 +1338,7 @@ internal static class ServiceCommands
                         var access = tool.ToolId switch
                         {
                             "mcli_memory_read" => "read-only",
-                            "mcli_memory_append" => "approval required",
+                            "mcli_memory_append" or "mcli_memory_update" or "mcli_memory_delete" => "approval required",
                             _ when tool.RequiresApproval => "approval required",
                             _ => tool.Risk.ToString()
                         };

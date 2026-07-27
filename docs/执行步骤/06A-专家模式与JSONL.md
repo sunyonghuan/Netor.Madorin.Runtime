@@ -147,7 +147,7 @@
 - [√] `madorin` 从用户目录加载默认 Provider、模型、Agent 和全局 `memory.md`，并从当前工作区加载项目 `memory.md`，在当前进程启动专家模式。
 - [√] 独立 CLI 支持基本多轮输入、流式输出、新建会话和退出，不要求宿主或 IPC 存在。
 - [√] Agent 来自 `~/.madorin/agents/*.json`，其 Provider/模型缺省值由 `config.json` 补齐。
-- [√] 独立模式不发布宿主业务工具或 MCP 工具，但必须把 `mcli_memory_read` / `mcli_memory_append` 作为 CLI 自带工具提供给 LLM；完整宿主交互仍由 Client SDK/协议承担。
+- [√] 独立模式不发布宿主业务工具或 MCP 工具，但必须把四个 `mcli_memory_*` 工具作为 CLI 自带工具提供给 LLM；完整宿主交互仍由 Client SDK/协议承担。
 - [√] 配置修改不影响已启动进程，退出并重新启动 `madorin` 后生效。
 
 ## 5. 测试要求 : 72.7%
@@ -161,7 +161,7 @@
 - [×] 专家模式覆盖正常、工具、审批、取消、401 续期、重连和 Runtime 重启。
 - [√] 从干净用户目录完成首次配置后，无宿主运行 `madorin` 并完成基本多轮专家对话。
 - [√] 修改任一 `memory.md` 后，当前 Invocation 保持原内容，下一轮使用新内容并产生新哈希。
-- [×] 真实 Provider 可以让 LLM 直接调用 `mcli_memory_read` 并继续回答；`mcli_memory_append` 经审批后写入且下一轮自动注入。
+- [×] 真实 Provider 可以让 LLM 直接调用四个 `mcli_memory_*` 工具并继续回答；写操作经审批后更新且下一轮自动注入。
 - [×] 真实路径、URL、中文、多行 Prompt 和大 Blob 恢复后逐字节一致。
 
 ## 6. 完成标准 : 85.7%

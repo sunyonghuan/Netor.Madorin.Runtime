@@ -82,6 +82,14 @@ public sealed class StandaloneReplStage7Tests
                 "mcli_memory_append [approval required]",
                 output.ToString(),
                 StringComparison.Ordinal);
+            Assert.Contains(
+                "mcli_memory_update [approval required]",
+                output.ToString(),
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "mcli_memory_delete [approval required]",
+                output.ToString(),
+                StringComparison.Ordinal);
             Assert.Contains("/resume", output.ToString(), StringComparison.Ordinal);
 
             var sessions = await ReadSessionsAsync(workspace, configDirectory);

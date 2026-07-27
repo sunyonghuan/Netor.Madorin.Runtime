@@ -31,7 +31,7 @@
 
 - 三个 Provider Adapter 能产生统一工具调用事件。
 - 个人 CLI 配置可以转换为现有 Provider、模型和 Agent 输入，宿主模式不依赖该配置。
-- Memory File Service、两个固定 `memory.md` 以及 `mcli_memory_read`/`mcli_memory_append` 的工具契约已经冻结。
+- Memory File Service、两个固定 `memory.md` 以及四个 `mcli_memory_*` 工具契约已经冻结。
 - `WaitingForTool`、`WaitingForApproval`、取消和唯一终态已经稳定。
 - `state.db`、Blob Store 和 GSN Outbox 可以在故障后恢复。
 
@@ -58,7 +58,7 @@
 - [√] 更新只在下一次模型请求或 Workflow 安全点生效；已发请求和已开始调用继续使用旧版本。
 - [√] toolId 使用 `mcli_*`、`host.*`、`mcp.<server>.*` 等明确命名空间，冲突时拒绝目录。
 - [√] 参数 Schema 在发送给模型前验证，模型返回参数在执行前再次验证。
-- [√] `mcli_memory_read`、`mcli_memory_append` 纳入同一目录；`mcli_memory_append` 标记为需要用户审批的写操作。
+- [√] `mcli_memory_read`、`mcli_memory_append`、`mcli_memory_update`、`mcli_memory_delete` 纳入同一目录；三个写操作标记为需要用户审批。
 - [√] 两个记忆工具直接提供给 LLM 并在当前进程执行，不路由到宿主/MCP 反向 RPC。
 
 ### 4.2 建立最小权限计算器 : 100%
@@ -148,7 +148,7 @@
 - [√] 同一 callId 在正常、超时、响应丢失、重连和 Runtime 重启场景最多执行一次。
 - [×] 路径测试覆盖 `..`、大小写、尾分隔符、符号链接、联接点、UNC、设备路径、ADS 和竞态替换。
 - [√] `.madorin` 无法通过直接路径或链接绕过保护。
-- [√] `mcli_memory_append` 未经审批不能写入，且普通文件工具不能模拟该操作。
+- [√] 三个 `mcli_memory_*` 写操作未经审批不能写入，且普通文件工具不能模拟记忆作用域。
 - [×] `mcli_process` 覆盖参数注入、环境泄漏、stdout/stderr 填满、超时和进程树清理。
 - [×] HTTP 覆盖 DNS rebinding、重定向、保留地址、超大响应和取消。
 - [√] 子智能体默认越权失败；显式委派后仍不能扩大任何权限维度。
