@@ -125,10 +125,10 @@ internal sealed class RuntimeExecutionCore(
                     reverseExecutor.RequestApprovalAsync));
         var executors = new List<IToolExecutor>
         {
-            new BuiltinFsToolExecutor(),
+            new BuiltinFsToolExecutor(_memoryFiles.WorkspaceMutationLock),
             new BuiltinProcessToolExecutor(),
             new BuiltinHttpToolExecutor(),
-            new BuiltinMemoryToolExecutor(_memoryFiles, _memorySnapshots)
+            new BuiltinMemoryToolExecutor(_memoryFiles)
         };
         if (skillCatalog is not null)
         {

@@ -1,6 +1,8 @@
 using System.Security.Cryptography;
+using System.Buffers;
 using System.Text;
 using System.Text.Json;
+using Madorin.AI.Runtime.Core.Concurrency;
 using Madorin.AI.Runtime.Tools.Abstractions;
 using Madorin.AI.Runtime.Tools.Builtin;
 
@@ -264,11 +266,156 @@ public sealed class BuiltinFileToolTests
             await File.ReadAllTextAsync(path, TestContext.CancellationToken));
     }
 
+    [TestMethod]
+    public async Task FileEdit_TwoExecutorsWithSameHash_OnlyOneSucceeds()
+    {
+        var path = Path.Join(_root, "edit.txt");
+        await File.WriteAllTextAsync(path, "before\n", TestContext.CancellationToken);
+        var hash = await ComputeHashAsync(path);
+        var workspaceMutationLock = new WorkspaceMutationLock();
+        var first = new BuiltinFsToolExecutor(workspaceMutationLock);
+        var second = new BuiltinFsToolExecutor(workspaceMutationLock);
+        var permission = CreatePermission(allowOverwrite: true);
+        var firstArguments = CreateEditArguments(hash, "first");
+        var secondArguments = CreateEditArguments(hash, "second");
+
+        var results = await Task.WhenAll(
+            ExecuteAsync(first, BuiltinToolRegistry.FileEditToolId, firstArguments, permission),
+            ExecuteAsync(second, BuiltinToolRegistry.FileEditToolId, secondArguments, permission));
+
+        Assert.AreEqual(1, results.Count(static result => result.Success));
+        var conflict = Assert.ContainsSingle(results.Where(static result => !result.Success));
+        StringAssert.Contains(conflict.Error, "expected SHA-256");
+        var content = await File.ReadAllTextAsync(path, TestContext.CancellationToken);
+        Assert.IsTrue(content is "first\n" or "second\n");
+    }
+
+    [TestMethod]
+    public async Task FileAppend_TwoExecutorsWithSameHash_DoesNotSilentlyOverwrite()
+    {
+        var path = Path.Join(_root, "append-concurrent.txt");
+        await File.WriteAllTextAsync(path, "start\n", TestContext.CancellationToken);
+        var hash = await ComputeHashAsync(path);
+        var workspaceMutationLock = new WorkspaceMutationLock();
+        var first = new BuiltinFsToolExecutor(workspaceMutationLock);
+        var second = new BuiltinFsToolExecutor(workspaceMutationLock);
+        var permission = CreatePermission(allowOverwrite: true);
+
+        var results = await Task.WhenAll(
+            ExecuteAsync(
+                first,
+                BuiltinToolRegistry.FileAppendToolId,
+                CreateAppendArguments(hash, "first\n"),
+                permission),
+            ExecuteAsync(
+                second,
+                BuiltinToolRegistry.FileAppendToolId,
+                CreateAppendArguments(hash, "second\n"),
+                permission));
+
+        Assert.AreEqual(1, results.Count(static result => result.Success));
+        Assert.AreEqual(1, results.Count(static result => !result.Success));
+        var content = await File.ReadAllTextAsync(path, TestContext.CancellationToken);
+        Assert.IsTrue(content is "start\nfirst\n" or "start\nsecond\n");
+    }
+
+    [TestMethod]
+    public async Task DirectoryDelete_ConcurrentChildEdit_ObservesSerializedState()
+    {
+        var directory = Path.Join(_root, "tree");
+        Directory.CreateDirectory(directory);
+        var path = Path.Join(directory, "child.txt");
+        await File.WriteAllTextAsync(path, "before\n", TestContext.CancellationToken);
+        var hash = await ComputeHashAsync(path);
+        var workspaceMutationLock = new WorkspaceMutationLock();
+        var deleteExecutor = new BuiltinFsToolExecutor(workspaceMutationLock);
+        var editExecutor = new BuiltinFsToolExecutor(workspaceMutationLock);
+        var permission = CreatePermission(
+            allowOverwrite: true,
+            allowDelete: true);
+
+        var results = await Task.WhenAll(
+            ExecuteAsync(
+                deleteExecutor,
+                BuiltinToolRegistry.FileDeleteToolId,
+                """{"path":"tree","recursive":true}""",
+                permission),
+            ExecuteAsync(
+                editExecutor,
+                BuiltinToolRegistry.FileEditToolId,
+                CreateEditArguments(hash, "after", "tree/child.txt"),
+                permission));
+
+        Assert.IsTrue(results[0].Success, results[0].Error);
+        Assert.IsTrue(results[1].Success
+            || results[1].Error?.Contains("not found", StringComparison.OrdinalIgnoreCase) is true,
+            results[1].Error);
+        Assert.IsFalse(Directory.Exists(directory));
+    }
+
+    [TestMethod]
+    public async Task MutationLock_CancelledWaiter_DoesNotBlockFollowingWrite()
+    {
+        var workspaceMutationLock = new WorkspaceMutationLock();
+        var executor = new BuiltinFsToolExecutor(workspaceMutationLock);
+        var permission = CreatePermission();
+        await using var heldLease = await workspaceMutationLock.AcquireAsync(
+            TestContext.CancellationToken);
+        using var cancellation = new CancellationTokenSource();
+        var cancelledWrite = ExecuteAsync(
+            executor,
+            BuiltinToolRegistry.FileWriteToolId,
+            """{"path":"cancelled.txt","content":"cancelled","encoding":"utf-8","mode":"create"}""",
+            permission,
+            cancellation.Token);
+        cancellation.Cancel();
+
+        await Assert.ThrowsExactlyAsync<OperationCanceledException>(
+            async () => await cancelledWrite);
+        await heldLease.DisposeAsync();
+
+        var result = await ExecuteAsync(
+            executor,
+            BuiltinToolRegistry.FileWriteToolId,
+            """{"path":"following.txt","content":"written","encoding":"utf-8","mode":"create"}""",
+            permission);
+        Assert.IsTrue(result.Success, result.Error);
+    }
+
+    [TestMethod]
+    public async Task MutationLock_FailedMutation_ReleasesLockForFollowingWrite()
+    {
+        var path = Path.Join(_root, "failure.txt");
+        await File.WriteAllTextAsync(path, "before\n", TestContext.CancellationToken);
+        var workspaceMutationLock = new WorkspaceMutationLock();
+        var executor = new BuiltinFsToolExecutor(workspaceMutationLock);
+        var permission = CreatePermission(allowOverwrite: true);
+        var failure = await ExecuteAsync(
+            executor,
+            BuiltinToolRegistry.FileAppendToolId,
+            CreateAppendArguments(new string('0', 64), "lost\n", "failure.txt"),
+            permission);
+        Assert.IsFalse(failure.Success);
+
+        var hash = await ComputeHashAsync(path);
+        var success = await ExecuteAsync(
+            executor,
+            BuiltinToolRegistry.FileAppendToolId,
+            CreateAppendArguments(hash, "after\n", "failure.txt"),
+            permission);
+
+        Assert.IsTrue(success.Success, success.Error);
+        Assert.AreEqual(
+            "before\nafter\n",
+            await File.ReadAllTextAsync(path, TestContext.CancellationToken));
+    }
+
     private Task<ToolResult> ExecuteAsync(
         BuiltinFsToolExecutor executor,
         string toolId,
         string argumentsJson,
-        ToolPermissionContext permission) => executor.ExecuteAsync(
+        ToolPermissionContext permission,
+        CancellationToken? ct = null) => executor.ExecuteAsync(
         new ToolInvocation(
             Guid.NewGuid().ToString("N"),
             toolId,
@@ -278,7 +425,53 @@ public sealed class BuiltinFileToolTests
             "run-1",
             "session-1",
             PermissionContext: permission),
-        TestContext.CancellationToken);
+        ct ?? TestContext.CancellationToken);
+
+    private async Task<string> ComputeHashAsync(string path) => Convert.ToHexString(
+        SHA256.HashData(await File.ReadAllBytesAsync(path, TestContext.CancellationToken)));
+
+    private static string CreateEditArguments(
+        string hash,
+        string content,
+        string path = "edit.txt") => WriteJson(writer =>
+        {
+            writer.WriteStartObject();
+            writer.WriteString("path", path);
+            writer.WriteString("encoding", "utf-8");
+            writer.WriteString("expectedHash", hash);
+            writer.WriteStartArray("operations");
+            writer.WriteStartObject();
+            writer.WriteString("type", "replace");
+            writer.WriteNumber("startLine", 1);
+            writer.WriteNumber("endLine", 1);
+            writer.WriteString("content", content);
+            writer.WriteEndObject();
+            writer.WriteEndArray();
+            writer.WriteEndObject();
+        });
+
+    private static string CreateAppendArguments(
+        string hash,
+        string content,
+        string path = "append-concurrent.txt") =>
+        WriteJson(writer =>
+        {
+            writer.WriteStartObject();
+            writer.WriteString("path", path);
+            writer.WriteString("content", content);
+            writer.WriteString("encoding", "utf-8");
+            writer.WriteString("expectedHash", hash);
+            writer.WriteEndObject();
+        });
+
+    private static string WriteJson(Action<Utf8JsonWriter> write)
+    {
+        var buffer = new ArrayBufferWriter<byte>();
+        using var writer = new Utf8JsonWriter(buffer);
+        write(writer);
+        writer.Flush();
+        return Encoding.UTF8.GetString(buffer.WrittenSpan);
+    }
 
     private ToolPermissionContext CreatePermission(
         bool allowOverwrite = false,

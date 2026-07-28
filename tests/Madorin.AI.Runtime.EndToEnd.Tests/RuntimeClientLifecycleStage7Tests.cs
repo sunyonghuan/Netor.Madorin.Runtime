@@ -451,7 +451,7 @@ public sealed class RuntimeClientLifecycleStage7Tests
         string workspace,
         RuntimeStartPolicy startPolicy)
     {
-        var cliAssemblyPath = Path.Combine(AppContext.BaseDirectory, "madorin.dll");
+        var cliAssemblyPath = Path.Combine(AppContext.BaseDirectory, "madorin-cli.dll");
         if (!File.Exists(cliAssemblyPath))
         {
             throw new FileNotFoundException(
@@ -610,7 +610,7 @@ public sealed class RuntimeClientLifecycleStage7Tests
         string secret,
         CancellationToken cancellationToken)
     {
-        var cliAssemblyPath = Path.Combine(AppContext.BaseDirectory, "madorin.dll");
+        var cliAssemblyPath = Path.Combine(AppContext.BaseDirectory, "madorin-cli.dll");
         if (!File.Exists(cliAssemblyPath))
         {
             throw new FileNotFoundException(

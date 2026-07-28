@@ -133,7 +133,7 @@ public sealed class ExpertToolLoopTests
     }
 
     [TestMethod]
-    public async Task RunAsync_MemoryRead_ReturnsSnapshotToSameProvider()
+    public async Task RunAsync_MemoryRead_ReturnsCurrentLinesToSameProvider()
     {
         var dataDirectory = Path.Combine(
             Path.GetTempPath(),
@@ -189,7 +189,7 @@ public sealed class ExpertToolLoopTests
                 catalogStore,
                 validator,
                 authorization,
-                [new BuiltinMemoryToolExecutor(memoryFiles, memorySnapshots)],
+                [new BuiltinMemoryToolExecutor(memoryFiles)],
                 toolState,
                 outbox);
             var provider = new MemoryToolLoopProvider(expectedMemory);
@@ -378,9 +378,14 @@ public sealed class ExpertToolLoopTests
             var resultText = Assert.IsInstanceOfType<TextContentBlock>(
                 Assert.ContainsSingle(result.Content)).Text;
             using var resultJson = JsonDocument.Parse(resultText);
+            var lines = resultJson.RootElement
+                .GetProperty("lines")
+                .EnumerateArray()
+                .Select(static item => item.GetProperty("text").GetString())
+                .ToArray();
             Assert.AreEqual(
                 expectedMemory,
-                resultJson.RootElement.GetProperty("content").GetString());
+                string.Join("\n", lines) + "\n");
             Assert.IsFalse(string.IsNullOrWhiteSpace(
                 resultJson.RootElement.GetProperty("hash").GetString()));
 

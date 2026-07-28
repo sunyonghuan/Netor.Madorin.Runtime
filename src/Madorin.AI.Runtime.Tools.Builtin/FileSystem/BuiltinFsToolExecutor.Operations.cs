@@ -13,7 +13,9 @@ public sealed partial class BuiltinFsToolExecutor
     private const int MaxSearchResults = 100;
     private const long MaxTransferFileSizeBytes = 64L * 1024 * 1024;
 
-    private FsPreparedExecution PrepareCore(ToolInvocation invocation)
+    private FsPreparedExecution PrepareCore(
+        ToolInvocation invocation,
+        bool mutationLockHeld = false)
     {
         if (!CanExecute(invocation.ToolId))
         {
@@ -36,6 +38,12 @@ public sealed partial class BuiltinFsToolExecutor
 
         var arguments = document.RootElement.Clone();
         var policy = new BuiltinFsPathPolicy(permission);
+        if (!mutationLockHeld && IsMutationTool(invocation.ToolId))
+        {
+            ValidateMutationPreparation(invocation.ToolId, arguments, permission, policy);
+            return PrepareMutation(invocation, arguments, policy);
+        }
+
         return invocation.ToolId switch
         {
             BuiltinToolRegistry.FileListToolId => PrepareList(invocation, arguments, policy),
@@ -59,6 +67,121 @@ public sealed partial class BuiltinFsToolExecutor
             _ => throw new InvalidOperationException("The file tool is not implemented.")
         };
     }
+
+    private FsPreparedExecution PrepareMutation(
+        ToolInvocation invocation,
+        JsonElement arguments,
+        BuiltinFsPathPolicy policy)
+    {
+        var targetSummary = invocation.ToolId switch
+        {
+            BuiltinToolRegistry.FileCopyToolId => GetTransferTargetSummary(
+                policy,
+                arguments,
+                sourceRequiresWriteAccess: false),
+            BuiltinToolRegistry.FileMoveToolId => GetTransferTargetSummary(
+                policy,
+                arguments,
+                sourceRequiresWriteAccess: true),
+            _ => policy.GetTargetSummary(policy.ResolveWritePath(
+                GetRequiredString(arguments, "path")))
+        };
+
+        return new FsPreparedExecution(
+            targetSummary,
+            ct => ExecuteMutationAsync(invocation, ct),
+            []);
+    }
+
+    private static void ValidateMutationPreparation(
+        string toolId,
+        JsonElement arguments,
+        ToolPermissionContext permission,
+        BuiltinFsPathPolicy policy)
+    {
+        if (toolId == BuiltinToolRegistry.FileWriteToolId)
+        {
+            var path = GetRequiredString(arguments, "path");
+            var mode = GetRequiredString(arguments, "mode");
+            if (mode is not ("create" or "overwrite"))
+            {
+                throw new ArgumentException(
+                    "Tool argument 'mode' must be create or overwrite.");
+            }
+
+            if (mode == "overwrite" && !permission.AllowOverwrite)
+            {
+                throw new ToolPermissionRequiredException(
+                    "Overwriting this file is not permitted.");
+            }
+
+            if (mode == "overwrite")
+            {
+                _ = policy.ResolveReadPath(path);
+            }
+        }
+        else if (toolId is BuiltinToolRegistry.FileAppendToolId
+            or BuiltinToolRegistry.FileEditToolId)
+        {
+            if (!permission.AllowOverwrite)
+            {
+                throw new ToolPermissionRequiredException(
+                    "Modifying an existing file requires overwrite permission.");
+            }
+
+            _ = policy.ResolveReadPath(GetRequiredString(arguments, "path"));
+        }
+        else if (toolId == BuiltinToolRegistry.FileMoveToolId && !permission.AllowMove)
+        {
+            throw new UnauthorizedAccessException("Moving paths is not permitted.");
+        }
+        else if (toolId == BuiltinToolRegistry.FileDeleteToolId && !permission.AllowDelete)
+        {
+            throw new UnauthorizedAccessException("Deleting paths is not permitted.");
+        }
+        else if (toolId == BuiltinToolRegistry.FileCopyToolId && !permission.AllowOverwrite)
+        {
+            var destination = policy.ResolveWritePath(
+                GetRequiredString(arguments, "destination"));
+            if (File.Exists(destination) || Directory.Exists(destination))
+            {
+                throw new ToolPermissionRequiredException(
+                    "Overwriting the copy destination is not permitted.");
+            }
+        }
+    }
+
+    private async Task<ToolResult> ExecuteMutationAsync(
+        ToolInvocation invocation,
+        CancellationToken ct)
+    {
+        await using var lease = await _workspaceMutationLock.AcquireAsync(ct).ConfigureAwait(false);
+        await using var prepared = PrepareCore(invocation, mutationLockHeld: true);
+        return await prepared.ExecuteAsync(ct).ConfigureAwait(false);
+    }
+
+    private static string GetTransferTargetSummary(
+        BuiltinFsPathPolicy policy,
+        JsonElement arguments,
+        bool sourceRequiresWriteAccess)
+    {
+        var sourcePath = GetRequiredString(arguments, "source");
+        var source = sourceRequiresWriteAccess
+            ? policy.ResolveWritePath(sourcePath)
+            : policy.ResolveReadPath(sourcePath);
+        var destination = policy.ResolveWritePath(
+            GetRequiredString(arguments, "destination"));
+        return $"{policy.GetTargetSummary(source)}->{policy.GetTargetSummary(destination)}";
+    }
+
+    private static bool IsMutationTool(string toolId) =>
+        toolId is BuiltinToolRegistry.FileWriteToolId
+            or BuiltinToolRegistry.FileAppendToolId
+            or BuiltinToolRegistry.FileEditToolId
+            or BuiltinToolRegistry.DirectoryCreateToolId
+            or BuiltinToolRegistry.FileCopyToolId
+            or BuiltinToolRegistry.FileMoveToolId
+            or BuiltinToolRegistry.FileDeleteToolId;
 
     private static FsPreparedExecution PrepareList(
         ToolInvocation invocation,
@@ -221,8 +344,8 @@ public sealed partial class BuiltinFsToolExecutor
                 && !permission.AllowOverwrite)
             {
                 destination.Dispose();
-                throw new ToolPermissionRequiredException(
-                    "Overwriting the copy destination is not permitted.");
+                throw new IOException(
+                    "The copy destination appeared after preparation and cannot be overwritten.");
             }
 
             return new FsPreparedExecution(

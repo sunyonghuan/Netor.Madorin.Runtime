@@ -1,4 +1,5 @@
 using Madorin.AI.Runtime.Services.Memory;
+using Madorin.AI.Runtime.Core.Concurrency;
 
 namespace Madorin.AI.Runtime.Persistence.Tests;
 
@@ -179,8 +180,9 @@ public sealed class MemoryFileServiceTests
         var userHome = CreateTempDirectory();
         try
         {
-            var first = new MemoryFileService(userHome);
-            var second = new MemoryFileService(userHome);
+            var workspaceMutationLock = new WorkspaceMutationLock();
+            var first = new MemoryFileService(userHome, workspaceMutationLock: workspaceMutationLock);
+            var second = new MemoryFileService(userHome, workspaceMutationLock: workspaceMutationLock);
             var writes = Enumerable.Range(0, 20)
                 .Select(index => (index & 1) == 0
                     ? first.AppendAsync(
@@ -202,6 +204,38 @@ public sealed class MemoryFileServiceTests
             {
                 StringAssert.Contains(content, $"- item-{index}\n");
             }
+        }
+        finally
+        {
+            Directory.Delete(userHome, recursive: true);
+        }
+    }
+
+    [TestMethod]
+    public async Task AppendAsync_LegacyLockFileIsHeld_DoesNotReadOrDeleteIt()
+    {
+        var userHome = CreateTempDirectory();
+        try
+        {
+            var service = new MemoryFileService(userHome);
+            var directory = Path.GetDirectoryName(service.GlobalPath)!;
+            Directory.CreateDirectory(directory);
+            var lockPath = $"{service.GlobalPath}.lock";
+            await using var legacyLock = new FileStream(
+                lockPath,
+                FileMode.CreateNew,
+                FileAccess.ReadWrite,
+                FileShare.None);
+
+            await service.AppendAsync(
+                MemoryScope.Global,
+                "new-runtime-write",
+                TestContext.CancellationToken);
+
+            Assert.IsTrue(File.Exists(lockPath));
+            StringAssert.Contains(
+                await service.ReadAsync(MemoryScope.Global, TestContext.CancellationToken),
+                "- new-runtime-write\n");
         }
         finally
         {

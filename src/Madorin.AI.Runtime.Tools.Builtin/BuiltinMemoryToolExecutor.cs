@@ -4,9 +4,7 @@ using Madorin.AI.Runtime.Tools.Abstractions;
 
 namespace Madorin.AI.Runtime.Tools.Builtin;
 
-public sealed class BuiltinMemoryToolExecutor(
-    MemoryFileService memoryFileService,
-    MemoryInvocationSnapshotStore? legacySnapshots = null) : IToolExecutor
+public sealed class BuiltinMemoryToolExecutor(MemoryFileService memoryFileService) : IToolExecutor
 {
     private readonly MemoryFileService _memoryFileService = memoryFileService
         ?? throw new ArgumentNullException(nameof(memoryFileService));
@@ -22,7 +20,6 @@ public sealed class BuiltinMemoryToolExecutor(
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(invocation);
-        _ = legacySnapshots;
         if (!CanExecute(invocation.ToolId))
         {
             return Failure(invocation, "The memory executor cannot execute this tool.");

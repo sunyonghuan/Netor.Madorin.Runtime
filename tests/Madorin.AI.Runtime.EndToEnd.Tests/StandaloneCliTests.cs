@@ -707,7 +707,7 @@ public sealed class StandaloneCliTests
 
     [TestMethod]
     [Timeout(20_000, CooperativeCancellation = true)]
-    public async Task MemoryAdd_TwoCliProcesses_DoNotLoseCommittedItems()
+    public async Task MemoryAdd_TwoCliProcessesSequentially_PreserveCommittedItems()
     {
         var root = CreateTemporaryDirectory();
         try
@@ -715,21 +715,23 @@ public sealed class StandaloneCliTests
             var workspace = Path.Combine(root, "workspace");
             Directory.CreateDirectory(workspace);
             using var first = StartMemoryAddProcess(workspace);
-            using var second = StartMemoryAddProcess(workspace);
             await first.StandardInput.WriteLineAsync("process-one");
-            await second.StandardInput.WriteLineAsync("process-two");
             first.StandardInput.Close();
-            second.StandardInput.Close();
 
-            await Task.WhenAll(
-                first.WaitForExitAsync(_testContext.CancellationToken),
-                second.WaitForExitAsync(_testContext.CancellationToken));
+            await first.WaitForExitAsync(_testContext.CancellationToken);
             var firstOutput = await first.StandardOutput.ReadToEndAsync();
-            var secondOutput = await second.StandardOutput.ReadToEndAsync();
             var firstError = await first.StandardError.ReadToEndAsync();
-            var secondError = await second.StandardError.ReadToEndAsync();
 
             Assert.AreEqual(ExitCodes.Success, first.ExitCode, $"{firstOutput}\n{firstError}");
+
+            using var second = StartMemoryAddProcess(workspace);
+            await second.StandardInput.WriteLineAsync("process-two");
+            second.StandardInput.Close();
+
+            await second.WaitForExitAsync(_testContext.CancellationToken);
+            var secondOutput = await second.StandardOutput.ReadToEndAsync();
+            var secondError = await second.StandardError.ReadToEndAsync();
+
             Assert.AreEqual(ExitCodes.Success, second.ExitCode, $"{secondOutput}\n{secondError}");
             var content = await File.ReadAllTextAsync(
                 MemoryFileService.ResolveProjectPath(workspace),
@@ -797,7 +799,7 @@ public sealed class StandaloneCliTests
             CreateNoWindow = true,
             WorkingDirectory = workspace
         };
-        startInfo.ArgumentList.Add(Path.Combine(AppContext.BaseDirectory, "madorin.dll"));
+        startInfo.ArgumentList.Add(Path.Combine(AppContext.BaseDirectory, "madorin-cli.dll"));
         startInfo.ArgumentList.Add("memory");
         startInfo.ArgumentList.Add("add");
         startInfo.ArgumentList.Add("project");

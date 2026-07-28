@@ -145,9 +145,7 @@ public sealed class MemoryToolTests
     public async Task ExecuteAsync_AppendWithoutApproval_DoesNotWrite()
     {
         var service = CreateMemoryService();
-        var executor = new BuiltinMemoryToolExecutor(
-            service,
-            new MemoryInvocationSnapshotStore());
+        var executor = new BuiltinMemoryToolExecutor(service);
         var invocation = CreateInvocation(
             BuiltinToolRegistry.MemoryAppendToolId,
             "{\"scope\":\"global\",\"lines\":[\"- Do not write\"],\"expectedHash\":null}");
@@ -178,7 +176,7 @@ public sealed class MemoryToolTests
             new ToolAuthorizationService(
                 repository,
                 RuntimeToolPolicy.CreateRestricted(Path.Join(_root, "workspace"))),
-            [new BuiltinMemoryToolExecutor(service, new MemoryInvocationSnapshotStore())],
+            [new BuiltinMemoryToolExecutor(service)],
             repository,
             outbox);
         var invocation = CreateInvocation(

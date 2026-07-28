@@ -13,7 +13,7 @@ public sealed class MultiInstanceProcessTests
     public async Task TwoHostsWithTwoRuntimes_IsolatedAndCrossConnectionsFail()
     {
         var root = CreateTemporaryDirectory();
-        var runtimePath = FindArtifact("src", "Madorin.AI.Runtime.Cli", "madorin.dll");
+        var runtimePath = FindArtifact("src", "Madorin.AI.Runtime.Cli", "madorin-cli.dll");
         var sampleHostPath = FindArtifact("samples", "Madorin.AI.Runtime.SampleHost", "Madorin.AI.Runtime.SampleHost.dll");
         var hostA = CreateHostConfiguration(root, "a");
         var hostB = CreateHostConfiguration(root, "b");

@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using Madorin.AI.Runtime.Core.Concurrency;
 using Madorin.AI.Runtime.Tools.Abstractions;
 
 namespace Madorin.AI.Runtime.Tools.Builtin;
@@ -12,6 +13,12 @@ public sealed partial class BuiltinFsToolExecutor : IToolExecutor
     private static readonly UTF8Encoding Utf8 = new(
         encoderShouldEmitUTF8Identifier: false,
         throwOnInvalidBytes: true);
+    private readonly WorkspaceMutationLock _workspaceMutationLock;
+
+    public BuiltinFsToolExecutor(WorkspaceMutationLock? workspaceMutationLock = null)
+    {
+        _workspaceMutationLock = workspaceMutationLock ?? new WorkspaceMutationLock();
+    }
 
     public bool CanExecute(string toolId) =>
         string.Equals(toolId, BuiltinToolRegistry.FileListToolId, StringComparison.Ordinal)

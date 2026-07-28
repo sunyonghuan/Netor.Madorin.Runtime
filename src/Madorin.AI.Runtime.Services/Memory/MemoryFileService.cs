@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using Madorin.AI.Runtime.Core.Concurrency;
 
 namespace Madorin.AI.Runtime.Services.Memory;
 
@@ -7,8 +8,6 @@ public sealed class MemoryFileService
 {
     public const int MaximumFileSizeBytes = 32 * 1024;
 
-    private static readonly TimeSpan WriteLockRetryDelay = TimeSpan.FromMilliseconds(50);
-    private static readonly TimeSpan WriteLockTimeout = TimeSpan.FromSeconds(10);
     private const string EmptyMemory = "# Memory\n";
     private const string GlobalMemoryTemplate = """
         # Memory
@@ -27,8 +26,12 @@ public sealed class MemoryFileService
 
     private readonly string _globalPath;
     private readonly string? _projectPath;
+    private readonly WorkspaceMutationLock _workspaceMutationLock;
 
-    public MemoryFileService(string userHome, string? workspaceRoot = null)
+    public MemoryFileService(
+        string userHome,
+        string? workspaceRoot = null,
+        WorkspaceMutationLock? workspaceMutationLock = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(userHome);
         if (workspaceRoot is not null)
@@ -40,11 +43,14 @@ public sealed class MemoryFileService
         _projectPath = workspaceRoot is not null
             ? ResolveProjectPath(workspaceRoot)
             : null;
+        _workspaceMutationLock = workspaceMutationLock ?? new WorkspaceMutationLock();
     }
 
     public string GlobalPath => _globalPath;
 
     public string? ProjectPath => _projectPath;
+
+    public WorkspaceMutationLock WorkspaceMutationLock => _workspaceMutationLock;
 
     public static string ResolveGlobalPath(string userHome)
     {
@@ -95,7 +101,7 @@ public sealed class MemoryFileService
         }
 
         var path = GetPath(scope);
-        await using var writeLock = await AcquireWriteLockAsync(path, ct).ConfigureAwait(false);
+        await using var writeLock = await _workspaceMutationLock.AcquireAsync(ct).ConfigureAwait(false);
         var current = await ReadFileAsync(path, ct).ConfigureAwait(false);
         var content = current switch
         {
@@ -116,7 +122,7 @@ public sealed class MemoryFileService
     {
         ValidateReplacementLines(lines);
         var path = GetPath(scope);
-        await using var writeLock = await AcquireWriteLockAsync(path, ct).ConfigureAwait(false);
+        await using var writeLock = await _workspaceMutationLock.AcquireAsync(ct).ConfigureAwait(false);
         var current = await ReadFileAsync(path, ct).ConfigureAwait(false);
         EnsureExpectedHash(current, expectedHash);
 
@@ -171,21 +177,21 @@ public sealed class MemoryFileService
     {
         ArgumentNullException.ThrowIfNull(content);
         var path = GetPath(scope);
-        await using var writeLock = await AcquireWriteLockAsync(path, ct).ConfigureAwait(false);
+        await using var writeLock = await _workspaceMutationLock.AcquireAsync(ct).ConfigureAwait(false);
         await AtomicWriteAsync(path, content, ct).ConfigureAwait(false);
     }
 
     public async Task ClearAsync(MemoryScope scope, CancellationToken ct = default)
     {
         var path = GetPath(scope);
-        await using var writeLock = await AcquireWriteLockAsync(path, ct).ConfigureAwait(false);
+        await using var writeLock = await _workspaceMutationLock.AcquireAsync(ct).ConfigureAwait(false);
         await AtomicWriteAsync(path, EmptyMemory, ct).ConfigureAwait(false);
     }
 
     public async Task InitAsync(MemoryScope scope, CancellationToken ct = default)
     {
         var path = GetPath(scope);
-        await using var writeLock = await AcquireWriteLockAsync(path, ct).ConfigureAwait(false);
+        await using var writeLock = await _workspaceMutationLock.AcquireAsync(ct).ConfigureAwait(false);
         if (File.Exists(path))
         {
             return;
@@ -255,7 +261,7 @@ public sealed class MemoryFileService
         }
 
         var path = GetPath(scope);
-        await using var writeLock = await AcquireWriteLockAsync(path, ct).ConfigureAwait(false);
+        await using var writeLock = await _workspaceMutationLock.AcquireAsync(ct).ConfigureAwait(false);
         var current = await ReadFileAsync(path, ct).ConfigureAwait(false);
         EnsureExpectedHash(current, expectedHash);
         if (current is null)
@@ -444,39 +450,6 @@ public sealed class MemoryFileService
             if (File.Exists(tempPath))
             {
                 File.Delete(tempPath);
-            }
-        }
-    }
-
-    private static async Task<FileStream> AcquireWriteLockAsync(
-        string path,
-        CancellationToken ct)
-    {
-        var directory = Path.GetDirectoryName(path)!;
-        Directory.CreateDirectory(directory);
-        var lockPath = $"{path}.lock";
-        var deadline = DateTimeOffset.UtcNow + WriteLockTimeout;
-
-        while (true)
-        {
-            ct.ThrowIfCancellationRequested();
-            try
-            {
-                return new FileStream(
-                    lockPath,
-                    FileMode.OpenOrCreate,
-                    FileAccess.ReadWrite,
-                    FileShare.None);
-            }
-            catch (IOException) when (DateTimeOffset.UtcNow < deadline)
-            {
-                await Task.Delay(WriteLockRetryDelay, ct).ConfigureAwait(false);
-            }
-            catch (IOException ex)
-            {
-                throw new TimeoutException(
-                    $"Timed out waiting for the memory write lock '{lockPath}'.",
-                    ex);
             }
         }
     }

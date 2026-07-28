@@ -82,7 +82,7 @@ public sealed class StandaloneCliProcessStage7Tests
         try
         {
             var executableDirectory = AppContext.BaseDirectory;
-            var executablePath = Path.Combine(executableDirectory, "madorin.exe");
+            var executablePath = Path.Combine(executableDirectory, "madorin-cli.exe");
             Assert.IsTrue(File.Exists(executablePath), $"CLI apphost not found: {executablePath}");
 
             var startInfo = new ProcessStartInfo(
@@ -97,7 +97,7 @@ public sealed class StandaloneCliProcessStage7Tests
             startInfo.ArgumentList.Add("/d");
             startInfo.ArgumentList.Add("/s");
             startInfo.ArgumentList.Add("/c");
-            startInfo.ArgumentList.Add("madorin version --json");
+            startInfo.ArgumentList.Add("madorin-cli version --json");
             startInfo.Environment["PATH"] = string.Join(
                 Path.PathSeparator,
                 executableDirectory,
@@ -143,7 +143,7 @@ public sealed class StandaloneCliProcessStage7Tests
             Directory.CreateDirectory(workspace);
             await WriteStandaloneConfigurationAsync(configDirectory);
 
-            var executablePath = Path.Combine(AppContext.BaseDirectory, "madorin.exe");
+            var executablePath = Path.Combine(AppContext.BaseDirectory, "madorin-cli.exe");
             Assert.IsTrue(File.Exists(executablePath), $"CLI apphost not found: {executablePath}");
             var startInfo = new ProcessStartInfo(executablePath)
             {
@@ -226,7 +226,7 @@ public sealed class StandaloneCliProcessStage7Tests
                 """,
                 _testContext.CancellationToken);
 
-            var executablePath = Path.Combine(AppContext.BaseDirectory, "madorin.exe");
+            var executablePath = Path.Combine(AppContext.BaseDirectory, "madorin-cli.exe");
             Assert.IsTrue(File.Exists(executablePath), $"CLI apphost not found: {executablePath}");
             var startInfo = new ProcessStartInfo(executablePath)
             {
@@ -346,7 +346,7 @@ public sealed class StandaloneCliProcessStage7Tests
             RedirectStandardError = true,
             WorkingDirectory = workspace
         };
-        startInfo.ArgumentList.Add(Path.Combine(AppContext.BaseDirectory, "madorin.dll"));
+        startInfo.ArgumentList.Add(Path.Combine(AppContext.BaseDirectory, "madorin-cli.dll"));
         startInfo.ArgumentList.Add("serve");
         startInfo.ArgumentList.Add("--workspace");
         startInfo.ArgumentList.Add(workspace);
