@@ -2,7 +2,7 @@ namespace Madorin.AI.Runtime.Providers.Abstractions;
 
 public sealed record ProviderCapabilities(
     bool Streaming = false,
-    bool ToolCalling = false,
+    bool ToolCalling = true,
     bool Vision = false,
     bool Audio = false,
     bool StructuredOutput = false,

@@ -340,7 +340,7 @@ public sealed class ProviderCompletionTests
             "compatible-profile",
             new Uri(baseAddress, "v1").AbsoluteUri,
             ProviderAdapterTestFactory.ApiKey,
-            Capabilities: new ProviderCapabilities(Streaming: true),
+            Capabilities: new ProviderCapabilities(Streaming: true, ToolCalling: false),
             Models: [new ProviderModel(ProviderAdapterTestFactory.ModelId, "Test model")],
             ConfigurationVersion: configurationVersion,
             ProbePath: "models");

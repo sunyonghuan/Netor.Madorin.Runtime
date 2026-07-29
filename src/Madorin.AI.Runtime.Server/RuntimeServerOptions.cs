@@ -58,7 +58,7 @@ public sealed record RuntimeServerOptions
     public TimeProvider TimeProvider { get; init; } = TimeProvider.System;
 
     public RuntimeDiagnosticLogLevel MinimumLogLevel { get; init; } =
-        RuntimeDiagnosticLogLevel.Warning;
+        RuntimeDiagnosticLogLevel.Information;
 
     public TimeSpan HandshakeClockSkew { get; init; } = TimeSpan.FromSeconds(30);
 

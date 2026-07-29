@@ -101,10 +101,10 @@ public sealed class AzureOpenAIProviderTests
 
     [TestMethod]
     [Timeout(10_000, CooperativeCancellation = true)]
-    public async Task DefaultCapabilities_RejectToolsBeforeHttp()
+    public async Task DefaultCapabilities_EnableToolCalling()
     {
         await using var server = await FakeProviderServer.StartAsync(
-            _ => FakeProviderResponse.Error(500, "HTTP should not be reached"),
+            _ => ProviderProtocolScripts.ToolCall(ProviderAdapterKind.OpenAICompatible),
             _testContext.CancellationToken);
         using var adapter = CreateFactoryAdapter(server.BaseAddress);
         ToolDescriptor[] tools =
@@ -113,17 +113,17 @@ public sealed class AzureOpenAIProviderTests
         ];
 
         Assert.IsTrue(adapter.Capabilities.Streaming);
-        Assert.IsFalse(adapter.Capabilities.ToolCalling);
+        Assert.IsTrue(adapter.Capabilities.ToolCalling);
         Assert.IsFalse(adapter.Capabilities.Usage);
         var events = await ProviderAdapterTestFactory.CollectAsync(
             adapter,
             ProviderAdapterTestFactory.CreateRequest(tools),
             _testContext.CancellationToken);
 
-        var failure = Assert.IsInstanceOfType<InvocationFailedProviderEvent>(
-            Assert.ContainsSingle(events));
-        Assert.AreEqual(RuntimeErrorCodes.CapabilityNotSupported, failure.Error.Code);
-        Assert.IsEmpty(server.Requests);
+        Assert.ContainsSingle(events.OfType<ToolCallCompleteProviderEvent>());
+        Assert.ContainsSingle(events.OfType<InvocationCompletedProviderEvent>());
+        Assert.IsEmpty(events.OfType<InvocationFailedProviderEvent>());
+        Assert.ContainsSingle(server.Requests);
     }
 
     [TestMethod]

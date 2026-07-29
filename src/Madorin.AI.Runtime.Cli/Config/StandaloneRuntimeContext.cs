@@ -69,7 +69,7 @@ public sealed record StandaloneRuntimeContext(
             : null;
 
         var logDirectory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(
-            Path.Combine(normalizedData, "logs", runtimeInstanceId)));
+            Path.Combine(normalizedData, "logs")));
 
         return new StandaloneRuntimeContext(
             normalizedWorkspace,

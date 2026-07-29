@@ -67,11 +67,11 @@ public sealed class ProviderCompatiblePresetTests
     [DataRow("GLM")]
     [DataRow("Custom")]
     [Timeout(10_000, CooperativeCancellation = true)]
-    public async Task StandaloneFactory_CompatiblePreset_RejectsUndeclaredToolsBeforeHttp(
+    public async Task StandaloneFactory_CompatiblePreset_EnablesToolCallingByDefault(
         string protocol)
     {
         await using var server = await FakeProviderServer.StartAsync(
-            _ => FakeProviderResponse.Error(500, "HTTP should not be reached"),
+            _ => ProviderProtocolScripts.ToolCall(ProviderAdapterKind.OpenAICompatible),
             _testContext.CancellationToken);
         var adapter = CreateAdapter(protocol, server.BaseAddress);
         using var adapterLifetime = adapter as IDisposable;
@@ -85,10 +85,11 @@ public sealed class ProviderCompatiblePresetTests
             ProviderAdapterTestFactory.CreateRequest(tools),
             _testContext.CancellationToken);
 
-        var failure = Assert.IsInstanceOfType<InvocationFailedProviderEvent>(
-            Assert.ContainsSingle(events));
-        Assert.AreEqual(RuntimeErrorCodes.CapabilityNotSupported, failure.Error.Code);
-        Assert.IsEmpty(server.Requests);
+        Assert.IsTrue(adapter.Capabilities.ToolCalling);
+        Assert.ContainsSingle(events.OfType<ToolCallCompleteProviderEvent>());
+        Assert.ContainsSingle(events.OfType<InvocationCompletedProviderEvent>());
+        Assert.IsEmpty(events.OfType<InvocationFailedProviderEvent>());
+        Assert.ContainsSingle(server.Requests);
     }
 
     [TestMethod]

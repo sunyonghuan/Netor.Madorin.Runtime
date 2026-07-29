@@ -18,6 +18,15 @@ namespace Madorin.AI.Runtime.EndToEnd.Tests;
 [TestClass]
 public sealed class StandaloneLocalRuntimeTests
 {
+    private static readonly DateTimeOffset FixedLogUtcNow =
+        new(2026, 7, 29, 12, 16, 30, TimeSpan.Zero);
+
+    private static readonly TimeZoneInfo FixedLogTimeZone = TimeZoneInfo.CreateCustomTimeZone(
+        "MadorinTestChinaStandardTime",
+        TimeSpan.FromHours(8),
+        "Madorin test China Standard Time",
+        "Madorin test China Standard Time");
+
     private static readonly string[] ExpectedRuntimeLifecycleEvents =
     [
         "RuntimeStarting",
@@ -68,7 +77,9 @@ public sealed class StandaloneLocalRuntimeTests
             Assert.AreEqual(first.WorkspaceKey, overridden.WorkspaceKey);
             Assert.AreEqual(Path.Combine(root, "custom-data"), overridden.DataDirectory);
             Assert.IsFalse(overridden.UsesDefaultDataDirectory);
-            Assert.StartsWith(overridden.DataDirectory, overridden.LogDirectory);
+            Assert.AreEqual(
+                Path.Combine(overridden.DataDirectory, "logs"),
+                overridden.LogDirectory);
         }
         finally
         {
@@ -134,7 +145,7 @@ public sealed class StandaloneLocalRuntimeTests
 
     [TestMethod]
     [Timeout(15_000, CooperativeCancellation = true)]
-    public async Task StartAsync_WritesJsonLifecycleLogIntoRuntimeInstanceDirectory()
+    public async Task StartAsync_WritesJsonLifecycleLogIntoDateDirectoryAndMinuteFile()
     {
         var root = CreateTemporaryDirectory();
         try
@@ -142,24 +153,27 @@ public sealed class StandaloneLocalRuntimeTests
             var workspace = Path.Combine(root, "workspace");
             var dataDirectory = Path.Combine(root, "data");
             var runtimeInstanceId = Guid.NewGuid().ToString("N");
-            var logDirectory = Path.Combine(dataDirectory, "logs", runtimeInstanceId);
+            var logDirectory = Path.Combine(dataDirectory, "logs");
+            var logPath = Path.Combine(logDirectory, "20260729", "2016.jsonl");
             var options = new LocalRuntimeOptions(
                 workspace,
                 dataDirectory,
                 logDirectory,
                 runtimeInstanceId,
-                _ => new RecordingProvider());
+                _ => new RecordingProvider())
+            {
+                TimeProvider = new FixedTimeProvider(FixedLogUtcNow, FixedLogTimeZone)
+            };
 
             await using (var runtime = await LocalRuntime.StartAsync(
                 options,
                 _testContext.CancellationToken))
             {
-                var activeLog = new FileInfo(Path.Combine(logDirectory, "runtime.jsonl"));
+                var activeLog = new FileInfo(logPath);
                 Assert.IsTrue(activeLog.Exists);
                 Assert.IsGreaterThan(0, activeLog.Length);
             }
 
-            var logPath = Path.Combine(logDirectory, "runtime.jsonl");
             var lines = await File.ReadAllLinesAsync(logPath, _testContext.CancellationToken);
             Assert.HasCount(4, lines);
             var events = lines.Select(line =>
@@ -176,6 +190,143 @@ public sealed class StandaloneLocalRuntimeTests
             CollectionAssert.AreEqual(
                 ExpectedRuntimeLifecycleEvents,
                 events);
+            Assert.IsFalse(Directory.Exists(Path.Combine(logDirectory, runtimeInstanceId)));
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [TestMethod]
+    [Timeout(15_000, CooperativeCancellation = true)]
+    public async Task WriteAsync_WritesRuntimeErrorAndExceptionDetails()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var logDirectory = Path.Combine(root, "logs");
+            var runtimeError = new RuntimeError(
+                "ProviderRejected",
+                "provider",
+                "The Provider rejected the test request.",
+                IsRetryable: true,
+                ProviderDetails: null,
+                "diagnostic-1");
+            Exception? exception = null;
+            try
+            {
+                throw new InvalidOperationException("Provider transport failed.");
+            }
+            catch (InvalidOperationException caught)
+            {
+                exception = caught;
+            }
+
+            await using (var log = RuntimeDiagnosticLog.Create(
+                logDirectory,
+                "runtime-1",
+                root,
+                RuntimeDiagnosticLogLevel.Debug,
+                new FixedTimeProvider(FixedLogUtcNow, FixedLogTimeZone)))
+            {
+                await log.WriteAsync(
+                    RuntimeDiagnosticLogLevel.Error,
+                    "RunFailed",
+                    "run-1",
+                    "session-1",
+                    exception: exception,
+                    error: runtimeError,
+                    ct: _testContext.CancellationToken);
+            }
+
+            var logPath = Path.Combine(logDirectory, "20260729", "2016.jsonl");
+            var lines = await File.ReadAllLinesAsync(logPath, _testContext.CancellationToken);
+            var line = Assert.ContainsSingle(lines);
+            using var document = JsonDocument.Parse(line);
+            var entry = document.RootElement;
+            Assert.AreEqual("ProviderRejected", entry.GetProperty("errorCode").GetString());
+            Assert.AreEqual("provider", entry.GetProperty("errorCategory").GetString());
+            Assert.AreEqual(
+                "The Provider rejected the test request.",
+                entry.GetProperty("message").GetString());
+            Assert.IsTrue(entry.GetProperty("isRetryable").GetBoolean());
+            Assert.AreEqual("diagnostic-1", entry.GetProperty("diagnosticId").GetString());
+            Assert.AreEqual(
+                typeof(InvalidOperationException).FullName,
+                entry.GetProperty("exceptionType").GetString());
+            Assert.AreEqual(
+                "Provider transport failed.",
+                entry.GetProperty("exceptionMessage").GetString());
+            Assert.Contains(
+                nameof(WriteAsync_WritesRuntimeErrorAndExceptionDetails),
+                entry.GetProperty("stackTrace").GetString()!,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [TestMethod]
+    [Timeout(15_000, CooperativeCancellation = true)]
+    public async Task RunAsync_FailedProviderWritesRuntimeErrorDetails()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var workspace = Path.Combine(root, "workspace");
+            var dataDirectory = Path.Combine(root, "data");
+            var runtimeError = new RuntimeError(
+                "ProviderUnavailable",
+                "provider",
+                "The test Provider is unavailable.",
+                IsRetryable: true,
+                ProviderDetails: null,
+                "diagnostic-provider-1");
+            var options = CreateOptions(
+                workspace,
+                dataDirectory,
+                new FailingProvider(runtimeError)) with
+            {
+                TimeProvider = new FixedTimeProvider(FixedLogUtcNow, FixedLogTimeZone)
+            };
+
+            await using (var runtime = await LocalRuntime.StartAsync(
+                options,
+                _testContext.CancellationToken))
+            {
+                var events = await CollectAsync(
+                    runtime.RunAsync(
+                        new NewSessionRunRequest(
+                            "request-failure",
+                            "turn-failure",
+                            RuntimeMode.Expert,
+                            CreateSelection(),
+                            [new TextContentBlock("fail")]),
+                        _testContext.CancellationToken),
+                    _testContext.CancellationToken);
+                Assert.IsTrue(events.Any(static envelope =>
+                    envelope.MessageType == MessageTypes.RunFailed));
+            }
+
+            var logPath = Path.Combine(dataDirectory, "logs", "20260729", "2016.jsonl");
+            var lines = await File.ReadAllLinesAsync(logPath, _testContext.CancellationToken);
+            var failedLine = Assert.ContainsSingle(lines.Where(static line =>
+            {
+                using var document = JsonDocument.Parse(line);
+                return document.RootElement.GetProperty("event").GetString() == "RunFailed";
+            }));
+            using var failedDocument = JsonDocument.Parse(failedLine);
+            var failedEntry = failedDocument.RootElement;
+            Assert.AreEqual("ProviderUnavailable", failedEntry.GetProperty("errorCode").GetString());
+            Assert.AreEqual(
+                "The test Provider is unavailable.",
+                failedEntry.GetProperty("message").GetString());
+            Assert.AreEqual(
+                "diagnostic-provider-1",
+                failedEntry.GetProperty("diagnosticId").GetString());
         }
         finally
         {
@@ -760,6 +911,42 @@ public sealed class StandaloneLocalRuntimeTests
                 context.Request.CorrelationId,
                 context.Request.ApprovalRequestId,
                 ToolAuthorizationDecision.Denied));
+        }
+    }
+
+    private sealed class FixedTimeProvider(
+        DateTimeOffset utcNow,
+        TimeZoneInfo localTimeZone) : TimeProvider
+    {
+        public override TimeZoneInfo LocalTimeZone { get; } = localTimeZone;
+
+        public override DateTimeOffset GetUtcNow() => utcNow;
+    }
+
+    private sealed class FailingProvider(RuntimeError error) : IRuntimeProviderAdapter
+    {
+        public string ProviderId => "fake";
+
+        public ProviderCapabilities Capabilities { get; } = new(Streaming: true);
+
+        public IReadOnlyList<ProviderModel> Models { get; } =
+            [new("fake-model", "Fake Model", ContextWindow: 8192)];
+
+        public async IAsyncEnumerable<RuntimeProviderEvent> CompleteStreamingAsync(
+            RuntimeProviderRequest request,
+            [EnumeratorCancellation] CancellationToken ct = default)
+        {
+            await Task.Yield();
+            ct.ThrowIfCancellationRequested();
+            yield return new InvocationFailedProviderEvent(request.InvocationId, error);
+        }
+
+        public Task ValidateCapabilitiesAsync(
+            ContentBlock[] input,
+            CancellationToken ct = default)
+        {
+            ct.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
         }
     }
 

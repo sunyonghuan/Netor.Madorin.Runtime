@@ -1,5 +1,7 @@
 using System.Buffers;
+using System.Globalization;
 using System.Text.Json;
+using Madorin.AI.Runtime.Contracts;
 
 namespace Madorin.AI.Runtime.Server;
 
@@ -13,8 +15,6 @@ public enum RuntimeDiagnosticLogLevel
 
 internal sealed class RuntimeDiagnosticLog : IAsyncDisposable
 {
-    private static readonly byte[] NewLine = "\n"u8.ToArray();
-
     private readonly FileStream _stream;
     private readonly SemaphoreSlim _writeGate = new(1, 1);
     private readonly string _runtimeInstanceId;
@@ -39,14 +39,12 @@ internal sealed class RuntimeDiagnosticLog : IAsyncDisposable
 
     public static RuntimeDiagnosticLog Create(
         string logDirectory,
-        string fileName,
         string runtimeInstanceId,
         string workspaceRoot,
         RuntimeDiagnosticLogLevel minimumLevel,
         TimeProvider timeProvider)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(logDirectory);
-        ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
         ArgumentException.ThrowIfNullOrWhiteSpace(runtimeInstanceId);
         ArgumentException.ThrowIfNullOrWhiteSpace(workspaceRoot);
         ArgumentNullException.ThrowIfNull(timeProvider);
@@ -55,12 +53,11 @@ internal sealed class RuntimeDiagnosticLog : IAsyncDisposable
             throw new ArgumentOutOfRangeException(nameof(minimumLevel));
         }
 
-        if (!string.Equals(Path.GetFileName(fileName), fileName, StringComparison.Ordinal))
-        {
-            throw new ArgumentException("The log file name must not contain a directory path.", nameof(fileName));
-        }
-
-        var normalizedDirectory = Path.GetFullPath(logDirectory);
+        var localNow = timeProvider.GetLocalNow();
+        var normalizedDirectory = Path.Combine(
+            Path.GetFullPath(logDirectory),
+            localNow.ToString("yyyyMMdd", CultureInfo.InvariantCulture));
+        var fileName = $"{localNow.ToString("HHmm", CultureInfo.InvariantCulture)}.jsonl";
         Directory.CreateDirectory(normalizedDirectory);
         var stream = new FileStream(
             Path.Combine(normalizedDirectory, fileName),
@@ -68,7 +65,7 @@ internal sealed class RuntimeDiagnosticLog : IAsyncDisposable
             {
                 Mode = FileMode.Append,
                 Access = FileAccess.Write,
-                Share = FileShare.Read,
+                Share = FileShare.ReadWrite,
                 BufferSize = 4096,
                 Options = FileOptions.Asynchronous | FileOptions.SequentialScan
             });
@@ -87,6 +84,7 @@ internal sealed class RuntimeDiagnosticLog : IAsyncDisposable
         string? sessionId = null,
         string? diagnosticId = null,
         Exception? exception = null,
+        RuntimeError? error = null,
         bool alwaysWrite = false,
         CancellationToken ct = default)
     {
@@ -108,16 +106,28 @@ internal sealed class RuntimeDiagnosticLog : IAsyncDisposable
             writer.WriteString("workspace", _workspaceRoot);
             WriteOptionalString(writer, "runId", runId);
             WriteOptionalString(writer, "sessionId", sessionId);
-            WriteOptionalString(writer, "diagnosticId", diagnosticId);
+            WriteOptionalString(writer, "diagnosticId", diagnosticId ?? error?.DiagnosticId);
+            WriteOptionalString(writer, "errorCode", error?.Code);
+            WriteOptionalString(writer, "errorCategory", error?.Category);
+            WriteOptionalString(writer, "message", error?.Message ?? exception?.Message);
+            if (error is not null)
+            {
+                writer.WriteBoolean("isRetryable", error.IsRetryable);
+            }
+
             WriteOptionalString(writer, "exceptionType", exception?.GetType().FullName);
+            WriteOptionalString(writer, "exceptionMessage", exception?.Message);
+            WriteOptionalString(writer, "stackTrace", exception?.ToString());
             writer.WriteEndObject();
         }
+
+        buffer.GetSpan(1)[0] = (byte)'\n';
+        buffer.Advance(1);
 
         await _writeGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             await _stream.WriteAsync(buffer.WrittenMemory, ct).ConfigureAwait(false);
-            await _stream.WriteAsync(NewLine, ct).ConfigureAwait(false);
             await _stream.FlushAsync(ct).ConfigureAwait(false);
         }
         finally
@@ -133,6 +143,7 @@ internal sealed class RuntimeDiagnosticLog : IAsyncDisposable
         string? sessionId = null,
         string? diagnosticId = null,
         Exception? exception = null,
+        RuntimeError? error = null,
         bool alwaysWrite = false)
     {
         try
@@ -144,6 +155,7 @@ internal sealed class RuntimeDiagnosticLog : IAsyncDisposable
                     sessionId,
                     diagnosticId,
                     exception,
+                    error,
                     alwaysWrite,
                     CancellationToken.None)
                 .ConfigureAwait(false);

@@ -28,7 +28,7 @@ public sealed record LocalRuntimeOptions(
     public TimeSpan WorkspaceLockTimeout { get; init; } = TimeSpan.Zero;
 
     public RuntimeDiagnosticLogLevel MinimumLogLevel { get; init; } =
-        RuntimeDiagnosticLogLevel.Warning;
+        RuntimeDiagnosticLogLevel.Information;
 
     public TimeProvider TimeProvider { get; init; } = TimeProvider.System;
 

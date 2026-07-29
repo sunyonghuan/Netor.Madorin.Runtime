@@ -157,7 +157,6 @@ public sealed class LocalRuntime : IAsyncDisposable
         {
             diagnosticLog = RuntimeDiagnosticLog.Create(
                 normalized.LogDirectory,
-                "runtime.jsonl",
                 normalized.RuntimeInstanceId,
                 normalized.WorkspaceRoot,
                 normalized.MinimumLogLevel,
@@ -1134,13 +1133,34 @@ public sealed class LocalRuntime : IAsyncDisposable
                 "RunCancelled",
                 prepared.RunId,
                 prepared.SessionId),
-            MessageTypes.RunFailed => _diagnosticLog.TryWriteAsync(
+            MessageTypes.RunFailed => LogRunFailedAsync(envelope, prepared),
+            _ => ValueTask.CompletedTask
+        };
+
+    private ValueTask LogRunFailedAsync(
+        RuntimeEventEnvelope envelope,
+        PreparedRun prepared)
+    {
+        try
+        {
+            var failed = envelope.Payload.Deserialize(RuntimeJsonContext.Default.RunFailedEvent);
+            return _diagnosticLog.TryWriteAsync(
                 RuntimeDiagnosticLogLevel.Error,
                 "RunFailed",
                 prepared.RunId,
-                prepared.SessionId),
-            _ => ValueTask.CompletedTask
-        };
+                prepared.SessionId,
+                error: failed?.Error);
+        }
+        catch (JsonException exception)
+        {
+            return _diagnosticLog.TryWriteAsync(
+                RuntimeDiagnosticLogLevel.Error,
+                "RunFailed",
+                prepared.RunId,
+                prepared.SessionId,
+                exception: exception);
+        }
+    }
 
     private async Task<RuntimeEventEnvelope?> CompleteLocalTerminalRunAsync(
         PreparedRun prepared,

@@ -44,10 +44,10 @@ public sealed class AliyunProviderTests
 
     [TestMethod]
     [Timeout(10_000, CooperativeCancellation = true)]
-    public async Task DefaultCapabilities_AreConservativeAndRejectUndeclaredFeaturesBeforeHttp()
+    public async Task DefaultCapabilities_EnableToolCallingAndRejectOtherUndeclaredFeatures()
     {
         await using var server = await FakeProviderServer.StartAsync(
-            _ => FakeProviderResponse.Error(500, "HTTP should not be reached"),
+            _ => ProviderProtocolScripts.ToolCall(ProviderAdapterKind.OpenAICompatible),
             _testContext.CancellationToken);
         using var adapter = CreateAdapter(server.BaseAddress, modelId: "qwen-vl-max");
         ToolDescriptor[] tools =
@@ -56,7 +56,7 @@ public sealed class AliyunProviderTests
         ];
 
         Assert.IsTrue(adapter.Capabilities.Streaming);
-        Assert.IsFalse(adapter.Capabilities.ToolCalling);
+        Assert.IsTrue(adapter.Capabilities.ToolCalling);
         Assert.IsFalse(adapter.Capabilities.Reasoning);
         Assert.IsFalse(adapter.Capabilities.Vision);
         Assert.IsFalse(adapter.Capabilities.Usage);
@@ -66,9 +66,9 @@ public sealed class AliyunProviderTests
             ProviderAdapterTestFactory.CreateRequest(tools),
             _testContext.CancellationToken);
 
-        var failure = Assert.IsInstanceOfType<InvocationFailedProviderEvent>(
-            Assert.ContainsSingle(events));
-        Assert.AreEqual(RuntimeErrorCodes.CapabilityNotSupported, failure.Error.Code);
+        Assert.ContainsSingle(events.OfType<ToolCallCompleteProviderEvent>());
+        Assert.ContainsSingle(events.OfType<InvocationCompletedProviderEvent>());
+        Assert.IsEmpty(events.OfType<InvocationFailedProviderEvent>());
         await Assert.ThrowsExactlyAsync<RuntimeProviderException>(async () =>
         {
             await adapter.ValidateCapabilitiesAsync(
@@ -81,7 +81,7 @@ public sealed class AliyunProviderTests
                 [CreateImageBlock()],
                 _testContext.CancellationToken);
         });
-        Assert.IsEmpty(server.Requests);
+        Assert.ContainsSingle(server.Requests);
     }
 
     [TestMethod]

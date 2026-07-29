@@ -283,7 +283,6 @@ public sealed class RuntimeServer : IAsyncDisposable
         {
             diagnosticLog = RuntimeDiagnosticLog.Create(
                 normalized.LogDirectory,
-                $"runtime-{normalized.InstanceId}.jsonl",
                 normalized.InstanceId,
                 normalized.WorkspaceRoot,
                 normalized.MinimumLogLevel,
@@ -3679,7 +3678,7 @@ public sealed class RuntimeServer : IAsyncDisposable
         return CompleteTerminalRunAsync(pending);
     }
 
-    private Task<TerminalCommitResult> CompleteFailedRunAsync(
+    private async Task<TerminalCommitResult> CompleteFailedRunAsync(
         string runId,
         string sessionId,
         AuthenticatedSession session,
@@ -3710,7 +3709,15 @@ public sealed class RuntimeServer : IAsyncDisposable
             errorJson,
             MeetingStatus: "Failed",
             InterruptWorkSession: false);
-        return CompleteTerminalRunAsync(pending);
+        await _diagnosticLog.TryWriteAsync(
+                RuntimeDiagnosticLogLevel.Error,
+                "RunFailed",
+                runId,
+                sessionId,
+                exception: exception,
+                error: error)
+            .ConfigureAwait(false);
+        return await CompleteTerminalRunAsync(pending).ConfigureAwait(false);
     }
 
     private async Task<TerminalCommitResult> CompleteTerminalRunAsync(

@@ -2052,7 +2052,7 @@ internal static class ServiceCommands
             : configuredLevel;
         if (string.IsNullOrWhiteSpace(value))
         {
-            level = RuntimeDiagnosticLogLevel.Warning;
+            level = RuntimeDiagnosticLogLevel.Information;
             return true;
         }
 

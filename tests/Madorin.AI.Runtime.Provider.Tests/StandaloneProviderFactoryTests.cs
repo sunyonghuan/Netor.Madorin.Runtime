@@ -19,6 +19,43 @@ public sealed class StandaloneProviderFactoryTests
     }
 
     [TestMethod]
+    [DataRow("OpenAI")]
+    [DataRow("Anthropic")]
+    [DataRow("OpenAI Compatible")]
+    [DataRow("DeepSeek")]
+    [DataRow("Kimi")]
+    [DataRow("Aliyun")]
+    [DataRow("Azure OpenAI")]
+    [DataRow("Gemini")]
+    [DataRow("GLM")]
+    [DataRow("Custom")]
+    [DataRow("Ollama")]
+    public void Create_ProviderWithoutDeclaredCapabilities_EnablesToolCalling(string protocol)
+    {
+        const string providerId = "default-tool-calling-provider";
+        var config = new StandaloneConfig
+        {
+            Providers =
+            [
+                new ProviderEntry
+                {
+                    Name = providerId,
+                    Protocol = protocol,
+                    BaseUrl = "https://provider.example/v1",
+                    ApiKey = ProviderAdapterTestFactory.ApiKey,
+                    Models = [ProviderAdapterTestFactory.ModelId]
+                }
+            ]
+        };
+        var resolver = StandaloneProviderFactory.Create(config);
+
+        var adapter = resolver(CreateSelection(providerId));
+        using var adapterLifetime = adapter as IDisposable;
+
+        Assert.IsTrue(adapter.Capabilities.ToolCalling);
+    }
+
+    [TestMethod]
     [DataRow(ProviderAdapterKind.OpenAI)]
     [DataRow(ProviderAdapterKind.Anthropic)]
     [DataRow(ProviderAdapterKind.OpenAICompatible)]
