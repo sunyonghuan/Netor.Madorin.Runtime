@@ -1,10 +1,15 @@
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Providers.Abstractions;
+using Madorin.AI.Runtime.Providers.Aliyun;
 using Madorin.AI.Runtime.Providers.Anthropic;
+using Madorin.AI.Runtime.Providers.AzureOpenAI;
 using Madorin.AI.Runtime.Providers.DeepSeek;
+using Madorin.AI.Runtime.Providers.Gemini;
+using Madorin.AI.Runtime.Providers.GLM;
 using Madorin.AI.Runtime.Providers.Kimi;
 using Madorin.AI.Runtime.Providers.OpenAI;
 using Madorin.AI.Runtime.Providers.OpenAICompatible;
+using Madorin.AI.Runtime.Providers.Ollama;
 using Madorin.AI.Runtime.Tools.Abstractions;
 
 namespace Madorin.AI.Runtime.Provider.Tests;
@@ -52,6 +57,11 @@ public sealed class ProviderSkillsPipelineTests
     [DataRow(SkillsPipelineProvider.OpenAICompatible)]
     [DataRow(SkillsPipelineProvider.DeepSeek)]
     [DataRow(SkillsPipelineProvider.Kimi)]
+    [DataRow(SkillsPipelineProvider.Aliyun)]
+    [DataRow(SkillsPipelineProvider.AzureOpenAI)]
+    [DataRow(SkillsPipelineProvider.Gemini)]
+    [DataRow(SkillsPipelineProvider.GLM)]
+    [DataRow(SkillsPipelineProvider.Ollama)]
     [Timeout(10_000, CooperativeCancellation = true)]
     public async Task CompleteStreamingAsync_WithSkills_InjectsProgressiveToolsWithoutPreloadingBody(
         SkillsPipelineProvider provider)
@@ -141,6 +151,35 @@ public sealed class ProviderSkillsPipelineTests
                 ProviderAdapterTestFactory.ApiKey,
                 endpoint,
                 models: models),
+            SkillsPipelineProvider.Aliyun => new AliyunProviderAdapter(
+                new AliyunProviderOptions(
+                    "aliyun",
+                    ProviderAdapterTestFactory.ApiKey,
+                    endpoint,
+                    Models: models)),
+            SkillsPipelineProvider.AzureOpenAI => new AzureOpenAIProviderAdapter(
+                new AzureOpenAIProviderOptions(
+                    "azure-openai",
+                    ProviderAdapterTestFactory.ApiKey,
+                    root,
+                    models)),
+            SkillsPipelineProvider.Gemini => new GeminiProviderAdapter(
+                new GeminiProviderOptions(
+                    "gemini",
+                    ProviderAdapterTestFactory.ApiKey,
+                    endpoint,
+                    Models: models)),
+            SkillsPipelineProvider.GLM => new GlmProviderAdapter(
+                new GlmProviderOptions(
+                    "glm",
+                    ProviderAdapterTestFactory.ApiKey,
+                    endpoint,
+                    Models: models)),
+            SkillsPipelineProvider.Ollama => new OllamaProviderAdapter(
+                new OllamaProviderOptions(
+                    "ollama",
+                    endpoint,
+                    Models: models)),
             _ => throw new ArgumentOutOfRangeException(nameof(provider), provider, null)
         };
 
@@ -154,5 +193,10 @@ public enum SkillsPipelineProvider
     Anthropic,
     OpenAICompatible,
     DeepSeek,
-    Kimi
+    Kimi,
+    Aliyun,
+    AzureOpenAI,
+    Gemini,
+    GLM,
+    Ollama
 }
