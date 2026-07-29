@@ -1,18 +1,25 @@
 using System.CommandLine;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Text.Unicode;
 
 namespace Madorin.AI.Runtime.Cli.Commands;
 
 internal static class CliOutput
 {
+    internal static JavaScriptEncoder ReadableJsonEncoder { get; } =
+        JavaScriptEncoder.Create(UnicodeRanges.All);
+
     public static bool IsJson(ParseResult parseResult, Option<bool> jsonOption) =>
         parseResult.GetValue(jsonOption);
 
     public static void WriteJson(TextWriter output, Action<Utf8JsonWriter> writeValue)
     {
         using var stream = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(stream))
+        using (var writer = new Utf8JsonWriter(
+                   stream,
+                   new JsonWriterOptions { Encoder = ReadableJsonEncoder }))
         {
             writeValue(writer);
         }
@@ -269,7 +276,9 @@ internal static class CliOutput
         Action<Utf8JsonWriter> writeValue)
     {
         using var stream = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(stream))
+        using (var writer = new Utf8JsonWriter(
+                   stream,
+                   new JsonWriterOptions { Encoder = ReadableJsonEncoder }))
         {
             writeValue(writer);
         }

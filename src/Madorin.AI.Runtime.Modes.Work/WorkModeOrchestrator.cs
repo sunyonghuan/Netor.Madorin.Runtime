@@ -87,7 +87,6 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         _skillCatalogSnapshotProvider = skillCatalogSnapshotProvider;
         _scriptInvoker = scriptInvoker;
         _runtimeLimits = runtimeLimits ?? new RuntimeLimits(
-            MaxToolRounds: 8,
             MaxToolResultBytesPerInvocation: 4 * 1024 * 1024);
         if (workRepo is not null)
         {
@@ -1150,7 +1149,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
 
         var messages = request.Messages.ToList();
         var tools = request.AvailableTools;
-        var maxToolRounds = _runtimeLimits.MaxToolRounds ?? 8;
+        var maxToolRounds = _runtimeLimits.MaxToolRounds;
         var maxToolCallsPerRound = _runtimeLimits.MaxToolCallsPerRound;
         var maxToolResultBytes = _runtimeLimits.MaxToolResultBytesPerInvocation
             ?? 4L * 1024 * 1024;
@@ -1316,13 +1315,13 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 yield break;
             }
 
-            if (toolRound >= maxToolRounds)
+            if (maxToolRounds is { } toolRoundLimit && toolRound >= toolRoundLimit)
             {
                 yield return new InvocationFailedProviderEvent(
                     request.InvocationId,
                     CreateRuntimeError(
                         RuntimeErrorCodes.LimitsIncompatible,
-                        $"The Invocation exceeded the {maxToolRounds}-round tool limit."));
+                        $"The Invocation exceeded the {toolRoundLimit}-round tool limit."));
                 yield break;
             }
 

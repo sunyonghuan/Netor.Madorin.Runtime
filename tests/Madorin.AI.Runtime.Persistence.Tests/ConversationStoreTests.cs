@@ -12,6 +12,32 @@ public sealed class ConversationStoreTests
     public TestContext TestContext { get; set; }
 
     [TestMethod]
+    public async Task AppendMessageAsync_PersistsChineseTextWithoutUnicodeEscapes()
+    {
+        var dataDirectory = CreateTemporaryDirectory();
+        try
+        {
+            var store = new ConversationStore(dataDirectory);
+            await store.AppendMessageAsync(
+                "session-chinese",
+                CreateDraft("你好，世界"),
+                TestContext.CancellationToken);
+
+            var jsonl = await File.ReadAllTextAsync(
+                Path.Combine(dataDirectory, "messages", "session-chinese.jsonl"),
+                Encoding.UTF8,
+                TestContext.CancellationToken);
+
+            StringAssert.Contains(jsonl, "你好，世界");
+            Assert.DoesNotContain("\\u4f60", jsonl, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(dataDirectory);
+        }
+    }
+
+    [TestMethod]
     public async Task AppendMessageAsync_ConcurrentDrafts_AssignsUniqueContiguousSequences()
     {
         var dataDirectory = CreateTemporaryDirectory();

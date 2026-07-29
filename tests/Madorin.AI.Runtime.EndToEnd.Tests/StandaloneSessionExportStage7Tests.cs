@@ -16,7 +16,7 @@ public sealed class StandaloneSessionExportStage7Tests
     private const string ProviderId = "session-export-provider";
     private const string ModelId = "session-export-model";
     private const string AgentId = "session-export-agent";
-    private const string VisibleText = "visible export text";
+    private const string VisibleText = "可见的导出文本";
     private const string ReasoningSecret = "private reasoning detail";
     private const string ToolSecret = "private tool detail";
 
@@ -104,6 +104,8 @@ public sealed class StandaloneSessionExportStage7Tests
             }
 
             Assert.IsGreaterThanOrEqualTo(1, emptyContentMessages);
+            Assert.Contains(VisibleText, jsonl.Output, StringComparison.Ordinal);
+            Assert.DoesNotContain("\\u53ef", jsonl.Output, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain(ReasoningSecret, jsonl.Output, StringComparison.Ordinal);
             Assert.DoesNotContain(ToolSecret, jsonl.Output, StringComparison.Ordinal);
         }

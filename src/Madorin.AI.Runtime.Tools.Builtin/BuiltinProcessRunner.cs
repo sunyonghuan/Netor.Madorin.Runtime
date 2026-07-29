@@ -261,6 +261,27 @@ internal static class BuiltinProcessRunner
         return names.Distinct(comparer).Order(comparer).ToArray();
     }
 
+    public static string[] CreateAllowedEnvironmentVariableNames(
+        System.Text.Json.JsonElement arguments,
+        IEnumerable<string> inheritedVariableNames)
+    {
+        ArgumentNullException.ThrowIfNull(inheritedVariableNames);
+        var comparer = OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal;
+        var names = ParseRequestedEnvironmentVariableNames(arguments)
+            .Concat(inheritedVariableNames)
+            .Distinct(comparer)
+            .Order(comparer)
+            .ToArray();
+        if (names.Length > MaxEnvironmentVariables)
+        {
+            throw new InvalidDataException("The environment variable allowlist is too large.");
+        }
+
+        return names;
+    }
+
     public static string? ParseStandardInput(
         System.Text.Json.JsonElement arguments,
         string propertyName = "stdin")

@@ -1,4 +1,7 @@
+using System.Text.Encodings.Web;
+using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Unicode;
 
 namespace Madorin.AI.Runtime.Persistence.Files;
 
@@ -9,7 +12,19 @@ namespace Madorin.AI.Runtime.Persistence.Files;
 [JsonSerializable(typeof(ConversationRecordV1))]
 [JsonSerializable(typeof(ConversationCompactCacheV1))]
 [JsonSerializable(typeof(SessionMaintenanceAuditRecord))]
-internal sealed partial class ConversationJsonContext : JsonSerializerContext;
+internal sealed partial class ConversationJsonContext : JsonSerializerContext
+{
+    public static ConversationJsonContext Persistence => PersistenceContext.Instance;
+
+    private static class PersistenceContext
+    {
+        internal static readonly ConversationJsonContext Instance = new(
+            new JsonSerializerOptions(Default.Options)
+            {
+                Encoder = JavaScriptEncoder.Create(UnicodeRanges.All)
+            });
+    }
+}
 
 internal sealed record ConversationHeader(
     string Schema,

@@ -116,7 +116,7 @@ public sealed class StandaloneConfigLoader
         await WriteAtomicallyAsync(
             ConfigPath,
             config,
-            ConfigJsonContext.Default.StandaloneConfig,
+            ConfigJsonContext.Persistence.StandaloneConfig,
             ct).ConfigureAwait(false);
     }
 
@@ -133,7 +133,7 @@ public sealed class StandaloneConfigLoader
         await WriteAtomicallyAsync(
             path,
             agent,
-            ConfigJsonContext.Default.AgentConfig,
+            ConfigJsonContext.Persistence.AgentConfig,
             ct).ConfigureAwait(false);
     }
 
@@ -149,7 +149,7 @@ public sealed class StandaloneConfigLoader
         await WriteAtomicallyAsync(
             ConfigPath,
             updated,
-            ConfigJsonContext.Default.StandaloneConfig,
+            ConfigJsonContext.Persistence.StandaloneConfig,
             ct).ConfigureAwait(false);
         return updated;
     }
@@ -189,7 +189,7 @@ public sealed class StandaloneConfigLoader
         await WriteAtomicallyAsync(
             path,
             updated,
-            ConfigJsonContext.Default.AgentConfig,
+            ConfigJsonContext.Persistence.AgentConfig,
             ct).ConfigureAwait(false);
         return updated;
     }
@@ -243,7 +243,7 @@ public sealed class StandaloneConfigLoader
             await WriteAtomicallyAsync(
                     ConfigPath,
                     config,
-                    ConfigJsonContext.Default.StandaloneConfig,
+                    ConfigJsonContext.Persistence.StandaloneConfig,
                     ct)
                 .ConfigureAwait(false);
         }
@@ -267,7 +267,7 @@ public sealed class StandaloneConfigLoader
         await WriteAtomicallyAsync(
             ConfigPath,
             config,
-            ConfigJsonContext.Default.StandaloneConfig,
+            ConfigJsonContext.Persistence.StandaloneConfig,
             ct).ConfigureAwait(false);
         return backupPath;
     }

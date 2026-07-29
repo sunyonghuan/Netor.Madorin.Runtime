@@ -108,6 +108,43 @@ public sealed class StandaloneRunInputOutputStage7Tests
     }
 
     [TestMethod]
+    public void RunForTests_InvalidLogLevel_IsRejectedBeforeRuntimeStarts()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var provider = new CapturingProvider();
+            var dataDirectory = Path.Combine(root, "data");
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+
+            var exitCode = CliApplication.RunForTests(
+                [
+                    "run",
+                    "--workspace", Path.Combine(root, "workspace"),
+                    "--data-dir", dataDirectory,
+                    "--input", "inline",
+                    "--log-level", "1"
+                ],
+                stdout,
+                new StringReader(string.Empty),
+                Path.Combine(root, "config"),
+                _ => _ => provider,
+                error: stderr);
+
+            Assert.AreEqual(ExitCodes.InvalidArguments, exitCode);
+            Assert.AreEqual(string.Empty, stdout.ToString());
+            Assert.Contains("--log-level must be", stderr.ToString(), StringComparison.Ordinal);
+            Assert.IsFalse(Directory.Exists(dataDirectory));
+            Assert.IsEmpty(provider.Requests);
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [TestMethod]
     [Timeout(20_000, CooperativeCancellation = true)]
     public async Task RunForTests_InputFile_PreservesUtf8BomWhitespaceAndNewlines()
     {

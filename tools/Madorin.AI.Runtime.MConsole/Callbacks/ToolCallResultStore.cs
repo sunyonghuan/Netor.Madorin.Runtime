@@ -137,7 +137,7 @@ public sealed class ToolCallResultStore(string stateDirectory) : IDisposable
                 await JsonSerializer.SerializeAsync(
                     stream,
                     value,
-                    MConsoleJsonContext.Default.StoredToolCallResult,
+                    MConsoleJsonContext.Persistence.StoredToolCallResult,
                     cancellationToken);
                 await stream.FlushAsync(cancellationToken);
             }

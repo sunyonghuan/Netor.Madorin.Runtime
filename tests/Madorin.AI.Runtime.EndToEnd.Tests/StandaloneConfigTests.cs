@@ -30,7 +30,7 @@ public sealed class StandaloneConfigTests
         try
         {
             var loader = new StandaloneConfigLoader(directory);
-            var expected = CreateConfig("gpt-5");
+            var expected = CreateConfig("中文模型");
 
             await loader.SaveAsync(expected, TestContext.CancellationToken);
             var actual = await loader.LoadAsync(TestContext.CancellationToken);
@@ -54,6 +54,8 @@ public sealed class StandaloneConfigTests
 
             var json = await File.ReadAllTextAsync(loader.ConfigPath, TestContext.CancellationToken);
             StringAssert.Contains(json, "\"defaultProvider\"");
+            StringAssert.Contains(json, "中文模型");
+            Assert.DoesNotContain("\\u4e2d", json, StringComparison.OrdinalIgnoreCase);
         }
         finally
         {

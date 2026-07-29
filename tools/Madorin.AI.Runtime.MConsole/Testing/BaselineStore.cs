@@ -46,7 +46,7 @@ public sealed class BaselineStore(string baselineDirectory)
                 await JsonSerializer.SerializeAsync(
                     stream,
                     baseline,
-                    MConsoleJsonContext.Default.ExecutionBaseline,
+                    MConsoleJsonContext.Persistence.ExecutionBaseline,
                     cancellationToken);
             }
 

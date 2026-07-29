@@ -400,9 +400,70 @@ public sealed class StandaloneReplStage7Tests
             Assert.Contains("reply-provider-one-1", output.ToString(), StringComparison.Ordinal);
             Assert.Contains($"Exported Session: {exportPath}", output.ToString(), StringComparison.Ordinal);
             Assert.Contains("Active runs: 0", output.ToString(), StringComparison.Ordinal);
-            Assert.Contains("/compact - create or refresh", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains(
+                "创建或刷新当前会话的上下文摘要。",
+                output.ToString(),
+                StringComparison.Ordinal);
             Assert.DoesNotContain("Unknown REPL command", error.ToString(), StringComparison.Ordinal);
             Assert.DoesNotContain("\u001b[", output.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task Repl_Cd_SwitchesRuntimeWorkspaceAndUpdatesHelp()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var configDirectory = Path.Combine(root, "config");
+            var workspace = Path.Combine(root, "workspace-one");
+            var nextWorkspace = Path.Combine(root, "workspace-two");
+            Directory.CreateDirectory(workspace);
+            Directory.CreateDirectory(nextWorkspace);
+            await WriteConfigurationAsync(configDirectory, includeSecondProvider: false);
+            var output = new StringWriter();
+            var error = new StringWriter();
+            var input = new StringReader(string.Join(
+                Environment.NewLine,
+                [
+                    "/cd",
+                    "/cd ../workspace-two",
+                    "/cd",
+                    "/status",
+                    "/help cd",
+                    "/exit",
+                    string.Empty
+                ]));
+
+            var exitCode = CliApplication.RunForTests(
+                ["run", "--workspace", workspace],
+                output,
+                input,
+                configDirectory,
+                _ => _ => new RecordingProvider("provider-one", ["model-one"]),
+                error: error);
+
+            Assert.AreEqual(ExitCodes.Success, exitCode, error.ToString());
+            Assert.Contains(
+                $"工作区：{Path.GetFullPath(workspace)}",
+                output.ToString(),
+                StringComparison.Ordinal);
+            Assert.Contains(
+                $"正在切换工作区：{Path.GetFullPath(nextWorkspace)}",
+                output.ToString(),
+                StringComparison.Ordinal);
+            Assert.Contains(
+                $"Workspace: {Path.GetFullPath(nextWorkspace)}",
+                output.ToString(),
+                StringComparison.Ordinal);
+            Assert.Contains("/cd [path]", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("查看或切换当前工作区。", output.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("Unknown REPL command", error.ToString(), StringComparison.Ordinal);
         }
         finally
         {

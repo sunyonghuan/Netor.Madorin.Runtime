@@ -72,7 +72,7 @@ public sealed class BuiltinToolConsentScopeResolverTests
     }
 
     [TestMethod]
-    public void Resolve_ExistingFileWrite_IsOverwriteAndOnceOnly()
+    public void Resolve_ExistingFileWrite_IsOverwriteAndAllowsRunGrant()
     {
         var target = Path.Combine(_workspace, "existing.txt");
         File.WriteAllText(target, "existing");
@@ -87,7 +87,7 @@ public sealed class BuiltinToolConsentScopeResolverTests
             new[] { Path.GetFullPath(target) },
             resolution.Scope.AllowedWriteRoots);
         Assert.IsTrue(resolution.Scope.AllowOverwrite);
-        Assert.IsFalse(resolution.Scope.CanGrantForRun);
+        Assert.IsTrue(resolution.Scope.CanGrantForRun);
     }
 
     [TestMethod]
@@ -150,11 +150,14 @@ public sealed class BuiltinToolConsentScopeResolverTests
     }
 
     [TestMethod]
-    public void Resolve_ProcessAndHttp_ReturnsRedactedOnceOnlyScopes()
+    public void Resolve_ProcessUsesSafeEnvironmentAndRestrictsCustomVariablesToOnce()
     {
         var process = Resolve(
             BuiltinToolRegistry.ProcessRunToolId,
             """{"fileName":"dotnet","arguments":["--info","sensitive-value"],"stdin":"secret-input","environment":{"TOKEN":"secret-token"}}""");
+        var safeProcess = Resolve(
+            BuiltinToolRegistry.ProcessRunToolId,
+            """{"fileName":"dotnet","arguments":["--info"]}""");
         var http = Resolve(
             BuiltinToolRegistry.HttpRequestToolId,
             """{"method":"POST","url":"https://example.test:8443/orders","headers":{"Authorization":"Bearer secret-token"},"body":"secret-body"}""");
@@ -163,12 +166,38 @@ public sealed class BuiltinToolConsentScopeResolverTests
         Assert.IsNotNull(process.Scope);
         Assert.HasCount(1, process.Scope.AllowedExecutables);
         Assert.AreEqual("dotnet", process.Scope.AllowedExecutables[0]);
-        Assert.HasCount(1, process.Scope.AllowedEnvironmentVariables);
-        Assert.AreEqual("TOKEN", process.Scope.AllowedEnvironmentVariables[0]);
+        Assert.Contains(
+            "TOKEN",
+            process.Scope.AllowedEnvironmentVariables,
+            StringComparer.OrdinalIgnoreCase);
+        Assert.Contains(
+            "TEMP",
+            process.Scope.AllowedEnvironmentVariables,
+            StringComparer.OrdinalIgnoreCase);
+        Assert.Contains(
+            "TMP",
+            process.Scope.AllowedEnvironmentVariables,
+            StringComparer.OrdinalIgnoreCase);
+        Assert.Contains(
+            "USERPROFILE",
+            process.Scope.AllowedEnvironmentVariables,
+            StringComparer.OrdinalIgnoreCase);
+        Assert.DoesNotContain(
+            "OPENAI_API_KEY",
+            process.Scope.AllowedEnvironmentVariables,
+            StringComparer.OrdinalIgnoreCase);
         Assert.AreEqual("2 arguments; stdin 12 characters", process.Scope.DetailSummary);
         Assert.IsFalse(process.Scope.CanGrantForRun);
         Assert.DoesNotContain("sensitive-value", process.Scope.DetailSummary, StringComparison.Ordinal);
         Assert.DoesNotContain("secret", process.Scope.DetailSummary, StringComparison.OrdinalIgnoreCase);
+
+        Assert.IsTrue(safeProcess.IsSuccess, safeProcess.Error);
+        Assert.IsNotNull(safeProcess.Scope);
+        Assert.IsTrue(safeProcess.Scope.CanGrantForRun);
+        Assert.Contains(
+            "TEMP",
+            safeProcess.Scope.AllowedEnvironmentVariables,
+            StringComparer.OrdinalIgnoreCase);
 
         Assert.IsTrue(http.IsSuccess, http.Error);
         Assert.IsNotNull(http.Scope);
@@ -264,7 +293,7 @@ public sealed class BuiltinToolConsentScopeResolverTests
             new[] { Path.GetFullPath(source) },
             patch.Scope.AllowedWriteRoots);
         Assert.IsTrue(patch.Scope.AllowOverwrite);
-        Assert.IsFalse(patch.Scope.CanGrantForRun);
+        Assert.IsTrue(patch.Scope.CanGrantForRun);
         Assert.DoesNotContain("secret", patch.Scope.DetailSummary, StringComparison.Ordinal);
     }
 

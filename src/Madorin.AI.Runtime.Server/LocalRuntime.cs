@@ -32,6 +32,7 @@ public sealed class LocalRuntime : IAsyncDisposable
     private readonly Func<NextTurnSelection, IRuntimeProviderAdapter> _providerResolver;
     private readonly IToolConsentHandler? _toolConsentHandler;
     private readonly SessionMaintenanceAuditLog _maintenanceAudit;
+    private readonly RuntimeDiagnosticLog _diagnosticLog;
     private readonly HashSet<IRuntimeProviderAdapter> _providers =
         new(ReferenceEqualityComparer.Instance);
     private readonly object _providerSync = new();
@@ -48,13 +49,15 @@ public sealed class LocalRuntime : IAsyncDisposable
         string databaseConnectionString,
         AgentContextComposer agentContextComposer,
         MemoryFileService memoryFiles,
-        SkillCatalogService skillCatalog)
+        SkillCatalogService skillCatalog,
+        RuntimeDiagnosticLog diagnosticLog)
     {
         _dataDirectory = options.DataDirectory;
         _databaseConnectionString = databaseConnectionString;
         _providerResolver = options.ProviderResolver;
         _toolConsentHandler = options.ToolConsentHandler;
         _maintenanceAudit = new SessionMaintenanceAuditLog(options.DataDirectory);
+        _diagnosticLog = diagnosticLog;
         _workspaceLock = workspaceLock;
         _skillCatalog = skillCatalog;
         _blobStore = new BlobStagingStore(
@@ -100,11 +103,23 @@ public sealed class LocalRuntime : IAsyncDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(options.LogDirectory);
         ArgumentException.ThrowIfNullOrWhiteSpace(options.RuntimeInstanceId);
         ArgumentNullException.ThrowIfNull(options.ProviderResolver);
+        ArgumentNullException.ThrowIfNull(options.TimeProvider);
+        if (!Enum.IsDefined(options.MinimumLogLevel))
+        {
+            throw new ArgumentOutOfRangeException(nameof(options));
+        }
         if (options.RuntimeLimits.MaxToolCallsPerRound is <= 0)
         {
             throw new ArgumentOutOfRangeException(
                 nameof(options),
                 "MaxToolCallsPerRound must be a positive integer or null.");
+        }
+
+        if (options.RuntimeLimits.MaxToolRounds is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                "MaxToolRounds must be a positive integer or null.");
         }
 
         if (options.WorkspaceLockTimeout < TimeSpan.Zero)
@@ -137,9 +152,22 @@ public sealed class LocalRuntime : IAsyncDisposable
                 ct)
             .ConfigureAwait(false);
         SkillCatalogService? skillCatalog = null;
+        RuntimeDiagnosticLog? diagnosticLog = null;
         try
         {
-            Directory.CreateDirectory(normalized.LogDirectory);
+            diagnosticLog = RuntimeDiagnosticLog.Create(
+                normalized.LogDirectory,
+                "runtime.jsonl",
+                normalized.RuntimeInstanceId,
+                normalized.WorkspaceRoot,
+                normalized.MinimumLogLevel,
+                normalized.TimeProvider);
+            await diagnosticLog.WriteAsync(
+                    RuntimeDiagnosticLogLevel.Information,
+                    "RuntimeStarting",
+                    alwaysWrite: true,
+                    ct: ct)
+                .ConfigureAwait(false);
             await using var connection = await DataDirectoryInitializer.InitializeAsync(
                     normalized.DataDirectory,
                     ct)
@@ -163,16 +191,34 @@ public sealed class LocalRuntime : IAsyncDisposable
                 normalized.RuntimeInstanceId,
                 normalized.SkillSources);
             await skillCatalog.InitializeAsync(ct).ConfigureAwait(false);
+            await diagnosticLog.WriteAsync(
+                    RuntimeDiagnosticLogLevel.Information,
+                    "RuntimeStarted",
+                    alwaysWrite: true,
+                    ct: ct)
+                .ConfigureAwait(false);
             return new LocalRuntime(
                 normalized,
                 workspaceLock,
                 connection.ConnectionString,
                 contextComposer,
                 memoryFiles,
-                skillCatalog);
+                skillCatalog,
+                diagnosticLog);
         }
-        catch
+        catch (Exception ex)
         {
+            if (diagnosticLog is not null)
+            {
+                await diagnosticLog.TryWriteAsync(
+                        RuntimeDiagnosticLogLevel.Error,
+                        "RuntimeStartFailed",
+                        exception: ex,
+                        alwaysWrite: true)
+                    .ConfigureAwait(false);
+                await diagnosticLog.DisposeAsync().ConfigureAwait(false);
+            }
+
             if (skillCatalog is not null)
             {
                 await skillCatalog.DisposeAsync().ConfigureAwait(false);
@@ -834,6 +880,12 @@ public sealed class LocalRuntime : IAsyncDisposable
             return;
         }
 
+        await _diagnosticLog.TryWriteAsync(
+                RuntimeDiagnosticLogLevel.Information,
+                "RuntimeStopping",
+                alwaysWrite: true)
+            .ConfigureAwait(false);
+
         List<IRuntimeProviderAdapter> providers;
         lock (_providerSync)
         {
@@ -859,6 +911,12 @@ public sealed class LocalRuntime : IAsyncDisposable
         await _workspaceLock.DisposeAsync().ConfigureAwait(false);
         _maintenanceAudit.Dispose();
         _runGate.Dispose();
+        await _diagnosticLog.TryWriteAsync(
+                RuntimeDiagnosticLogLevel.Information,
+                "RuntimeStopped",
+                alwaysWrite: true)
+            .ConfigureAwait(false);
+        await _diagnosticLog.DisposeAsync().ConfigureAwait(false);
     }
 
     private async IAsyncEnumerable<RuntimeEventEnvelope> RunNewSessionAsync(
@@ -873,6 +931,12 @@ public sealed class LocalRuntime : IAsyncDisposable
         {
             var provider = ResolveProvider(request.Selection);
             var prepared = await PrepareNewSessionAsync(request, provider, ct)
+                .ConfigureAwait(false);
+            await _diagnosticLog.TryWriteAsync(
+                    RuntimeDiagnosticLogLevel.Information,
+                    "RunStarted",
+                    prepared.RunId,
+                    prepared.SessionId)
                 .ConfigureAwait(false);
             yield return prepared.Accepted;
             await foreach (var envelope in ExecuteRunWithFailureBoundaryAsync(
@@ -958,6 +1022,12 @@ public sealed class LocalRuntime : IAsyncDisposable
                     provider,
                     ct)
                 .ConfigureAwait(false);
+            await _diagnosticLog.TryWriteAsync(
+                    RuntimeDiagnosticLogLevel.Information,
+                    "RunStarted",
+                    prepared.RunId,
+                    prepared.SessionId)
+                .ConfigureAwait(false);
             yield return prepared.Accepted;
             await foreach (var envelope in ExecuteRunWithFailureBoundaryAsync(
                     prepared,
@@ -1012,6 +1082,12 @@ public sealed class LocalRuntime : IAsyncDisposable
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
+                await _diagnosticLog.TryWriteAsync(
+                        RuntimeDiagnosticLogLevel.Warning,
+                        "RunCancelled",
+                        prepared.RunId,
+                        prepared.SessionId)
+                    .ConfigureAwait(false);
                 terminalEnvelope = await CompleteLocalTerminalRunAsync(
                     prepared,
                     exception: null,
@@ -1020,6 +1096,13 @@ public sealed class LocalRuntime : IAsyncDisposable
             }
             catch (Exception exception)
             {
+                await _diagnosticLog.TryWriteAsync(
+                        RuntimeDiagnosticLogLevel.Error,
+                        "RunFailed",
+                        prepared.RunId,
+                        prepared.SessionId,
+                        exception: exception)
+                    .ConfigureAwait(false);
                 terminalEnvelope = await CompleteLocalTerminalRunAsync(
                     prepared,
                     exception,
@@ -1027,6 +1110,7 @@ public sealed class LocalRuntime : IAsyncDisposable
                 break;
             }
 
+            await LogTerminalEnvelopeAsync(envelope, prepared).ConfigureAwait(false);
             yield return envelope;
         }
 
@@ -1035,6 +1119,28 @@ public sealed class LocalRuntime : IAsyncDisposable
             yield return terminalEnvelope;
         }
     }
+
+    private ValueTask LogTerminalEnvelopeAsync(
+        RuntimeEventEnvelope envelope,
+        PreparedRun prepared) => envelope.MessageType switch
+        {
+            MessageTypes.RunCompleted => _diagnosticLog.TryWriteAsync(
+                RuntimeDiagnosticLogLevel.Information,
+                "RunCompleted",
+                prepared.RunId,
+                prepared.SessionId),
+            MessageTypes.RunCancelled => _diagnosticLog.TryWriteAsync(
+                RuntimeDiagnosticLogLevel.Warning,
+                "RunCancelled",
+                prepared.RunId,
+                prepared.SessionId),
+            MessageTypes.RunFailed => _diagnosticLog.TryWriteAsync(
+                RuntimeDiagnosticLogLevel.Error,
+                "RunFailed",
+                prepared.RunId,
+                prepared.SessionId),
+            _ => ValueTask.CompletedTask
+        };
 
     private async Task<RuntimeEventEnvelope?> CompleteLocalTerminalRunAsync(
         PreparedRun prepared,

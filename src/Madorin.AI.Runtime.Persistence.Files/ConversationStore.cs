@@ -433,7 +433,7 @@ public sealed class ConversationStore
         record = await OffloadOversizedContentAsync(record, CancellationToken.None).ConfigureAwait(false);
         var recordBytes = JsonSerializer.SerializeToUtf8Bytes(
             record,
-            ConversationJsonContext.Default.ConversationRecordV1);
+            ConversationJsonContext.Persistence.ConversationRecordV1);
         if (recordBytes.Length > _options.MaxJsonLineBytes)
         {
             throw new InvalidOperationException(
@@ -566,7 +566,7 @@ public sealed class ConversationStore
                 DateTimeOffset.UtcNow);
             var headerBytes = JsonSerializer.SerializeToUtf8Bytes(
                 header,
-                ConversationJsonContext.Default.ConversationHeader);
+                ConversationJsonContext.Persistence.ConversationHeader);
             await stream.WriteAsync(headerBytes, CancellationToken.None).ConfigureAwait(false);
             await stream.WriteAsync(NewLineBytes, CancellationToken.None).ConfigureAwait(false);
         }
@@ -1383,7 +1383,7 @@ public sealed class ConversationStore
                     await JsonSerializer.SerializeAsync(
                             stream,
                             cache,
-                            ConversationJsonContext.Default.ConversationCompactCacheV1,
+                            ConversationJsonContext.Persistence.ConversationCompactCacheV1,
                             ct)
                         .ConfigureAwait(false);
                     await stream.FlushAsync(ct).ConfigureAwait(false);
@@ -1978,7 +1978,7 @@ public sealed class ConversationStore
     {
         var recordBytes = JsonSerializer.SerializeToUtf8Bytes(
             record,
-            ConversationJsonContext.Default.ConversationRecordV1);
+            ConversationJsonContext.Persistence.ConversationRecordV1);
         if (recordBytes.Length <= _options.MaxJsonLineBytes)
         {
             return record;
@@ -1995,7 +1995,7 @@ public sealed class ConversationStore
         {
             recordBytes = JsonSerializer.SerializeToUtf8Bytes(
                 record with { Content = ToElement(contentNode) },
-                ConversationJsonContext.Default.ConversationRecordV1);
+                ConversationJsonContext.Persistence.ConversationRecordV1);
             if (recordBytes.Length <= _options.MaxJsonLineBytes)
             {
                 return record with

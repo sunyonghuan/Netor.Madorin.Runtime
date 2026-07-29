@@ -1,6 +1,7 @@
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Services.Tools;
 using Madorin.AI.Runtime.Tools.Abstractions;
+using Madorin.AI.Runtime.Tools.Builtin;
 
 namespace Madorin.AI.Runtime.Cli.Tools;
 
@@ -67,10 +68,25 @@ internal sealed class StandaloneToolGrantFactory(TimeProvider? timeProvider = nu
         }
 
         var grantId = $"standalone-{Guid.NewGuid():N}";
-        var allowedWriteRoots = lifetime is StandaloneToolGrantLifetime.Run
-            && scope.AllowDelete
-                ? [Path.GetFullPath(workspaceRoot)]
-                : scope.AllowedWriteRoots;
+        var normalizedWorkspace = Path.GetFullPath(workspaceRoot);
+        var isRunGrant = lifetime is StandaloneToolGrantLifetime.Run;
+        var expandWorkspaceRoots = isRunGrant
+            && (descriptor.ToolId.StartsWith("mcli_fs_", StringComparison.Ordinal)
+                || string.Equals(
+                    descriptor.ToolId,
+                    BuiltinToolRegistry.ProcessRunToolId,
+                    StringComparison.Ordinal));
+        var allowedReadRoots = expandWorkspaceRoots && scope.AllowedReadRoots.Length > 0
+            ? [normalizedWorkspace]
+            : scope.AllowedReadRoots;
+        var allowedWriteRoots = expandWorkspaceRoots && scope.AllowedWriteRoots.Length > 0
+            ? [normalizedWorkspace]
+            : scope.AllowedWriteRoots;
+        var allowOverwrite = scope.AllowOverwrite
+            || isRunGrant && string.Equals(
+                descriptor.ToolId,
+                BuiltinToolRegistry.FileWriteToolId,
+                StringComparison.Ordinal);
         string[]? scriptKeys = null;
         string? skillCatalogVersion = null;
         if (string.Equals(descriptor.ToolId, SkillScriptAuthorization.ToolId, StringComparison.Ordinal)
@@ -87,10 +103,10 @@ internal sealed class StandaloneToolGrantFactory(TimeProvider? timeProvider = nu
         return new ToolGrant(
             grantId,
             invocation.RunId,
-            Path.GetFullPath(workspaceRoot),
-            scope.AllowedReadRoots,
+            normalizedWorkspace,
+            allowedReadRoots,
             allowedWriteRoots,
-            scope.AllowOverwrite,
+            allowOverwrite,
             scope.AllowMove,
             scope.AllowDelete,
             scope.AllowedExecutables,

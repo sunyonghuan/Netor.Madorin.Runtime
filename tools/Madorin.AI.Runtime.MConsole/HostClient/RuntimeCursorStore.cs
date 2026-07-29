@@ -132,7 +132,7 @@ public sealed class RuntimeCursorStore(string stateDirectory) : IDisposable
                 await JsonSerializer.SerializeAsync(
                     stream,
                     state,
-                    MConsoleJsonContext.Default.RuntimeCursorState,
+                    MConsoleJsonContext.Persistence.RuntimeCursorState,
                     cancellationToken);
                 await stream.FlushAsync(cancellationToken);
             }

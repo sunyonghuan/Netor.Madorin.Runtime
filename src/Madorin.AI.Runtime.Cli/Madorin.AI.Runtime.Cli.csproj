@@ -17,8 +17,9 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <AssemblyName>madorin-cli</AssemblyName>
+    <ApplicationIcon>assets\brand.ico</ApplicationIcon>
     <RootNamespace>Madorin.AI.Runtime.Cli</RootNamespace>
-    <Version>0.1.9</Version>
+    <Version>0.1.13</Version>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>

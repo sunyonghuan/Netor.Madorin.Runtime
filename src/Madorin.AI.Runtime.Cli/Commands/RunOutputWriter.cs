@@ -324,7 +324,9 @@ internal sealed class RunOutputWriter(
     private static string CreateJson(Action<Utf8JsonWriter> writeValue)
     {
         using var stream = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(stream))
+        using (var writer = new Utf8JsonWriter(
+                   stream,
+                   new JsonWriterOptions { Encoder = CliOutput.ReadableJsonEncoder }))
         {
             writeValue(writer);
         }

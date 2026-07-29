@@ -18,6 +18,14 @@ namespace Madorin.AI.Runtime.EndToEnd.Tests;
 [TestClass]
 public sealed class StandaloneLocalRuntimeTests
 {
+    private static readonly string[] ExpectedRuntimeLifecycleEvents =
+    [
+        "RuntimeStarting",
+        "RuntimeStarted",
+        "RuntimeStopping",
+        "RuntimeStopped"
+    ];
+
     private readonly TestContext _testContext;
 
     public StandaloneLocalRuntimeTests(TestContext testContext)
@@ -117,6 +125,57 @@ public sealed class StandaloneLocalRuntimeTests
                 prepared.DataDirectory,
                 StandaloneWorkspaceDataMigrator.MigrationMarkerFileName)));
             Assert.IsTrue(File.Exists(Path.Combine(context.LegacyDataDirectory, "state.db")));
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [TestMethod]
+    [Timeout(15_000, CooperativeCancellation = true)]
+    public async Task StartAsync_WritesJsonLifecycleLogIntoRuntimeInstanceDirectory()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var workspace = Path.Combine(root, "workspace");
+            var dataDirectory = Path.Combine(root, "data");
+            var runtimeInstanceId = Guid.NewGuid().ToString("N");
+            var logDirectory = Path.Combine(dataDirectory, "logs", runtimeInstanceId);
+            var options = new LocalRuntimeOptions(
+                workspace,
+                dataDirectory,
+                logDirectory,
+                runtimeInstanceId,
+                _ => new RecordingProvider());
+
+            await using (var runtime = await LocalRuntime.StartAsync(
+                options,
+                _testContext.CancellationToken))
+            {
+                var activeLog = new FileInfo(Path.Combine(logDirectory, "runtime.jsonl"));
+                Assert.IsTrue(activeLog.Exists);
+                Assert.IsGreaterThan(0, activeLog.Length);
+            }
+
+            var logPath = Path.Combine(logDirectory, "runtime.jsonl");
+            var lines = await File.ReadAllLinesAsync(logPath, _testContext.CancellationToken);
+            Assert.HasCount(4, lines);
+            var events = lines.Select(line =>
+            {
+                using var document = JsonDocument.Parse(line);
+                Assert.AreEqual(runtimeInstanceId, document.RootElement
+                    .GetProperty("runtimeInstanceId")
+                    .GetString());
+                Assert.AreEqual(Path.GetFullPath(workspace), document.RootElement
+                    .GetProperty("workspace")
+                    .GetString());
+                return document.RootElement.GetProperty("event").GetString();
+            }).ToArray();
+            CollectionAssert.AreEqual(
+                ExpectedRuntimeLifecycleEvents,
+                events);
         }
         finally
         {

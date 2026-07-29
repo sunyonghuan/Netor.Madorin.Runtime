@@ -288,7 +288,11 @@ public static class StandaloneWorkspaceDataMigrator
             {
                 using var writer = new Utf8JsonWriter(
                     stream,
-                    new JsonWriterOptions { Indented = true });
+                    new JsonWriterOptions
+                    {
+                        Encoder = ConfigJsonContext.Persistence.Options.Encoder,
+                        Indented = true
+                    });
                 writer.WriteStartObject();
                 writer.WriteNumber("version", 1);
                 writer.WriteString("source", legacyDataDirectory);

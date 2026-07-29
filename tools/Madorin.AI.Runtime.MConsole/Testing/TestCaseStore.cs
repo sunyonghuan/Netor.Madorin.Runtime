@@ -23,7 +23,7 @@ public sealed class TestCaseStore(string casesDirectory)
                 await JsonSerializer.SerializeAsync(
                     stream,
                     testCase,
-                    MConsoleJsonContext.Default.MConsoleTestCase,
+                    MConsoleJsonContext.Persistence.MConsoleTestCase,
                     cancellationToken);
             }
 

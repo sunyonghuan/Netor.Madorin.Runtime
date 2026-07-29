@@ -92,7 +92,7 @@ public sealed class StandaloneToolConsentTests
     }
 
     [TestMethod]
-    public void Create_RunGrantOmitsCallBindingButKeepsRunAgentToolAndScope()
+    public void Create_RunGrantOmitsCallBindingAndExpandsReadScopeToWorkspace()
     {
         var context = CreatePermissionContext(canGrantForRun: true);
         var factory = new StandaloneToolGrantFactory(new FixedTimeProvider(FixedNow));
@@ -106,8 +106,42 @@ public sealed class StandaloneToolConsentTests
         Assert.HasCount(1, grant.AllowedToolIds);
         Assert.AreEqual(context.Invocation.ToolId, grant.AllowedToolIds[0]);
         CollectionAssert.AreEqual(
-            context.ScopeResolution.Scope!.AllowedReadRoots,
+            new[] { Path.GetFullPath(_workspace) },
             grant.AllowedReadRoots);
+    }
+
+    [TestMethod]
+    public async Task Create_RunFileWriteGrantAuthorizesAnotherWorkspaceFileWithoutDestructiveFlags()
+    {
+        var context = CreateWritePermissionContext("call-write-1", "src/new-file.cs");
+        var factory = new StandaloneToolGrantFactory();
+
+        var grant = factory.Create(context, StandaloneToolGrantLifetime.Run);
+
+        CollectionAssert.AreEqual(
+            new[] { Path.GetFullPath(_workspace) },
+            grant.AllowedWriteRoots);
+        Assert.IsTrue(grant.AllowOverwrite);
+        Assert.IsFalse(grant.AllowMove);
+        Assert.IsFalse(grant.AllowDelete);
+
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync(TestContext.CancellationToken);
+        await SqliteSchema.EnsureCreatedAsync(connection, TestContext.CancellationToken);
+        using var store = new SqliteToolIntentRepository(connection);
+        var authorization = new ToolAuthorizationService(
+            store,
+            RuntimeToolPolicy.CreateRestricted(_workspace));
+        await authorization.SaveGrantAsync(grant, ct: TestContext.CancellationToken);
+        var secondContext = CreateWritePermissionContext("call-write-2", "tests/other-file.cs");
+
+        var secondAuthorization = await authorization.AuthorizeAsync(
+            secondContext.Invocation,
+            secondContext.Descriptor,
+            ct: TestContext.CancellationToken);
+
+        Assert.AreEqual(ToolAuthorizationDecision.Granted, secondAuthorization.Decision);
+        Assert.IsNotNull(secondAuthorization.EffectivePermission);
     }
 
     [TestMethod]
@@ -479,6 +513,50 @@ public sealed class StandaloneToolConsentTests
             "agent-1",
             ParentAgentId: null,
             $"{{\"path\":\"{path.Replace("\\", "/", StringComparison.Ordinal)}\"}}",
+            "run-1",
+            "session-1",
+            $"invocation-{callId}");
+        var scopeResolution = new BuiltinToolConsentScopeResolver().Resolve(
+            invocation,
+            descriptor,
+            _workspace);
+        Assert.IsTrue(scopeResolution.IsSuccess, scopeResolution.Error);
+        var argumentsHash = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(
+                Encoding.UTF8.GetBytes(invocation.ArgumentsJson)))
+            .ToLowerInvariant();
+        return new ToolPermissionConsentContext(
+            new ToolPermissionRequest(
+                $"permission-{callId}",
+                invocation.AgentId,
+                invocation.ParentAgentId,
+                invocation.ToolId,
+                invocation.CallId,
+                argumentsHash,
+                descriptor.Risk.ToString(),
+                "call-or-run",
+                "Permission required.",
+                CorrelationId: $"correlation-{callId}",
+                RunId: invocation.RunId),
+            invocation,
+            descriptor,
+            scopeResolution,
+            _workspace);
+    }
+
+    private ToolPermissionConsentContext CreateWritePermissionContext(
+        string callId,
+        string path)
+    {
+        var descriptor = new BuiltinToolRegistry()
+            .GetTools([BuiltinToolRegistry.FileWriteToolId])
+            .Single();
+        var invocation = new ToolInvocation(
+            callId,
+            descriptor.ToolId,
+            "agent-1",
+            ParentAgentId: null,
+            $$"""{"path":"{{path}}","content":"content","encoding":"utf-8","mode":"create"}""",
             "run-1",
             "session-1",
             $"invocation-{callId}");

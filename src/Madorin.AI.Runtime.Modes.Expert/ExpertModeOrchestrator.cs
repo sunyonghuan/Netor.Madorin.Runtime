@@ -57,7 +57,6 @@ public sealed class ExpertModeOrchestrator(
         _approvalHandler = approvalHandler;
     private readonly MemoryInvocationSnapshotStore? _memorySnapshotStore = memorySnapshotStore;
     private readonly RuntimeLimits _runtimeLimits = runtimeLimits ?? new RuntimeLimits(
-        MaxToolRounds: 8,
         MaxToolResultBytesPerInvocation: 4 * 1024 * 1024);
     private readonly ToolCatalogSnapshot? _toolCatalogSnapshot = toolCatalogSnapshot;
     private readonly ToolGateway? _toolGateway = toolGateway;
@@ -223,7 +222,7 @@ public sealed class ExpertModeOrchestrator(
         var terminalContent = new List<ContentBlock>();
         RuntimeError? failure = null;
         var cancelled = false;
-        var maxToolRounds = _runtimeLimits.MaxToolRounds ?? 8;
+        var maxToolRounds = _runtimeLimits.MaxToolRounds;
         var maxToolCallsPerRound = _runtimeLimits.MaxToolCallsPerRound;
         var maxToolResultBytes = _runtimeLimits.MaxToolResultBytesPerInvocation
             ?? 4L * 1024 * 1024;
@@ -417,11 +416,11 @@ public sealed class ExpertModeOrchestrator(
                 break;
             }
 
-            if (toolRound >= maxToolRounds)
+            if (maxToolRounds is { } toolRoundLimit && toolRound >= toolRoundLimit)
             {
                 failure = CreateRuntimeError(
                     RuntimeErrorCodes.LimitsIncompatible,
-                    $"The Invocation exceeded the {maxToolRounds}-round tool limit.");
+                    $"The Invocation exceeded the {toolRoundLimit}-round tool limit.");
                 break;
             }
 

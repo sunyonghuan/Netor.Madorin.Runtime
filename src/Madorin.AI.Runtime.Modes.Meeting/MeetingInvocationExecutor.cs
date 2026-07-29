@@ -29,7 +29,6 @@ internal sealed class MeetingInvocationExecutor(
     private readonly ToolCatalogSnapshot? _toolCatalogSnapshot = toolCatalogSnapshot;
     private readonly ToolConsentCoordinator? _toolConsentCoordinator = toolConsentCoordinator;
     private readonly RuntimeLimits _runtimeLimits = runtimeLimits ?? new RuntimeLimits(
-        MaxToolRounds: 8,
         MaxToolResultBytesPerInvocation: 4 * 1024 * 1024);
 
     public async Task<MeetingInvocationExecutionResult> ExecuteAsync(
@@ -43,7 +42,7 @@ internal sealed class MeetingInvocationExecutor(
 
         var providerEvents = new List<RuntimeProviderEvent>();
         var currentRequest = request;
-        var maxToolRounds = _runtimeLimits.MaxToolRounds ?? 8;
+        var maxToolRounds = _runtimeLimits.MaxToolRounds;
         var maxToolCallsPerRound = _runtimeLimits.MaxToolCallsPerRound;
         var maxToolResultBytes = _runtimeLimits.MaxToolResultBytesPerInvocation
             ?? 4L * 1024 * 1024;
@@ -77,11 +76,11 @@ internal sealed class MeetingInvocationExecutor(
                     providerEvents);
             }
 
-            if (toolRound >= maxToolRounds)
+            if (maxToolRounds is { } toolRoundLimit && toolRound >= toolRoundLimit)
             {
                 return Failed(
                     RuntimeErrorCodes.LimitsIncompatible,
-                    $"The Invocation exceeded the {maxToolRounds}-round tool limit.",
+                    $"The Invocation exceeded the {toolRoundLimit}-round tool limit.",
                     providerEvents);
             }
 

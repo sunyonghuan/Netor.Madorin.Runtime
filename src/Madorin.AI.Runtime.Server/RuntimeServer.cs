@@ -40,6 +40,7 @@ public sealed class RuntimeServer : IAsyncDisposable
     private readonly Func<NextTurnSelection, IRuntimeProviderAdapter>? _providerResolver;
     private readonly RuntimeExecutionCore _executionCore;
     private readonly BlobStagingStore _blobStore;
+    private readonly RuntimeDiagnosticLog _diagnosticLog;
     private readonly ConcurrentDictionary<int, Task> _connections = new();
     private readonly ConcurrentDictionary<string, ActiveRun> _activeRuns =
         new(StringComparer.Ordinal);
@@ -69,7 +70,8 @@ public sealed class RuntimeServer : IAsyncDisposable
         WorkspaceWriteLock instanceLock,
         FileStream instanceNameLock,
         string databaseConnectionString,
-        bool startupToolRecoveryPending)
+        bool startupToolRecoveryPending,
+        RuntimeDiagnosticLog diagnosticLog)
     {
         _instanceLock = instanceLock;
         _instanceNameLock = instanceNameLock;
@@ -84,6 +86,7 @@ public sealed class RuntimeServer : IAsyncDisposable
         _hostLeaseTimeout = options.HostLeaseTimeout;
         _limits = options.BlobLimits;
         _providerResolver = options.ProviderResolver;
+        _diagnosticLog = diagnosticLog;
         var userHome = options.MemoryUserHome
             ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         ArgumentException.ThrowIfNullOrWhiteSpace(userHome);
@@ -174,6 +177,13 @@ public sealed class RuntimeServer : IAsyncDisposable
                 "MaxToolCallsPerRound must be a positive integer or null.");
         }
 
+        if (options.BlobLimits.MaxToolRounds is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                "MaxToolRounds must be a positive integer or null.");
+        }
+
         if (options.HostLeaseTimeout <= TimeSpan.Zero)
         {
             throw new ArgumentOutOfRangeException(
@@ -182,6 +192,11 @@ public sealed class RuntimeServer : IAsyncDisposable
                 "The host lease timeout must be positive.");
         }
         ArgumentNullException.ThrowIfNull(options.TimeProvider);
+        if (!Enum.IsDefined(options.MinimumLogLevel))
+        {
+            throw new ArgumentOutOfRangeException(nameof(options));
+        }
+
         if (options.HandshakeClockSkew <= TimeSpan.Zero)
         {
             throw new ArgumentOutOfRangeException(
@@ -263,8 +278,22 @@ public sealed class RuntimeServer : IAsyncDisposable
             HandshakeSecret = handshakeSecret
         };
 
+        RuntimeDiagnosticLog? diagnosticLog = null;
         try
         {
+            diagnosticLog = RuntimeDiagnosticLog.Create(
+                normalized.LogDirectory,
+                $"runtime-{normalized.InstanceId}.jsonl",
+                normalized.InstanceId,
+                normalized.WorkspaceRoot,
+                normalized.MinimumLogLevel,
+                normalized.TimeProvider);
+            await diagnosticLog.WriteAsync(
+                    RuntimeDiagnosticLogLevel.Information,
+                    "RuntimeStarting",
+                    alwaysWrite: true,
+                    ct: ct)
+                .ConfigureAwait(false);
             await using var connection = await DataDirectoryInitializer.InitializeAsync(
                 dataDirectory,
                 ct).ConfigureAwait(false);
@@ -273,15 +302,33 @@ public sealed class RuntimeServer : IAsyncDisposable
                     .ListRecoverableIntentsAsync(ct)
                     .ConfigureAwait(false))
                 .Any(static intent => intent.Status is ToolIntentStatus.Sent);
+            await diagnosticLog.WriteAsync(
+                    RuntimeDiagnosticLogLevel.Information,
+                    "RuntimeStarted",
+                    alwaysWrite: true,
+                    ct: ct)
+                .ConfigureAwait(false);
             return new RuntimeServer(
                 normalized,
                 instanceLock,
                 instanceNameLock,
                 connection.ConnectionString,
-                startupToolRecoveryPending);
+                startupToolRecoveryPending,
+                diagnosticLog);
         }
-        catch
+        catch (Exception ex)
         {
+            if (diagnosticLog is not null)
+            {
+                await diagnosticLog.TryWriteAsync(
+                        RuntimeDiagnosticLogLevel.Error,
+                        "RuntimeStartFailed",
+                        exception: ex,
+                        alwaysWrite: true)
+                    .ConfigureAwait(false);
+                await diagnosticLog.DisposeAsync().ConfigureAwait(false);
+            }
+
             await instanceLock.DisposeAsync().ConfigureAwait(false);
             await instanceNameLock.DisposeAsync().ConfigureAwait(false);
             throw;
@@ -364,6 +411,16 @@ public sealed class RuntimeServer : IAsyncDisposable
             }
             await DrainConnectionsAsync().ConfigureAwait(false);
         }
+        catch (Exception ex)
+        {
+            await _diagnosticLog.TryWriteAsync(
+                    RuntimeDiagnosticLogLevel.Error,
+                    "RuntimeFailed",
+                    exception: ex,
+                    alwaysWrite: true)
+                .ConfigureAwait(false);
+            throw;
+        }
         finally
         {
             TryDeletePidFile(pidPath);
@@ -376,6 +433,12 @@ public sealed class RuntimeServer : IAsyncDisposable
         {
             return;
         }
+
+        await _diagnosticLog.TryWriteAsync(
+                RuntimeDiagnosticLogLevel.Information,
+                "RuntimeStopping",
+                alwaysWrite: true)
+            .ConfigureAwait(false);
 
         await _shutdown.CancelAsync().ConfigureAwait(false);
         foreach (var run in _activeRuns.Values)
@@ -395,6 +458,12 @@ public sealed class RuntimeServer : IAsyncDisposable
         _meetingResumeGate.Dispose();
         _runRegistry.Dispose();
         _shutdown.Dispose();
+        await _diagnosticLog.TryWriteAsync(
+                RuntimeDiagnosticLogLevel.Information,
+                "RuntimeStopped",
+                alwaysWrite: true)
+            .ConfigureAwait(false);
+        await _diagnosticLog.DisposeAsync().ConfigureAwait(false);
     }
 
     private async Task AcceptConnectionsAsync(
@@ -4011,7 +4080,7 @@ public sealed class RuntimeServer : IAsyncDisposable
         _limits with
         {
             MaxEventFrameBytes = NamedPipeTransport.MaxEventMessageBytes,
-            MaxToolRounds = supportsStage5 ? _limits.MaxToolRounds ?? 8 : null,
+            MaxToolRounds = supportsStage5 ? _limits.MaxToolRounds : null,
             MaxToolCallsPerRound = supportsStage5 ? _limits.MaxToolCallsPerRound : null,
             MaxToolResultBytesPerInvocation = supportsStage5
                 ? _limits.MaxToolResultBytesPerInvocation ?? 4L * 1024 * 1024

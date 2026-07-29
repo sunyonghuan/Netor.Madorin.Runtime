@@ -6,6 +6,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using Madorin.AI.Runtime.Contracts;
+using Madorin.AI.Runtime.Services.Skills;
 using Madorin.AI.Runtime.Tools.Abstractions;
 using Madorin.AI.Runtime.Tools.Builtin;
 
@@ -61,6 +62,39 @@ public sealed class BuiltinExecutionToolTests
 
         Assert.IsFalse(result.Success);
         StringAssert.Contains(result.Error, "SECRET");
+    }
+
+    [TestMethod]
+    public async Task ProcessRun_SafeInheritedEnvironment_AllowsDotnetBuild()
+    {
+        var projectPath = Path.Combine(_root, "EnvironmentProbe.csproj");
+        await File.WriteAllTextAsync(
+            projectPath,
+            """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+              </PropertyGroup>
+            </Project>
+            """,
+            TestContext.CancellationToken);
+        var permission = CreatePermission(
+            allowedExecutables: ["dotnet"],
+            allowedEnvironmentVariables: SkillScriptEnvironmentPolicy.InheritedVariableNames.ToArray());
+
+        var result = await ExecuteAsync(
+            new BuiltinProcessToolExecutor(),
+            BuiltinToolRegistry.ProcessRunToolId,
+            """{"fileName":"dotnet","arguments":["build","EnvironmentProbe.csproj","--nologo"]}""",
+            permission);
+
+        Assert.IsTrue(result.Success, result.Error);
+        using var output = JsonDocument.Parse(result.OutputJson!);
+        Assert.AreEqual(0, output.RootElement.GetProperty("exitCode").GetInt32());
+        Assert.DoesNotContain(
+            "C:\\Windows",
+            output.RootElement.GetProperty("stderr").GetString() ?? string.Empty,
+            StringComparison.OrdinalIgnoreCase);
     }
 
     [TestMethod]
@@ -181,6 +215,7 @@ public sealed class BuiltinExecutionToolTests
 
     private ToolPermissionContext CreatePermission(
         string[]? allowedExecutables = null,
+        string[]? allowedEnvironmentVariables = null,
         NetworkPolicy? networkPolicy = null) => new(
         "grant-1",
         "run-1",
@@ -189,7 +224,7 @@ public sealed class BuiltinExecutionToolTests
         [_root],
         AllowedExecutables: allowedExecutables ?? [],
         DenyNetwork: networkPolicy?.DenyAll ?? true,
-        AllowedEnvironmentVariables: [],
+        AllowedEnvironmentVariables: allowedEnvironmentVariables ?? [],
         NetworkPolicy: networkPolicy);
 
     private static NetworkPolicy CreateLoopbackPolicy(int port, long maxResponseBytes) => new(

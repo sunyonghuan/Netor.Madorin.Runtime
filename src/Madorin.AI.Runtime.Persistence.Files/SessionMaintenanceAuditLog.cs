@@ -42,7 +42,7 @@ public sealed class SessionMaintenanceAuditLog : IDisposable
 
         var payload = JsonSerializer.SerializeToUtf8Bytes(
             record,
-            ConversationJsonContext.Default.SessionMaintenanceAuditRecord);
+            ConversationJsonContext.Persistence.SessionMaintenanceAuditRecord);
         var line = new byte[payload.Length + NewLine.Length];
         payload.CopyTo(line, 0);
         NewLine.CopyTo(line, payload.Length);

@@ -33,7 +33,7 @@ public sealed class TestCaseAndFixtureTests
         using var directory = new OwnedTestDirectory();
         var store = new TestCaseStore(directory.Path);
         var testCase = new MConsoleTestCase(
-            "roundtrip",
+            "中文用例",
             [
                 TestCaseStore.RecordCommand(
                     "version",
@@ -49,13 +49,18 @@ public sealed class TestCaseAndFixtureTests
             new TestFixtureDefinition("fresh-workspace", "cleanup-owned-workspace"));
 
         await store.SaveAsync(testCase, TestContext.CancellationToken);
-        var loaded = await store.LoadAsync("roundtrip", TestContext.CancellationToken);
+        var loaded = await store.LoadAsync("中文用例", TestContext.CancellationToken);
+        var persistedJson = await File.ReadAllTextAsync(
+            Path.Combine(directory.Path, "中文用例.json"),
+            TestContext.CancellationToken);
 
         Assert.AreEqual(testCase.Name, loaded.Name);
         Assert.AreEqual(testCase.Fixtures, loaded.Fixtures);
         Assert.AreEqual(TestStepKind.Command, loaded.Steps[0].Kind);
         Assert.AreEqual(TestStepKind.Host, loaded.Steps[1].Kind);
         Assert.HasCount(2, loaded.Steps);
+        StringAssert.Contains(persistedJson, "中文用例");
+        Assert.DoesNotContain("\\u4e2d", persistedJson, StringComparison.OrdinalIgnoreCase);
     }
 
     [TestMethod]

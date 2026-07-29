@@ -29,6 +29,12 @@ public sealed class ExpertToolLoopTests
     public TestContext TestContext { get; set; } = null!;
 
     [TestMethod]
+    public void RuntimeLimits_DefaultToolRoundLimitIsUnlimited()
+    {
+        Assert.IsNull(new RuntimeLimits().MaxToolRounds);
+    }
+
+    [TestMethod]
     public async Task RunAsync_ToolCall_ExecutesOnceAndContinuesSameProvider()
     {
         var dataDirectory = Path.Combine(
@@ -231,6 +237,93 @@ public sealed class ExpertToolLoopTests
         }
     }
 
+    [TestMethod]
+    public async Task RunAsync_DefaultToolRoundLimit_AllowsMoreThanEightRounds()
+    {
+        var dataDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"madorin-expert-tool-many-rounds-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dataDirectory);
+        try
+        {
+            await using var connection = await DataDirectoryInitializer.InitializeAsync(
+                dataDirectory,
+                TestContext.CancellationToken);
+            var repository = new SqliteSessionRepository(connection);
+            var sessionId = await repository.CreateSessionAsync(
+                RuntimeMode.Expert,
+                "tool-many-rounds-session",
+                TimeSpan.FromDays(1),
+                TestContext.CancellationToken);
+            var runId = await repository.CreateRunAsync(
+                sessionId,
+                "tool-many-rounds-run",
+                TimeSpan.FromDays(1),
+                TestContext.CancellationToken);
+            await repository.TransitionRunStatusAsync(
+                runId,
+                RunStatus.Accepted,
+                RunStatus.Preparing,
+                TestContext.CancellationToken);
+            await repository.TransitionRunStatusAsync(
+                runId,
+                RunStatus.Preparing,
+                RunStatus.Running,
+                TestContext.CancellationToken);
+
+            using var outbox = new SqliteEventOutbox(connection);
+            using var toolState = new SqliteToolIntentRepository(connection);
+            var registry = new TestToolRegistry();
+            var validator = new JsonSchemaToolValidator();
+            var catalogStore = new ToolCatalogStore(registry, validator);
+            var catalog = catalogStore.CaptureSnapshot();
+            var authorization = new ToolAuthorizationService(
+                toolState,
+                RuntimeToolPolicy.CreateRestricted(dataDirectory));
+            var executor = new TestToolExecutor();
+            using var gateway = new ToolGateway(
+                catalogStore,
+                validator,
+                authorization,
+                [executor],
+                toolState,
+                outbox);
+            var provider = new MultiRoundToolLoopProvider(totalToolRounds: 9);
+            var orchestrator = new ExpertModeOrchestrator(
+                provider,
+                new ConversationStore(dataDirectory),
+                repository,
+                outbox,
+                toolGateway: gateway,
+                toolAuthorizationService: authorization,
+                toolCatalogSnapshot: catalog);
+
+            var events = new List<RuntimeEventEnvelope>();
+            await foreach (var envelope in orchestrator.RunAsync(
+                runId,
+                sessionId,
+                CreateRequest(),
+                "runtime-many-rounds",
+                TestContext.CancellationToken))
+            {
+                events.Add(envelope);
+            }
+
+            Assert.AreEqual(10, provider.CallCount);
+            Assert.AreEqual(9, executor.CallCount);
+            Assert.AreEqual(RunStatus.Completed, await repository.GetRunStatusAsync(runId));
+            Assert.IsTrue(events.Any(item => item.MessageType == MessageTypes.RunCompleted));
+            Assert.IsFalse(events.Any(item => item.MessageType == MessageTypes.RunFailed));
+        }
+        finally
+        {
+            if (Directory.Exists(dataDirectory))
+            {
+                Directory.Delete(dataDirectory, recursive: true);
+            }
+        }
+    }
+
     private static NewSessionRunRequest CreateRequest() =>
         new(
             "tool-session-key",
@@ -326,6 +419,50 @@ public sealed class ExpertToolLoopTests
 
         public IReadOnlyList<ToolDescriptor> GetTools(string[] toolIds) =>
             toolIds.Contains(ToolId, StringComparer.Ordinal) ? [Descriptor] : [];
+    }
+
+    private sealed class MultiRoundToolLoopProvider(int totalToolRounds) : IRuntimeProviderAdapter
+    {
+        public string ProviderId => "tool-loop";
+
+        public ProviderCapabilities Capabilities { get; } = new(
+            Streaming: true,
+            ToolCalling: true);
+
+        public IReadOnlyList<ProviderModel> Models { get; } =
+            [new("tool-model", "Tool Model", ContextWindow: 8192)];
+
+        public int CallCount { get; private set; }
+
+        public async IAsyncEnumerable<RuntimeProviderEvent> CompleteStreamingAsync(
+            RuntimeProviderRequest request,
+            [EnumeratorCancellation] CancellationToken ct = default)
+        {
+            CallCount++;
+            await Task.Yield();
+            ct.ThrowIfCancellationRequested();
+
+            if (CallCount <= totalToolRounds)
+            {
+                yield return new ToolCallCompleteProviderEvent(
+                    request.InvocationId,
+                    $"call-{CallCount}",
+                    TestToolRegistry.ToolId,
+                    "calculate",
+                    "{\"value\":21}");
+                yield return new InvocationCompletedProviderEvent(
+                    request.InvocationId,
+                    "tool_calls");
+                yield break;
+            }
+
+            yield return new TextDeltaProviderEvent(request.InvocationId, "Completed after many rounds.");
+            yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
+        }
+
+        public Task ValidateCapabilitiesAsync(
+            ContentBlock[] input,
+            CancellationToken ct = default) => Task.CompletedTask;
     }
 
     private sealed class MemoryToolLoopProvider(string expectedMemory)

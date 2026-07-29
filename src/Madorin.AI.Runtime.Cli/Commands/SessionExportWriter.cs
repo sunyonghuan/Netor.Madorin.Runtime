@@ -197,7 +197,9 @@ internal static class SessionExportWriter
         CancellationToken ct)
     {
         var buffer = new ArrayBufferWriter<byte>();
-        using (var writer = new Utf8JsonWriter(buffer))
+        using (var writer = new Utf8JsonWriter(
+                   buffer,
+                   new JsonWriterOptions { Encoder = CliOutput.ReadableJsonEncoder }))
         {
             writer.WriteStartObject();
             writer.WriteString("messageId", record.MessageId);
@@ -330,7 +332,13 @@ internal static class SessionExportWriter
     private static string FormatJson(JsonElement value)
     {
         var buffer = new ArrayBufferWriter<byte>();
-        using (var writer = new Utf8JsonWriter(buffer, new JsonWriterOptions { Indented = true }))
+        using (var writer = new Utf8JsonWriter(
+                   buffer,
+                   new JsonWriterOptions
+                   {
+                       Encoder = CliOutput.ReadableJsonEncoder,
+                       Indented = true
+                   }))
         {
             value.WriteTo(writer);
             writer.Flush();

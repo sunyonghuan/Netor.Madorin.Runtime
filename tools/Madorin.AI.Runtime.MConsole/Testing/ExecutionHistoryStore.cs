@@ -10,7 +10,7 @@ namespace Madorin.AI.Runtime.MConsole.Testing;
 public sealed class ExecutionHistoryStore(string historyDirectory) : IDisposable
 {
     private static readonly MConsoleJsonContext CompactJsonContext = new(
-        new JsonSerializerOptions(MConsoleJsonContext.Default.Options)
+        new JsonSerializerOptions(MConsoleJsonContext.Persistence.Options)
         {
             WriteIndented = false,
         });

@@ -156,7 +156,7 @@ public sealed class HostRecoveryStateStore(string stateDirectory) : IDisposable
                 await JsonSerializer.SerializeAsync(
                     stream,
                     state,
-                    MConsoleJsonContext.Default.HostRecoveryState,
+                    MConsoleJsonContext.Persistence.HostRecoveryState,
                     cancellationToken);
                 await stream.FlushAsync(cancellationToken);
             }

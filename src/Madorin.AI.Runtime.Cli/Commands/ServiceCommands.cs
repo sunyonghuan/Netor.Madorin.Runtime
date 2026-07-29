@@ -64,6 +64,18 @@ internal static class ServiceCommands
             var workspaceRoot = Path.GetFullPath(workspace);
             var dataDirectory = parseResult.GetValue(dataDirectoryOption)
                 ?? Path.Combine(workspaceRoot, ".madorin");
+            if (!TryResolveRuntimeLogLevel(
+                    parseResult.GetValue<string?>("--log-level"),
+                    out var minimumLogLevel))
+            {
+                WriteError(
+                    parseResult,
+                    jsonOption,
+                    output,
+                    "serve",
+                    "--log-level must be Debug, Information, Warning, or Error.");
+                return ExitCodes.InvalidArguments;
+            }
 
             using var shutdown = new CancellationTokenSource();
             ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
@@ -102,6 +114,7 @@ internal static class ServiceCommands
                 InstanceId = parseResult.GetValue<string?>("--instance") ?? string.Empty,
                 PipePrefix = parseResult.GetValue<string?>("--pipe-prefix") ?? "madorin.ai.runtime",
                 MaxConcurrentRuns = parseResult.GetValue<int?>("--max-runs") ?? 4,
+                MinimumLogLevel = minimumLogLevel,
                 HandshakeSecret = handshakeSecret,
                 ProviderResolver = null
             };
@@ -213,6 +226,20 @@ internal static class ServiceCommands
                 return ExitCodes.InvalidArguments;
             }
 
+            if (!TryResolveRuntimeLogLevel(
+                    parseResult.GetValue<string?>("--log-level"),
+                    out var minimumLogLevel))
+            {
+                RunOutputWriter.WriteCommandFailure(
+                    output,
+                    error,
+                    outputFormat,
+                    machineOutputRedirected,
+                    "InvalidLogLevel",
+                    "--log-level must be Debug, Information, Warning, or Error.");
+                return ExitCodes.InvalidArguments;
+            }
+
             if (directInput is not null && inputFile is not null)
             {
                 RunOutputWriter.WriteCommandFailure(
@@ -291,252 +318,281 @@ internal static class ServiceCommands
             }
 
             await using var outputDestination = atomicOutputFile;
-            StandaloneRuntimeContext context;
-            try
+            var requestedWorkspace = parseResult.GetValue(workspaceOption);
+            var requestedSessionId = parseResult.GetValue(sessionOption);
+            var requestedProvider = parseResult.GetValue(providerOption);
+            var requestedModel = parseResult.GetValue(modelOption);
+            var requestedAgent = parseResult.GetValue(agentOption);
+            var showWorkspaceWelcome = showWelcome;
+            var announceWorkspaceChange = false;
+            while (true)
             {
-                context = await StandaloneRuntimeContext.CreatePreparedAsync(
-                    parseResult.GetValue(workspaceOption),
-                    parseResult.GetValue(dataDirectoryOption),
-                    configDirectory);
-            }
-            catch (Exception ex) when (ex is ArgumentException or NotSupportedException)
-            {
-                RunOutputWriter.WriteCommandFailure(
-                    output,
-                    error,
-                    outputFormat,
-                    machineOutputRedirected,
-                    "InvalidRuntimeContext",
-                    ex.Message);
-                return ExitCodes.InvalidArguments;
-            }
-            catch (StandaloneWorkspaceDataMigrationException ex)
-            {
-                RunOutputWriter.WriteCommandFailure(
-                    output,
-                    error,
-                    outputFormat,
-                    machineOutputRedirected,
-                    "WorkspaceDataUnavailable",
-                    ex.Message);
-                return ExitCodes.WorkspaceError;
-            }
-
-            var loader = new StandaloneConfigLoader(context.ConfigDirectory);
-            var resolver = new StandaloneConfigurationResolver(loader);
-            StandaloneConfigurationSnapshot configuration;
-            try
-            {
+                StandaloneRuntimeContext context;
                 try
                 {
-                    configuration = await resolver.LoadAsync(context.WorkspaceRoot)
-                        .ConfigureAwait(false);
+                    context = await StandaloneRuntimeContext.CreatePreparedAsync(
+                        requestedWorkspace,
+                        parseResult.GetValue(dataDirectoryOption),
+                        configDirectory);
+                }
+                catch (Exception ex) when (ex is ArgumentException or NotSupportedException)
+                {
+                    RunOutputWriter.WriteCommandFailure(
+                        output,
+                        error,
+                        outputFormat,
+                        machineOutputRedirected,
+                        "InvalidRuntimeContext",
+                        ex.Message);
+                    return ExitCodes.InvalidArguments;
+                }
+                catch (StandaloneWorkspaceDataMigrationException ex)
+                {
+                    RunOutputWriter.WriteCommandFailure(
+                        output,
+                        error,
+                        outputFormat,
+                        machineOutputRedirected,
+                        "WorkspaceDataUnavailable",
+                        ex.Message);
+                    return ExitCodes.WorkspaceError;
+                }
+
+                var loader = new StandaloneConfigLoader(context.ConfigDirectory);
+                var resolver = new StandaloneConfigurationResolver(loader);
+                StandaloneConfigurationSnapshot configuration;
+                try
+                {
+                    try
+                    {
+                        configuration = await resolver.LoadAsync(context.WorkspaceRoot)
+                            .ConfigureAwait(false);
+                    }
+                    catch (StandaloneConfigurationException ex)
+                        when (ex.Code == StandaloneConfigurationResolver.ConfigurationNotFoundCode
+                            && outputFormat is RunOutputFormat.Text)
+                    {
+                        _ = await ConfigWizard.RunInitAsync(
+                                context.ConfigDirectory,
+                                terminal)
+                            .ConfigureAwait(false);
+                        configuration = await resolver.LoadAsync(context.WorkspaceRoot)
+                            .ConfigureAwait(false);
+                    }
+                }
+                catch (Exception ex) when (IsConfigurationException(ex))
+                {
+                    var code = ex is StandaloneConfigurationException configurationException
+                        ? configurationException.Code
+                        : StandaloneConfigurationResolver.ConfigurationInvalidCode;
+                    RunOutputWriter.WriteCommandFailure(
+                        output,
+                        error,
+                        outputFormat,
+                        machineOutputRedirected,
+                        code,
+                        ex.Message);
+                    return ExitCodes.InvalidArguments;
+                }
+
+                var config = configuration.GlobalConfig;
+                var agents = configuration.Agents;
+                StandaloneSelection selection;
+                try
+                {
+                    selection = StandaloneConfigurationResolver.ResolveSelection(
+                        configuration,
+                        requestedProvider,
+                        requestedModel,
+                        requestedAgent);
                 }
                 catch (StandaloneConfigurationException ex)
-                    when (ex.Code == StandaloneConfigurationResolver.ConfigurationNotFoundCode
-                        && outputFormat is RunOutputFormat.Text)
                 {
-                    _ = await ConfigWizard.RunInitAsync(
-                            context.ConfigDirectory,
-                            terminal)
-                        .ConfigureAwait(false);
-                    configuration = await resolver.LoadAsync(context.WorkspaceRoot)
-                        .ConfigureAwait(false);
+                    RunOutputWriter.WriteCommandFailure(
+                        output,
+                        error,
+                        outputFormat,
+                        machineOutputRedirected,
+                        ex.Code,
+                        ex.Message);
+                    return ExitCodes.InvalidArguments;
                 }
-            }
-            catch (Exception ex) when (IsConfigurationException(ex))
-            {
-                var code = ex is StandaloneConfigurationException configurationException
-                    ? configurationException.Code
-                    : StandaloneConfigurationResolver.ConfigurationInvalidCode;
-                RunOutputWriter.WriteCommandFailure(
-                    output,
-                    error,
-                    outputFormat,
-                    machineOutputRedirected,
-                    code,
-                    ex.Message);
-                return ExitCodes.InvalidArguments;
-            }
 
-            var config = configuration.GlobalConfig;
-            var agents = configuration.Agents;
-            StandaloneSelection selection;
-            try
-            {
-                selection = StandaloneConfigurationResolver.ResolveSelection(
-                    configuration,
-                    parseResult.GetValue(providerOption),
-                    parseResult.GetValue(modelOption),
-                    parseResult.GetValue(agentOption));
-            }
-            catch (StandaloneConfigurationException ex)
-            {
-                RunOutputWriter.WriteCommandFailure(
-                    output,
-                    error,
-                    outputFormat,
-                    machineOutputRedirected,
-                    ex.Code,
-                    ex.Message);
-                return ExitCodes.InvalidArguments;
-            }
-
-            if (!TryResolveMode(parseResult.GetValue(modeOption), out var mode))
-            {
-                RunOutputWriter.WriteCommandFailure(
-                    output,
-                    error,
-                    outputFormat,
-                    machineOutputRedirected,
-                    "InvalidMode",
-                    "Mode must be expert, meeting, work, or standalone.");
-                return ExitCodes.InvalidArguments;
-            }
-
-            if (mode is RuntimeMode.Work && agents.Count < 2)
-            {
-                RunOutputWriter.WriteCommandFailure(
-                    output,
-                    error,
-                    outputFormat,
-                    machineOutputRedirected,
-                    "InsufficientWorkAgents",
-                    "Work mode requires at least two configured Agents: one manager and one worker.");
-                return ExitCodes.InvalidArguments;
-            }
-
-            var timeout = parseResult.GetValue<int?>("--timeout");
-            using var cts = timeout is > 0
-                ? new CancellationTokenSource(TimeSpan.FromSeconds(timeout.Value))
-                : new CancellationTokenSource();
-
-            LocalRuntime runtime;
-            try
-            {
-                var providerResolver = providerResolverFactory is null
-                    ? StandaloneProviderFactory.Create(config)
-                    : providerResolverFactory(config);
-                var resolvedMemoryUserHome = memoryUserHome
-                    ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-                ArgumentException.ThrowIfNullOrWhiteSpace(resolvedMemoryUserHome);
-                var memoryFiles = new MemoryFileService(
-                    Path.GetFullPath(resolvedMemoryUserHome),
-                    context.WorkspaceRoot);
-                using var consentHandler = StandaloneToolConsentPolicy.IsInteractiveConsentEnabled(
-                        terminal,
-                        outputFormat is RunOutputFormat.Text,
-                        outputFile is not null)
-                    ? new StandaloneToolConsentHandler(
-                        terminal,
-                        new StandaloneToolGrantFactory())
-                    : null;
-                runtime = await LocalRuntime.StartAsync(
-                        new LocalRuntimeOptions(
-                            context.WorkspaceRoot,
-                            context.DataDirectory,
-                            context.LogDirectory,
-                            context.RuntimeInstanceId,
-                            providerResolver)
-                        {
-                            MemoryFiles = memoryFiles,
-                            ToolConsentHandler = consentHandler
-                        },
-                        cts.Token)
-                    .ConfigureAwait(false);
-
-                await using (runtime.ConfigureAwait(false))
+                if (!TryResolveMode(parseResult.GetValue(modeOption), out var mode))
                 {
-                    var sessionId = parseResult.GetValue(sessionOption);
-                    if (suppliedInput is not null)
-                    {
-                        var events = sessionId is null
-                            ? runtime.RunAsync(
-                                BuildNewRunRequest(
-                                    suppliedInput,
-                                    mode,
-                                    selection,
-                                    config,
-                                    agents),
-                                cts.Token)
-                            : runtime.RunAsync(
-                                BuildExistingRunRequest(
-                                    sessionId,
-                                    suppliedInput,
-                                    mode,
-                                    selection,
-                                    config,
-                                    agents),
-                                cts.Token);
-                        var runOutput = outputDestination?.Writer ?? output;
-                        var runOutputWriter = new RunOutputWriter(
-                            runOutput,
-                            error,
-                            outputFormat,
-                            parseResult.GetValue(noStreamOption),
-                            machineOutputRedirected,
-                            message => RedactSecrets(message, config));
-                        var result = await ExecuteOneRunAsync(
-                                events,
-                                runOutputWriter,
-                                cts.Token)
-                            .ConfigureAwait(false);
-                        if (result.ExitCode == ExitCodes.Success && outputDestination is not null)
-                        {
-                            try
-                            {
-                                await outputDestination.CommitAsync(cts.Token).ConfigureAwait(false);
-                            }
-                            catch (Exception ex) when (IsRunOutputException(ex))
-                            {
-                                RunOutputWriter.WriteCommandFailure(
-                                    output,
-                                    error,
-                                    outputFormat,
-                                    machineOutputRedirected,
-                                    "OutputFileCommitError",
-                                    ex.Message);
-                                return ExitCodes.WorkspaceError;
-                            }
-                        }
+                    RunOutputWriter.WriteCommandFailure(
+                        output,
+                        error,
+                        outputFormat,
+                        machineOutputRedirected,
+                        "InvalidMode",
+                        "Mode must be expert, meeting, work, or standalone.");
+                    return ExitCodes.InvalidArguments;
+                }
 
-                        return result.ExitCode;
-                    }
+                if (mode is RuntimeMode.Work && agents.Count < 2)
+                {
+                    RunOutputWriter.WriteCommandFailure(
+                        output,
+                        error,
+                        outputFormat,
+                        machineOutputRedirected,
+                        "InsufficientWorkAgents",
+                        "Work mode requires at least two configured Agents: one manager and one worker.");
+                    return ExitCodes.InvalidArguments;
+                }
 
-                    return await RunReplAsync(
+                var timeout = parseResult.GetValue<int?>("--timeout");
+                using var cts = timeout is > 0
+                    ? new CancellationTokenSource(TimeSpan.FromSeconds(timeout.Value))
+                    : new CancellationTokenSource();
+
+                LocalRuntime runtime;
+                try
+                {
+                    var providerResolver = providerResolverFactory is null
+                        ? StandaloneProviderFactory.Create(config)
+                        : providerResolverFactory(config);
+                    var resolvedMemoryUserHome = memoryUserHome
+                        ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                    ArgumentException.ThrowIfNullOrWhiteSpace(resolvedMemoryUserHome);
+                    var memoryFiles = new MemoryFileService(
+                        Path.GetFullPath(resolvedMemoryUserHome),
+                        context.WorkspaceRoot);
+                    using var consentHandler = StandaloneToolConsentPolicy.IsInteractiveConsentEnabled(
                             terminal,
-                            output,
-                            error,
-                            runtime,
-                            memoryFiles,
-                            sessionId,
-                            mode,
-                            selection,
-                            agents,
-                            config,
-                            replInterruptSource ?? ConsoleReplInterruptSource.Instance,
-                            showWelcome,
+                            outputFormat is RunOutputFormat.Text,
+                            outputFile is not null)
+                        ? new StandaloneToolConsentHandler(
+                            terminal,
+                            new StandaloneToolGrantFactory())
+                        : null;
+                    runtime = await LocalRuntime.StartAsync(
+                            new LocalRuntimeOptions(
+                                context.WorkspaceRoot,
+                                context.DataDirectory,
+                                context.LogDirectory,
+                                context.RuntimeInstanceId,
+                                providerResolver)
+                            {
+                                MemoryFiles = memoryFiles,
+                                ToolConsentHandler = consentHandler,
+                                MinimumLogLevel = minimumLogLevel
+                            },
                             cts.Token)
                         .ConfigureAwait(false);
+
+                    await using (runtime.ConfigureAwait(false))
+                    {
+                        var sessionId = requestedSessionId;
+                        if (suppliedInput is not null)
+                        {
+                            var events = sessionId is null
+                                ? runtime.RunAsync(
+                                    BuildNewRunRequest(
+                                        suppliedInput,
+                                        mode,
+                                        selection,
+                                        config,
+                                        agents),
+                                    cts.Token)
+                                : runtime.RunAsync(
+                                    BuildExistingRunRequest(
+                                        sessionId,
+                                        suppliedInput,
+                                        mode,
+                                        selection,
+                                        config,
+                                        agents),
+                                    cts.Token);
+                            var runOutput = outputDestination?.Writer ?? output;
+                            var runOutputWriter = new RunOutputWriter(
+                                runOutput,
+                                error,
+                                outputFormat,
+                                parseResult.GetValue(noStreamOption),
+                                machineOutputRedirected,
+                                message => RedactSecrets(message, config));
+                            var result = await ExecuteOneRunAsync(
+                                    events,
+                                    runOutputWriter,
+                                    cts.Token)
+                                .ConfigureAwait(false);
+                            if (result.ExitCode == ExitCodes.Success && outputDestination is not null)
+                            {
+                                try
+                                {
+                                    await outputDestination.CommitAsync(cts.Token).ConfigureAwait(false);
+                                }
+                                catch (Exception ex) when (IsRunOutputException(ex))
+                                {
+                                    RunOutputWriter.WriteCommandFailure(
+                                        output,
+                                        error,
+                                        outputFormat,
+                                        machineOutputRedirected,
+                                        "OutputFileCommitError",
+                                        ex.Message);
+                                    return ExitCodes.WorkspaceError;
+                                }
+                            }
+
+                            return result.ExitCode;
+                        }
+
+                        if (announceWorkspaceChange)
+                        {
+                            terminal.Write("工作区：", CliTextStyle.Muted);
+                            terminal.WriteLine(context.WorkspaceRoot, CliTextStyle.Selected);
+                        }
+
+                        var replResult = await RunReplAsync(
+                                terminal,
+                                output,
+                                error,
+                                runtime,
+                                memoryFiles,
+                                sessionId,
+                                mode,
+                                selection,
+                                agents,
+                                config,
+                                replInterruptSource ?? ConsoleReplInterruptSource.Instance,
+                                showWorkspaceWelcome,
+                                cts.Token)
+                            .ConfigureAwait(false);
+                        if (replResult.WorkspaceRoot is null)
+                        {
+                            return replResult.ExitCode;
+                        }
+
+                        requestedWorkspace = replResult.WorkspaceRoot;
+                        requestedSessionId = null;
+                        requestedProvider = replResult.Selection.Provider.Name;
+                        requestedModel = replResult.Selection.Model;
+                        requestedAgent = replResult.Selection.Agent.Id;
+                        showWorkspaceWelcome = false;
+                        announceWorkspaceChange = true;
+                    }
                 }
-            }
-            catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException)
-            {
-                RunOutputWriter.WriteCommandFailure(
-                    output,
-                    error,
-                    outputFormat,
-                    machineOutputRedirected,
-                    "RuntimeError",
-                    RedactSecrets(ex.Message, config));
-                return ExitCodes.WorkspaceError;
+                catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException)
+                {
+                    RunOutputWriter.WriteCommandFailure(
+                        output,
+                        error,
+                        outputFormat,
+                        machineOutputRedirected,
+                        "RuntimeError",
+                        RedactSecrets(ex.Message, config));
+                    return ExitCodes.WorkspaceError;
+                }
             }
         });
 
         return command;
     }
 
-    private static async Task<int> RunReplAsync(
+    private static async Task<ReplLoopResult> RunReplAsync(
         ICliTerminal terminal,
         TextWriter output,
         TextWriter error,
@@ -551,6 +607,8 @@ internal static class ServiceCommands
         bool showWelcome,
         CancellationToken ct)
     {
+        ReplLoopResult Complete(int exitCode) => new(exitCode, null, selection);
+
         var selectionVersion = 1;
         if (sessionId is not null)
         {
@@ -559,7 +617,7 @@ internal static class ServiceCommands
             {
                 await error.WriteLineAsync($"Session '{sessionId}' was not found.")
                     .ConfigureAwait(false);
-                return ExitCodes.InvalidArguments;
+                return Complete(ExitCodes.InvalidArguments);
             }
 
             if (snapshot.Mode != mode)
@@ -567,7 +625,7 @@ internal static class ServiceCommands
                 await error.WriteLineAsync(
                         $"Session '{sessionId}' uses {snapshot.Mode} mode; the current REPL uses {mode} mode.")
                     .ConfigureAwait(false);
-                return ExitCodes.InvalidArguments;
+                return Complete(ExitCodes.InvalidArguments);
             }
 
             selectionVersion = snapshot.SelectionVersion ?? selectionVersion;
@@ -631,7 +689,7 @@ internal static class ServiceCommands
                 {
                     if (interruptState == ReplInterruptState.Exiting)
                     {
-                        return ExitCodes.UserInterrupted;
+                        return Complete(ExitCodes.UserInterrupted);
                     }
 
                     interruptState = ReplInterruptState.Idle;
@@ -646,7 +704,7 @@ internal static class ServiceCommands
                 var userInput = await terminal.ReadLineAsync(exitCts.Token).ConfigureAwait(false);
                 if (userInput is null)
                 {
-                    return ExitCodes.Success;
+                    return Complete(ExitCodes.Success);
                 }
 
                 if (string.IsNullOrWhiteSpace(userInput))
@@ -673,9 +731,17 @@ internal static class ServiceCommands
                     sessionId = commandResult.SessionId;
                     selection = commandResult.Selection;
                     selectionVersion = commandResult.SelectionVersion;
+                    if (commandResult.WorkspaceRoot is { } workspaceRoot)
+                    {
+                        return new ReplLoopResult(
+                            ExitCodes.Success,
+                            workspaceRoot,
+                            selection);
+                    }
+
                     if (commandResult.ExitCode is { } commandExitCode)
                     {
-                        return commandExitCode;
+                        return Complete(commandExitCode);
                     }
 
                     continue;
@@ -698,7 +764,7 @@ internal static class ServiceCommands
                 {
                     if (interruptState == ReplInterruptState.Exiting)
                     {
-                        return ExitCodes.UserInterrupted;
+                        return Complete(ExitCodes.UserInterrupted);
                     }
 
                     activeRunCts = runCts;
@@ -752,7 +818,7 @@ internal static class ServiceCommands
                 sessionId = result.SessionId ?? sessionId;
                 if (exitCts.IsCancellationRequested)
                 {
-                    return ExitCodes.UserInterrupted;
+                    return Complete(ExitCodes.UserInterrupted);
                 }
 
                 if (result.ExitCode == ExitCodes.UserInterrupted && continueAfterCancellation)
@@ -767,13 +833,13 @@ internal static class ServiceCommands
 
                 if (result.ExitCode != ExitCodes.Success)
                 {
-                    return result.ExitCode;
+                    return Complete(result.ExitCode);
                 }
             }
         }
         catch (OperationCanceledException) when (exitCts.IsCancellationRequested)
         {
-            return ExitCodes.UserInterrupted;
+            return Complete(ExitCodes.UserInterrupted);
         }
     }
 
@@ -1306,6 +1372,40 @@ internal static class ServiceCommands
                     terminal.Clear();
                     return Current();
 
+                case "/CD":
+                    if (argument is null)
+                    {
+                        await output.WriteLineAsync($"工作区：{runtime.WorkspaceRoot}")
+                            .ConfigureAwait(false);
+                        return Current();
+                    }
+
+                    if (!TryResolveReplWorkspace(
+                            runtime.WorkspaceRoot,
+                            argument,
+                            out var nextWorkspace,
+                            out var workspaceError))
+                    {
+                        await error.WriteLineAsync(workspaceError).ConfigureAwait(false);
+                        return Current();
+                    }
+
+                    if (ReplPathsEqual(runtime.WorkspaceRoot, nextWorkspace))
+                    {
+                        await output.WriteLineAsync($"工作区：{runtime.WorkspaceRoot}")
+                            .ConfigureAwait(false);
+                        return Current();
+                    }
+
+                    await output.WriteLineAsync($"正在切换工作区：{nextWorkspace}")
+                        .ConfigureAwait(false);
+                    return new ReplCommandResult(
+                        sessionId,
+                        selection,
+                        selectionVersion,
+                        ExitCode: null,
+                        WorkspaceRoot: nextWorkspace);
+
                 case "/STATUS":
                     if (argument is not null)
                     {
@@ -1389,6 +1489,68 @@ internal static class ServiceCommands
             return Current();
         }
     }
+
+    private static bool TryResolveReplWorkspace(
+        string currentWorkspace,
+        string argument,
+        out string workspace,
+        out string error)
+    {
+        workspace = string.Empty;
+        error = string.Empty;
+        var requestedPath = argument.Trim();
+        if (requestedPath.Length >= 2
+            && ((requestedPath[0] == '"' && requestedPath[^1] == '"')
+                || (requestedPath[0] == '\'' && requestedPath[^1] == '\'')))
+        {
+            requestedPath = requestedPath[1..^1].Trim();
+        }
+
+        if (requestedPath.Length == 0)
+        {
+            error = "用法：/cd <path>";
+            return false;
+        }
+
+        try
+        {
+            if (requestedPath == "~"
+                || requestedPath.StartsWith($"~{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                || requestedPath.StartsWith($"~{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal))
+            {
+                var userHome = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                ArgumentException.ThrowIfNullOrWhiteSpace(userHome);
+                requestedPath = requestedPath.Length == 1
+                    ? userHome
+                    : Path.Join(userHome, requestedPath[2..]);
+            }
+
+            workspace = Path.TrimEndingDirectorySeparator(
+                Path.GetFullPath(requestedPath, currentWorkspace));
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException)
+        {
+            error = $"工作区路径无效：{ex.Message}";
+            return false;
+        }
+
+        if (!Directory.Exists(workspace))
+        {
+            error = $"工作区目录不存在：{workspace}";
+            workspace = string.Empty;
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool ReplPathsEqual(string left, string right) =>
+        string.Equals(
+            Path.TrimEndingDirectorySeparator(Path.GetFullPath(left)),
+            Path.TrimEndingDirectorySeparator(Path.GetFullPath(right)),
+            OperatingSystem.IsWindows()
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal);
 
     private static async Task HandleSkillReplCommandAsync(
         LocalRuntime runtime,
@@ -1881,11 +2043,50 @@ internal static class ServiceCommands
             or NotSupportedException
             or UnauthorizedAccessException;
 
+    private static bool TryResolveRuntimeLogLevel(
+        string? configuredLevel,
+        out RuntimeDiagnosticLogLevel level)
+    {
+        var value = string.IsNullOrWhiteSpace(configuredLevel)
+            ? Environment.GetEnvironmentVariable("NETOR_AI_LOG_LEVEL")
+            : configuredLevel;
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            level = RuntimeDiagnosticLogLevel.Warning;
+            return true;
+        }
+
+        switch (value.Trim().ToUpperInvariant())
+        {
+            case "DEBUG":
+                level = RuntimeDiagnosticLogLevel.Debug;
+                return true;
+            case "INFORMATION":
+                level = RuntimeDiagnosticLogLevel.Information;
+                return true;
+            case "WARNING":
+                level = RuntimeDiagnosticLogLevel.Warning;
+                return true;
+            case "ERROR":
+                level = RuntimeDiagnosticLogLevel.Error;
+                return true;
+            default:
+                level = default;
+                return false;
+        }
+    }
+
     private sealed record ReplCommandResult(
         string? SessionId,
         StandaloneSelection Selection,
         int SelectionVersion,
-        int? ExitCode);
+        int? ExitCode,
+        string? WorkspaceRoot = null);
+
+    private sealed record ReplLoopResult(
+        int ExitCode,
+        string? WorkspaceRoot,
+        StandaloneSelection Selection);
 
     private enum ReplInterruptState
     {

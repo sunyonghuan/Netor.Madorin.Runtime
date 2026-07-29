@@ -17,7 +17,7 @@ public static class TestCaseReportExporter
         await JsonSerializer.SerializeAsync(
             stream,
             report,
-            MConsoleJsonContext.Default.TestCaseReport,
+            MConsoleJsonContext.Persistence.TestCaseReport,
             cancellationToken);
     }
 

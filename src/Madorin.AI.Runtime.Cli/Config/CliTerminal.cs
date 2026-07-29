@@ -166,7 +166,8 @@ public sealed class CliTerminal : ICliTerminal
     internal static ConsoleColor ResolveColor(CliTextStyle style) => style switch
     {
         CliTextStyle.Title or CliTextStyle.Command or CliTextStyle.Prompt => ConsoleColor.DarkCyan,
-        CliTextStyle.Parameter or CliTextStyle.Selected => ConsoleColor.White,
+        CliTextStyle.Parameter => ConsoleColor.Gray,
+        CliTextStyle.Selected => ConsoleColor.White,
         CliTextStyle.Success => ConsoleColor.DarkGreen,
         CliTextStyle.Warning => ConsoleColor.DarkYellow,
         CliTextStyle.Error => ConsoleColor.DarkRed,

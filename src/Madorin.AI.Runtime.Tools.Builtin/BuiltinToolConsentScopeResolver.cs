@@ -57,49 +57,49 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
         string toolId,
         JsonElement arguments,
         string workspaceRoot) => toolId switch
-    {
-        BuiltinToolRegistry.FileListToolId => FileReadScope(
-            workspaceRoot,
-            BuiltinFsToolExecutor.GetOptionalString(arguments, "path") ?? ".",
-            "directory listing"),
-        BuiltinToolRegistry.FileStatusToolId => FileReadScope(
-            workspaceRoot,
-            BuiltinFsToolExecutor.GetRequiredString(arguments, "path"),
-            "path metadata"),
-        BuiltinToolRegistry.FileReadToolId => FileReadScope(
-            workspaceRoot,
-            BuiltinFsToolExecutor.GetRequiredString(arguments, "path"),
-            "file read"),
-        BuiltinToolRegistry.FileSearchToolId => FileReadScope(
-            workspaceRoot,
-            BuiltinFsToolExecutor.GetRequiredString(arguments, "path"),
-            "bounded text search"),
-        BuiltinToolRegistry.FileWriteToolId => FileWriteScope(
-            workspaceRoot,
-            BuiltinFsToolExecutor.GetRequiredString(arguments, "path")),
-        BuiltinToolRegistry.FileAppendToolId => FileModifyScope(
-            workspaceRoot,
-            arguments,
-            "append text"),
-        BuiltinToolRegistry.DirectoryCreateToolId => DirectoryCreateScope(
-            workspaceRoot,
-            BuiltinFsToolExecutor.GetRequiredString(arguments, "path")),
-        BuiltinToolRegistry.FileCopyToolId => FileCopyScope(workspaceRoot, arguments),
-        BuiltinToolRegistry.FileMoveToolId => FileMoveScope(workspaceRoot, arguments),
-        BuiltinToolRegistry.FileDeleteToolId => FileDeleteScope(workspaceRoot, arguments),
-        BuiltinToolRegistry.FileEditToolId => FileModifyScope(
-            workspaceRoot,
-            arguments,
-            "edit lines"),
-        BuiltinToolRegistry.MemoryReadToolId => MemoryScope(arguments, "read memory", canGrantForRun: true),
-        BuiltinToolRegistry.MemoryAppendToolId => MemoryScope(arguments, "append memory lines"),
-        BuiltinToolRegistry.MemoryUpdateToolId => MemoryScope(arguments, "update memory lines"),
-        BuiltinToolRegistry.MemoryDeleteToolId => MemoryScope(arguments, "delete memory lines"),
-        BuiltinToolRegistry.ProcessRunToolId => ProcessScope(workspaceRoot, arguments),
-        BuiltinToolRegistry.HttpRequestToolId => HttpScope(arguments),
-        SkillScriptAuthorization.ToolId => ScriptScope(arguments, workspaceRoot),
-        _ => throw new NotSupportedException("The built-in tool scope is unknown.")
-    };
+        {
+            BuiltinToolRegistry.FileListToolId => FileReadScope(
+                workspaceRoot,
+                BuiltinFsToolExecutor.GetOptionalString(arguments, "path") ?? ".",
+                "directory listing"),
+            BuiltinToolRegistry.FileStatusToolId => FileReadScope(
+                workspaceRoot,
+                BuiltinFsToolExecutor.GetRequiredString(arguments, "path"),
+                "path metadata"),
+            BuiltinToolRegistry.FileReadToolId => FileReadScope(
+                workspaceRoot,
+                BuiltinFsToolExecutor.GetRequiredString(arguments, "path"),
+                "file read"),
+            BuiltinToolRegistry.FileSearchToolId => FileReadScope(
+                workspaceRoot,
+                BuiltinFsToolExecutor.GetRequiredString(arguments, "path"),
+                "bounded text search"),
+            BuiltinToolRegistry.FileWriteToolId => FileWriteScope(
+                workspaceRoot,
+                BuiltinFsToolExecutor.GetRequiredString(arguments, "path")),
+            BuiltinToolRegistry.FileAppendToolId => FileModifyScope(
+                workspaceRoot,
+                arguments,
+                "append text"),
+            BuiltinToolRegistry.DirectoryCreateToolId => DirectoryCreateScope(
+                workspaceRoot,
+                BuiltinFsToolExecutor.GetRequiredString(arguments, "path")),
+            BuiltinToolRegistry.FileCopyToolId => FileCopyScope(workspaceRoot, arguments),
+            BuiltinToolRegistry.FileMoveToolId => FileMoveScope(workspaceRoot, arguments),
+            BuiltinToolRegistry.FileDeleteToolId => FileDeleteScope(workspaceRoot, arguments),
+            BuiltinToolRegistry.FileEditToolId => FileModifyScope(
+                workspaceRoot,
+                arguments,
+                "edit lines"),
+            BuiltinToolRegistry.MemoryReadToolId => MemoryScope(arguments, "read memory", canGrantForRun: true),
+            BuiltinToolRegistry.MemoryAppendToolId => MemoryScope(arguments, "append memory lines"),
+            BuiltinToolRegistry.MemoryUpdateToolId => MemoryScope(arguments, "update memory lines"),
+            BuiltinToolRegistry.MemoryDeleteToolId => MemoryScope(arguments, "delete memory lines"),
+            BuiltinToolRegistry.ProcessRunToolId => ProcessScope(workspaceRoot, arguments),
+            BuiltinToolRegistry.HttpRequestToolId => HttpScope(arguments),
+            SkillScriptAuthorization.ToolId => ScriptScope(arguments, workspaceRoot),
+            _ => throw new NotSupportedException("The built-in tool scope is unknown.")
+        };
 
     private static ToolRequestedScope ScriptScope(JsonElement arguments, string workspaceRoot)
     {
@@ -147,7 +147,7 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
             overwrite ? "overwrite existing path" : "create file",
             writeRoots: [path],
             allowOverwrite: overwrite,
-            canGrantForRun: !overwrite);
+            canGrantForRun: true);
     }
 
     private static ToolRequestedScope DirectoryCreateScope(
@@ -159,7 +159,7 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
             BuiltinFsPathPolicy.GetRequestedTargetSummary(workspaceRoot, path),
             "create directory",
             writeRoots: [path],
-            canGrantForRun: !Directory.Exists(path) && !File.Exists(path));
+            canGrantForRun: true);
     }
 
     private static ToolRequestedScope FileCopyScope(string workspaceRoot, JsonElement arguments)
@@ -210,7 +210,8 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
             detail,
             readRoots: [path],
             writeRoots: [path],
-            allowOverwrite: true);
+            allowOverwrite: true,
+            canGrantForRun: true);
     }
 
     private static ToolRequestedScope MemoryScope(
@@ -233,7 +234,13 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
             BuiltinProcessToolExecutor.GetRequiredString(arguments, "fileName"));
         var processArguments = BuiltinProcessRunner.ParseArguments(arguments);
         var standardInput = BuiltinProcessRunner.ParseStandardInput(arguments);
-        var environmentNames = BuiltinProcessRunner.ParseRequestedEnvironmentVariableNames(arguments);
+        var requestedEnvironmentNames = BuiltinProcessRunner.ParseRequestedEnvironmentVariableNames(
+            arguments);
+        var environmentNames = BuiltinProcessRunner.CreateAllowedEnvironmentVariableNames(
+            arguments,
+            SkillScriptEnvironmentPolicy.InheritedVariableNames);
+        var canGrantForRun = requestedEnvironmentNames.All(
+            SkillScriptEnvironmentPolicy.InheritedVariableNames.Contains);
         var workingDirectory = BuiltinFsPathPolicy.ResolveRequestedPath(
             workspaceRoot,
             BuiltinProcessToolExecutor.GetOptionalString(arguments, "workingDirectory")
@@ -243,7 +250,8 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
             $"{processArguments.Length} arguments; stdin {standardInput?.Length ?? 0} characters",
             readRoots: [workingDirectory],
             allowedExecutables: [executable],
-            allowedEnvironmentVariables: environmentNames);
+            allowedEnvironmentVariables: environmentNames,
+            canGrantForRun: canGrantForRun);
     }
 
     private static ToolRequestedScope HttpScope(JsonElement arguments)

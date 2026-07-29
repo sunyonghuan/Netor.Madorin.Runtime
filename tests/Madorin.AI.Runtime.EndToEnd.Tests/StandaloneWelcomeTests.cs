@@ -73,6 +73,9 @@ public sealed class StandaloneWelcomeTests
             write.Value == "[providerId]"
             && write.Style == CliTextStyle.Parameter));
         Assert.IsTrue(terminal.Writes.Any(write =>
+            write.Value == "选择或更新下一轮使用的模型服务商。"
+            && write.Style == CliTextStyle.Muted));
+        Assert.IsTrue(terminal.Writes.Any(write =>
             write.Value == "ready"
             && write.Style == CliTextStyle.Success));
         Assert.IsTrue(terminal.Writes.Any(write =>
@@ -81,10 +84,52 @@ public sealed class StandaloneWelcomeTests
     }
 
     [TestMethod]
+    public void ReplHelpWriter_ListsEveryCommandWithChineseDescriptions()
+    {
+        var terminal = new RecordingTerminal();
+
+        var wroteHelp = ReplHelpWriter.Write(terminal, null);
+
+        Assert.IsTrue(wroteHelp);
+        (string Command, string Description)[] expectedEntries =
+        [
+            ("/model [modelId]", "选择或更新下一轮使用的模型。"),
+            ("/provider [providerId]", "选择或更新下一轮使用的模型服务商。"),
+            ("/agent [agentId]", "选择或更新下一轮使用的智能体。"),
+            ("/memory [global|project|effective]", "查看记忆内容及其来源。"),
+            ("/remember <global|project>", "经交互确认后追加一条记忆。"),
+            ("/mode", "查看当前交互会话中不可变更的工作模式。"),
+            ("/compact", "创建或刷新当前会话的上下文摘要。"),
+            ("/context", "查看规范历史记录和有效上下文投影的统计信息。"),
+            ("/session", "查看当前会话及下一轮选择。"),
+            ("/new", "在下次提交内容时新建会话。"),
+            ("/resume [sessionId]", "列出可恢复的会话，或切换到指定会话。"),
+            ("/export [path]", "将当前会话导出为 Markdown 文件。"),
+            ("/tools", "查看工具及其权限状态。"),
+            ("/skill <list|show <name>|refresh>", "查看或刷新本地技能目录。"),
+            ("/history [positive-count|all]", "查看最近的规范化消息。"),
+            ("/clear", "清空当前交互式控制台，不删除历史记录。"),
+            ("/cd [path]", "查看或切换当前工作区。"),
+            ("/status", "查看运行时、工作区、活动、记忆和工具数量。"),
+            ("/help [command]", "显示命令列表或指定命令的详细帮助。"),
+            ("/exit | /quit", "保存当前会话并退出交互界面。")
+        ];
+        var descriptionColumn = expectedEntries.Max(entry => entry.Command.Length) + 4;
+        var expectedOutput = string.Join(
+            Environment.NewLine,
+            expectedEntries.Select(entry =>
+                $"{entry.Command.PadRight(descriptionColumn)}{entry.Description}"));
+
+        Assert.AreEqual(
+            $"可用命令：{Environment.NewLine}{expectedOutput}{Environment.NewLine}",
+            terminal.Output.ToString());
+    }
+
+    [TestMethod]
     [DataRow(CliTextStyle.Title, ConsoleColor.DarkCyan)]
     [DataRow(CliTextStyle.Command, ConsoleColor.DarkCyan)]
     [DataRow(CliTextStyle.Prompt, ConsoleColor.DarkCyan)]
-    [DataRow(CliTextStyle.Parameter, ConsoleColor.White)]
+    [DataRow(CliTextStyle.Parameter, ConsoleColor.Gray)]
     [DataRow(CliTextStyle.Selected, ConsoleColor.White)]
     [DataRow(CliTextStyle.Success, ConsoleColor.DarkGreen)]
     [DataRow(CliTextStyle.Warning, ConsoleColor.DarkYellow)]

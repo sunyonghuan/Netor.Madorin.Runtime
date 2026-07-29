@@ -21,12 +21,16 @@ public sealed record LocalRuntimeOptions(
     public IToolConsentHandler? ToolConsentHandler { get; init; }
 
     public RuntimeLimits RuntimeLimits { get; init; } = new(
-        MaxToolRounds: 8,
         MaxToolResultBytesPerInvocation: 4 * 1024 * 1024);
 
     public long MaxGlobalBlobBytes { get; init; } = 8L * 1024 * 1024 * 1024;
 
     public TimeSpan WorkspaceLockTimeout { get; init; } = TimeSpan.Zero;
+
+    public RuntimeDiagnosticLogLevel MinimumLogLevel { get; init; } =
+        RuntimeDiagnosticLogLevel.Warning;
+
+    public TimeProvider TimeProvider { get; init; } = TimeProvider.System;
 
     /// <summary>Additional host Skill directories, appended after automatic sources.</summary>
     public IReadOnlyList<SkillSourceDescriptor>? SkillSources { get; init; }
