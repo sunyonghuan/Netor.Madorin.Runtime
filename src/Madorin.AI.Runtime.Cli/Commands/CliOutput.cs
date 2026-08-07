@@ -2,14 +2,13 @@ using System.CommandLine;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
-using System.Text.Unicode;
 
 namespace Madorin.AI.Runtime.Cli.Commands;
 
 internal static class CliOutput
 {
     internal static JavaScriptEncoder ReadableJsonEncoder { get; } =
-        JavaScriptEncoder.Create(UnicodeRanges.All);
+        JavaScriptEncoder.UnsafeRelaxedJsonEscaping;
 
     public static bool IsJson(ParseResult parseResult, Option<bool> jsonOption) =>
         parseResult.GetValue(jsonOption);

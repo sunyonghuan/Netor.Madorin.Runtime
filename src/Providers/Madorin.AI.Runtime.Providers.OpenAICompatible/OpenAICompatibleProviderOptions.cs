@@ -14,4 +14,5 @@ public sealed record OpenAICompatibleProviderOptions(
     string ConfigurationVersion = "1",
     string? ProbePath = "models",
     int MaximumProbeResponseBytes = 65_536,
-    ProviderAuthenticationMode AuthenticationMode = ProviderAuthenticationMode.Required);
+    ProviderAuthenticationMode AuthenticationMode = ProviderAuthenticationMode.Required,
+    string? UserAgent = null);

@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 using Madorin.AI.Runtime.Contracts;
@@ -3299,7 +3300,12 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
     private static string CreateCandidateJson(IReadOnlyList<MeetingParticipant> candidates)
     {
         var buffer = new ArrayBufferWriter<byte>();
-        using var writer = new Utf8JsonWriter(buffer);
+        using var writer = new Utf8JsonWriter(
+            buffer,
+            new JsonWriterOptions
+            {
+                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            });
         writer.WriteStartArray();
         foreach (var candidate in candidates)
         {

@@ -1,7 +1,7 @@
 {
   "$schema": "https://madorin.dev/schemas/stage7-cli-command-matrix/1.0",
   "schemaVersion": 1,
-  "commandCount": 51,
+  "commandCount": 53,
   "globalOptions": [
     "--workspace",
     "--data-dir",
@@ -146,7 +146,7 @@
     {
       "path": "",
       "usage": "madorin [command] [options]",
-      "helpSha256": "ecd25ded0f2ec0b6ad4807362ef5e2e43ec9c5c68c4a5e87d124bb14e553e8e7",
+      "helpSha256": "a5b4297fd56fac3cc9283483d5afa580d1a2819c186ca20e73ac18101ca6b032",
       "options": [],
       "arguments": [],
       "example": ["version"]
@@ -398,6 +398,22 @@
       "options": [],
       "arguments": [{ "name": "scope", "min": 1, "max": 1 }],
       "example": ["memory", "show", "project"]
+    },
+    {
+      "path": "provider",
+      "usage": "madorin provider [command] [options]",
+      "helpSha256": "e51fad4736ae17b37dbf1ebeb9d1f99fd1ddb569623640488eaf65304857711c",
+      "options": [],
+      "arguments": [],
+      "example": ["provider", "protocols"]
+    },
+    {
+      "path": "provider protocols",
+      "usage": "madorin provider protocols [options]",
+      "helpSha256": "036be242eed6f6dac107dfc35ecd244a915019b11dc64a851b6b515baa4043ad",
+      "options": [],
+      "arguments": [],
+      "example": ["provider", "protocols"]
     },
     {
       "path": "run",

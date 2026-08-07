@@ -207,6 +207,37 @@ public sealed class SqliteToolStateStoreTests
     }
 
     [TestMethod]
+    public async Task GrantPersistence_StoresUnicodeStringsWithoutUnicodeEscapes()
+    {
+        await using var connection = await CreateDatabaseAsync();
+        using var store = new SqliteToolIntentRepository(connection);
+        var grant = CreateGrant("grant-unicode", parentGrantId: null, "agent-unicode", DateTimeOffset.UtcNow) with
+        {
+            AllowedReadRoots = ["C:\\工作区\\中文"],
+            AllowedWriteRoots = ["C:\\工作区\\输出"]
+        };
+
+        await store.UpsertGrantAsync(grant, TestContext.CancellationToken);
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT allowed_read_roots, allowed_write_roots FROM tool_grants WHERE grant_id = $grantId;";
+        command.Parameters.AddWithValue("$grantId", grant.GrantId);
+        await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+        Assert.IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        var readRootsJson = reader.GetString(0);
+        var writeRootsJson = reader.GetString(1);
+        StringAssert.Contains(readRootsJson, "中文");
+        StringAssert.Contains(writeRootsJson, "输出");
+        Assert.DoesNotContain("\\u", readRootsJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("\\u", writeRootsJson, StringComparison.OrdinalIgnoreCase);
+
+        var loaded = await store.GetGrantAsync(grant.GrantId, TestContext.CancellationToken);
+        Assert.IsNotNull(loaded);
+        CollectionAssert.AreEqual(grant.AllowedReadRoots, loaded.AllowedReadRoots);
+        CollectionAssert.AreEqual(grant.AllowedWriteRoots, loaded.AllowedWriteRoots);
+    }
+
+    [TestMethod]
     public async Task GrantApprovalAndAudit_RoundTripAndRecursiveRevoke()
     {
         await using var connection = await CreateDatabaseAsync();

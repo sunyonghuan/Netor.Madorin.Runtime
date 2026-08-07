@@ -5,14 +5,13 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using Anthropic;
-using Anthropic.Core;
-using Anthropic.Exceptions;
 using Microsoft.Extensions.AI;
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Contracts.Serialization;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Tools.Abstractions;
+using Netor.Anthropic.Minimal;
+using Netor.Anthropic.Minimal.Extensions;
 
 namespace Madorin.AI.Runtime.Providers.Anthropic;
 
@@ -26,19 +25,7 @@ public sealed class AnthropicProviderAdapter :
         new(StringComparer.Ordinal);
     private readonly IProviderBlobResolver? _blobResolver;
     private readonly ProviderAuthenticationHandler? _credentialHandler;
-    private readonly AnthropicClient? _ownedClient;
-
-    public AnthropicProviderAdapter(
-        IAnthropicClient client,
-        IReadOnlyList<ProviderModel>? models = null,
-        IProviderBlobResolver? blobResolver = null)
-    {
-        ArgumentNullException.ThrowIfNull(client);
-        _chatClientFactory = modelId => client.AsIChatClient(modelId);
-        _blobResolver = blobResolver;
-        ProviderId = "anthropic";
-        Models = models ?? [];
-    }
+    private readonly AnthropicMinimalClient? _ownedClient;
 
     public AnthropicProviderAdapter(
         IChatClient chatClient,
@@ -90,7 +77,7 @@ public sealed class AnthropicProviderAdapter :
             apiKey,
             baseUrl,
             httpClientFactory.CreateClient(providerId),
-            disposeHttpClient: true,
+            disposeHttpClient: false,
             models,
             blobResolver)
     {
@@ -123,15 +110,16 @@ public sealed class AnthropicProviderAdapter :
         {
             Timeout = Timeout.InfiniteTimeSpan
         };
-        var options = new ClientOptions
+        var options = new AnthropicMinimalClientOptions
         {
-            ApiKey = apiKey,
+            // ProviderAuthenticationHandler owns the live credential so rotation
+            // does not require recreating the Minimal client.
+            ApiKey = null,
             BaseUrl = baseUrl.TrimEnd('/'),
             HttpClient = providerHttpClient,
-            MaxRetries = 0,
             Timeout = TimeSpan.FromMinutes(10)
         };
-        _ownedClient = new AnthropicClient(options);
+        _ownedClient = new AnthropicMinimalClient(options);
         _chatClientFactory = modelId => _ownedClient.AsIChatClient(modelId);
         ProviderId = providerId;
         Models = models ?? [];
@@ -241,7 +229,7 @@ public sealed class AnthropicProviderAdapter :
         }
 
         string? finishReason = null;
-        var hasUsage = false;
+        UsageUpdatedProviderEvent? latestUsage = null;
         await using var responseEnumerator = enumerator;
 
         while (true)
@@ -273,7 +261,12 @@ public sealed class AnthropicProviderAdapter :
 
             foreach (var providerEvent in MapUpdate(request, update))
             {
-                hasUsage |= providerEvent is UsageUpdatedProviderEvent;
+                if (providerEvent is UsageUpdatedProviderEvent usage)
+                {
+                    latestUsage = usage;
+                    continue;
+                }
+
                 yield return providerEvent;
             }
         }
@@ -292,14 +285,12 @@ public sealed class AnthropicProviderAdapter :
             yield break;
         }
 
-        if (!hasUsage)
-        {
-            yield return new UsageUpdatedProviderEvent(
+        yield return latestUsage
+            ?? new UsageUpdatedProviderEvent(
                 request.InvocationId,
                 InputTokens: null,
                 OutputTokens: null,
                 ProviderUsageAccuracy.Unknown);
-        }
 
         yield return new InvocationCompletedProviderEvent(request.InvocationId, finishReason!);
     }
@@ -525,22 +516,27 @@ public sealed class AnthropicProviderAdapter :
                     break;
 
                 case FunctionCallContent functionCall:
-                    var argumentsJson = SerializeArguments(functionCall.Arguments);
                     var callId = functionCall.CallId ?? string.Empty;
                     var name = functionCall.Name ?? string.Empty;
                     var toolId = ResolveToolId(request.Tools, name);
 
-                    yield return new ToolCallDeltaProviderEvent(
-                        request.InvocationId,
-                        callId,
-                        name,
-                        argumentsJson);
-                    yield return new ToolCallCompleteProviderEvent(
-                        request.InvocationId,
-                        callId,
-                        toolId,
-                        name,
-                        argumentsJson);
+                    if (TryGetPartialJson(functionCall.Arguments, out var partialJson))
+                    {
+                        yield return new ToolCallDeltaProviderEvent(
+                            request.InvocationId,
+                            callId,
+                            name,
+                            partialJson);
+                    }
+                    else
+                    {
+                        yield return new ToolCallCompleteProviderEvent(
+                            request.InvocationId,
+                            callId,
+                            toolId,
+                            name,
+                            SerializeArguments(functionCall.Arguments));
+                    }
                     break;
 
                 case UsageContent
@@ -616,6 +612,23 @@ public sealed class AnthropicProviderAdapter :
         return Encoding.UTF8.GetString(stream.ToArray());
     }
 
+    private static bool TryGetPartialJson(
+        IDictionary<string, object?>? arguments,
+        out string partialJson)
+    {
+        if (arguments is not null
+            && arguments.Count == 1
+            && arguments.TryGetValue("partial_json", out var value)
+            && value is string partial)
+        {
+            partialJson = partial;
+            return true;
+        }
+
+        partialJson = string.Empty;
+        return false;
+    }
+
     private static void WriteJsonValue(Utf8JsonWriter writer, object? value)
     {
         switch (value)
@@ -665,15 +678,25 @@ public sealed class AnthropicProviderAdapter :
     {
         var statusCode = exception switch
         {
-            AnthropicApiException anthropicException => (int)anthropicException.StatusCode,
+            AnthropicMinimalException anthropicException when anthropicException.StatusCode > 0 =>
+                anthropicException.StatusCode,
             HttpRequestException { StatusCode: { } httpStatus } => (int)httpStatus,
             _ => (int?)null
         };
+
+        var providerCode = exception is AnthropicMinimalException minimalException
+            ? minimalException.ErrorType
+            : null;
         return ProviderErrorFactory.Create(
             "Anthropic",
             exception,
             statusCode,
-            isProtocolError: exception is AnthropicSseException or JsonException);
+            requestId: exception is AnthropicMinimalException error
+                ? error.RequestId
+                : null,
+            isProtocolError: exception is JsonException
+                || exception is AnthropicMinimalException { StatusCode: 0 },
+            providerCode: providerCode);
     }
 
     public void Dispose()

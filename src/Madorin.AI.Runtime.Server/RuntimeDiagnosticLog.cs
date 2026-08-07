@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Globalization;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using Madorin.AI.Runtime.Contracts;
 
@@ -96,7 +97,12 @@ internal sealed class RuntimeDiagnosticLog : IAsyncDisposable
 
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         var buffer = new ArrayBufferWriter<byte>();
-        using (var writer = new Utf8JsonWriter(buffer))
+        using (var writer = new Utf8JsonWriter(
+            buffer,
+            new JsonWriterOptions
+            {
+                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            }))
         {
             writer.WriteStartObject();
             writer.WriteString("timestamp", _timeProvider.GetUtcNow());

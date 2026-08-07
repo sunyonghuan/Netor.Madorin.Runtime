@@ -7,7 +7,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Agents.AI" />
     <PackageReference Include="Microsoft.Extensions.Http" />
-    <PackageReference Include="Netor.Anthropic" />
+    <PackageReference Include="Netor.Anthropic.Minimal.Extensions" />
   </ItemGroup>
 
   <PropertyGroup>

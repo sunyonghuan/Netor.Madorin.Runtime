@@ -110,14 +110,14 @@ public sealed class MemoryToolTests
     public async Task ExecuteAsync_Read_ReturnsCurrentLinesAndHashFromFixedScope()
     {
         var service = CreateMemoryService();
-        const string content = "# Memory\n\n- Read this rule.\n";
+        const string content = "# Memory\n\n- 读取这个规则。\n";
         await service.ReplaceAsync(
             MemoryScope.Project,
             content,
             TestContext.CancellationToken);
         await service.ReplaceAsync(
             MemoryScope.Project,
-            "# Memory\n\n- A newer rule.\n",
+            "# Memory\n\n- 最新规则：每个目录都要有说明。\n",
             TestContext.CancellationToken);
         var executor = new BuiltinMemoryToolExecutor(service);
         var invocation = CreateInvocation(
@@ -129,10 +129,12 @@ public sealed class MemoryToolTests
             TestContext.CancellationToken);
 
         Assert.IsTrue(result.Success, result.Error);
+        StringAssert.Contains(result.OutputJson!, "最新规则：每个目录都要有说明。");
+        Assert.DoesNotContain("\\u6700", result.OutputJson!, StringComparison.OrdinalIgnoreCase);
         using var output = JsonDocument.Parse(result.OutputJson!);
         Assert.AreEqual(3, output.RootElement.GetProperty("lineCount").GetInt32());
         Assert.AreEqual(
-            "- A newer rule.",
+            "- 最新规则：每个目录都要有说明。",
             output.RootElement.GetProperty("lines")[2].GetProperty("text").GetString());
         Assert.AreEqual(
             await service.GetHashAsync(

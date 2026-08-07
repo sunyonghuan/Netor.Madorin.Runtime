@@ -581,6 +581,7 @@ public sealed class ExpertModeOrchestrator(
             providerRequest = providerRequest with
             {
                 Messages = [.. providerMessages],
+                HistoryMessageCount = providerMessages.Count,
                 InternalRequestId = null,
                 AttemptNumber = 0,
                 IsIdempotent = false,

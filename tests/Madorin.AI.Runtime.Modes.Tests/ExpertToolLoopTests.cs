@@ -117,6 +117,9 @@ public sealed class ExpertToolLoopTests
             CollectionAssert.AreEqual(
                 ExpectedSecondRequestRoles,
                 provider.SecondRequest.Messages.Select(static message => message.Role).ToArray());
+            Assert.AreEqual(
+                provider.SecondRequest.Messages.Length,
+                provider.SecondRequest.HistoryMessageCount);
             var result = (ToolResultContentBlock)provider.SecondRequest.Messages[^1].Content[0];
             Assert.IsTrue(result.Success);
             Assert.AreEqual("call-1", result.CallId);
@@ -377,6 +380,9 @@ public sealed class ExpertToolLoopTests
                 Assert.IsNotNull(request.Tools);
                 Assert.IsTrue(request.Tools.Any(static tool =>
                     tool.ToolId == TestToolRegistry.ToolId));
+                yield return new ReasoningDeltaProviderEvent(
+                    request.InvocationId,
+                    "I should use the calculate tool.");
                 yield return new ToolCallCompleteProviderEvent(
                     request.InvocationId,
                     "call-1",
@@ -390,6 +396,11 @@ public sealed class ExpertToolLoopTests
             }
 
             SecondRequest = request;
+            var projectedRequest = ProviderRequestCompatibilityProjector.Project(request, this);
+            Assert.IsFalse(projectedRequest.Messages
+                .SelectMany(static message => message.Content)
+                .OfType<ReasoningContentBlock>()
+                .Any());
             var toolResult = (ToolResultContentBlock)request.Messages[^1].Content[0];
             Assert.AreEqual("call-1", toolResult.CallId);
             yield return new TextDeltaProviderEvent(request.InvocationId, "The answer is 42.");

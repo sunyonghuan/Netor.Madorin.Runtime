@@ -18,6 +18,7 @@ public sealed class ProviderEntry
     public string ApiKey { get; set; } = string.Empty;
     public string AuthenticationHeader { get; set; } = "Authorization";
     public string? AuthenticationScheme { get; set; } = "Bearer";
+    public string? UserAgent { get; set; }
     public string? ApiVersion { get; set; }
     public ProviderCapabilities? Capabilities { get; set; }
     public string ConfigurationVersion { get; set; } = "1";

@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Globalization;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using Madorin.AI.Runtime.Persistence.Abstractions;
 using Microsoft.Data.Sqlite;
@@ -1266,7 +1267,12 @@ public sealed class SqliteToolIntentRepository(SqliteConnection connection) : IT
     private static string SerializeStrings(IEnumerable<string> values)
     {
         var buffer = new ArrayBufferWriter<byte>();
-        using (var writer = new Utf8JsonWriter(buffer))
+        using (var writer = new Utf8JsonWriter(
+            buffer,
+            new JsonWriterOptions
+            {
+                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            }))
         {
             writer.WriteStartArray();
             foreach (var value in values)

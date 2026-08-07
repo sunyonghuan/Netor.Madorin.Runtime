@@ -1,7 +1,6 @@
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Text.Unicode;
 
 namespace Madorin.AI.Runtime.Persistence.Files;
 
@@ -21,7 +20,7 @@ internal sealed partial class ConversationJsonContext : JsonSerializerContext
         internal static readonly ConversationJsonContext Instance = new(
             new JsonSerializerOptions(Default.Options)
             {
-                Encoder = JavaScriptEncoder.Create(UnicodeRanges.All)
+                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
             });
     }
 }

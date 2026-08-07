@@ -80,7 +80,12 @@ public sealed class ProviderConformanceTests
             ProviderAdapterTestFactory.CreateRequest(tools),
             _testContext.CancellationToken);
 
-        var delta = Assert.ContainsSingle(events.OfType<ToolCallDeltaProviderEvent>());
+        var deltas = events.OfType<ToolCallDeltaProviderEvent>().ToArray();
+        Assert.IsNotEmpty(deltas);
+        Assert.AreEqual(
+            "{\"city\":\"Shanghai\"}",
+            string.Concat(deltas.Select(static item => item.ArgumentsDelta)));
+        var delta = deltas[0];
         Assert.AreEqual("call-1", delta.CallId);
         Assert.AreEqual("get_weather", delta.Name);
         var completed = Assert.ContainsSingle(events.OfType<ToolCallCompleteProviderEvent>());

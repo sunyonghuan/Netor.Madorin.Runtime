@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Services.Tools;
@@ -175,7 +176,12 @@ public sealed class AgentFileSkillScriptToolExecutor : IToolExecutor
     private static string SerializeResult(SkillScriptExecutionResult result)
     {
         var buffer = new ArrayBufferWriter<byte>();
-        using (var writer = new Utf8JsonWriter(buffer))
+        using (var writer = new Utf8JsonWriter(
+            buffer,
+            new JsonWriterOptions
+            {
+                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            }))
         {
             writer.WriteStartObject();
             writer.WriteString("skillName", result.SkillName);

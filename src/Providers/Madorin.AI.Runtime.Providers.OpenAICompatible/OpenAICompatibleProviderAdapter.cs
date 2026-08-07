@@ -19,6 +19,7 @@ public sealed class OpenAICompatibleProviderAdapter :
     IDisposable
 {
     private const string NoAuthenticationTransportCredential = "madorin-no-auth";
+    public const string DefaultUserAgent = "Madorin-AI-Runtime/1.0";
 
     private readonly OpenAIProviderAdapter _innerAdapter;
     private readonly ProviderAuthenticationHandler _authenticationHandler;
@@ -109,11 +110,17 @@ public sealed class OpenAICompatibleProviderAdapter :
         _probePath = options.ProbePath;
         _authenticationMode = options.AuthenticationMode;
 
+        var userAgentHandler = new ProviderUserAgentHandler(
+            string.IsNullOrWhiteSpace(options.UserAgent)
+                ? DefaultUserAgent
+                : options.UserAgent,
+            innerHandler);
+
         _authenticationHandler = new ProviderAuthenticationHandler(
             options.AuthenticationHeader,
             options.AuthenticationScheme,
             options.ApiKey,
-            innerHandler,
+            userAgentHandler,
             options.AuthenticationMode);
         _httpClient = new HttpClient(
             new ProviderHttpResponseHandler(_authenticationHandler),
@@ -169,7 +176,8 @@ public sealed class OpenAICompatibleProviderAdapter :
             new("authenticationScheme", ProviderConfigurationValueKind.Text, IsRequired: false),
             new("capabilities", ProviderConfigurationValueKind.Text, IsRequired: true),
             new("models", ProviderConfigurationValueKind.TextArray, IsRequired: true),
-            new("probePath", ProviderConfigurationValueKind.Text, IsRequired: false)
+            new("probePath", ProviderConfigurationValueKind.Text, IsRequired: false),
+            new("userAgent", ProviderConfigurationValueKind.Text, IsRequired: false)
         ]);
 
     public Task ValidateCapabilitiesAsync(ContentBlock[] input, CancellationToken ct = default)

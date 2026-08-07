@@ -212,12 +212,15 @@ public sealed class Stage7CommandMatrixTests
     }
 
     [TestMethod]
-    public void RootCommand_UsesConfigAndOmitsLegacyProvidersGroup()
+    public void RootCommand_UsesConfigAndProviderProtocolsWithoutLegacyProvidersGroup()
     {
         var root = CliApplication.CreateRootCommand(new StringWriter(), new StringReader(string.Empty));
 
         Assert.Contains("config", root.Subcommands.Select(static command => command.Name));
         Assert.DoesNotContain("providers", root.Subcommands.Select(static command => command.Name));
+        var provider = root.Subcommands.Single(static command => command.Name == "provider");
+        Assert.HasCount(1, provider.Subcommands);
+        Assert.AreEqual("protocols", provider.Subcommands[0].Name);
         var config = root.Subcommands.Single(static command => command.Name == "config");
         CollectionAssert.AreEquivalent(
             ConfigSubcommands,

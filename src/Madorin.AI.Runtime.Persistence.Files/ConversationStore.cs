@@ -1777,7 +1777,11 @@ public sealed class ConversationStore
             {
                 await using var writer = new Utf8JsonWriter(
                     stream,
-                    new JsonWriterOptions { Indented = true });
+                    new JsonWriterOptions
+                    {
+                        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+                        Indented = true
+                    });
                 writer.WriteStartObject();
                 writer.WriteString("schema", "madorin.session-deletion.v1");
                 writer.WriteString("sessionId", recoveryPoint.SessionId);

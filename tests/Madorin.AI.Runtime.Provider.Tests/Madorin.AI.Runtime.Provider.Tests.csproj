@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <PackageReference Include="MSTest" />
+    <PackageReference Include="Netor.Anthropic.Minimal" />
   </ItemGroup>
 
   <ItemGroup>

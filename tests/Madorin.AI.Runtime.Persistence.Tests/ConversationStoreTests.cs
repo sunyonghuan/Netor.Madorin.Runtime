@@ -657,7 +657,7 @@ public sealed class ConversationStoreTests
             var store = new ConversationStore(dataDirectory);
             await store.AppendMessageAsync(
                 sessionId,
-                CreateDraft("canonical compact source"),
+                CreateDraft("你好，压缩缓存 <标记>"),
                 TestContext.CancellationToken);
             var canonicalPath = Path.Combine(
                 dataDirectory,
@@ -690,6 +690,14 @@ public sealed class ConversationStoreTests
                 sessionId,
                 cache,
                 TestContext.CancellationToken);
+            var compactJson = await File.ReadAllTextAsync(
+                Path.Combine(dataDirectory, "messages", sessionId + ".compact.json"),
+                Encoding.UTF8,
+                TestContext.CancellationToken);
+            StringAssert.Contains(compactJson, "你好，压缩缓存 <标记>");
+            Assert.DoesNotContain("\\u4f60", compactJson, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("\\u003c", compactJson, StringComparison.OrdinalIgnoreCase);
+
             var restored = await store.ReadCompactCacheAsync(
                 sessionId,
                 TestContext.CancellationToken);

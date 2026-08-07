@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 
 namespace Madorin.AI.Runtime.Persistence.Sqlite;
@@ -178,7 +179,11 @@ public static class DataDirectoryInitializer
             {
                 await using (var writer = new Utf8JsonWriter(
                     stream,
-                    new JsonWriterOptions { Indented = true }))
+                    new JsonWriterOptions
+                    {
+                        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+                        Indented = true
+                    }))
                 {
                     writer.WriteStartObject();
                     writer.WriteString("completedAt", DateTimeOffset.UtcNow);

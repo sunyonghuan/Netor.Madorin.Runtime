@@ -169,6 +169,7 @@ public static class CliApplication
             terminal,
             commandOutput,
             configDirectory));
+        rootCommand.Subcommands.Add(ProviderCommands.Create(jsonOption, commandOutput));
         rootCommand.Subcommands.Add(MemoryCommands.Create(
             jsonOption,
             workspaceOption,

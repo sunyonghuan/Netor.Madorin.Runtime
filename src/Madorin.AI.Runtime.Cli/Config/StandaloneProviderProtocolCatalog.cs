@@ -295,7 +295,8 @@ internal static class StandaloneProviderProtocolCatalog
             entry.Capabilities,
             ToProviderModels(entry.Models),
             entry.ConfigurationVersion,
-            entry.ProbePath);
+            entry.ProbePath,
+            UserAgent: entry.UserAgent);
         return new OpenAICompatibleProviderAdapter(
             options,
             ProviderHttpClientFactory.Shared.CreateClient(entry.Name),

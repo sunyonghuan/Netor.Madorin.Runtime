@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Buffers;
 using System.Collections.Concurrent;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text;
 using Madorin.AI.Runtime.Contracts;
@@ -419,7 +420,12 @@ internal sealed class RuntimeExecutionCore(
         string interpreter)
     {
         var buffer = new ArrayBufferWriter<byte>();
-        using (var writer = new Utf8JsonWriter(buffer))
+        using (var writer = new Utf8JsonWriter(
+            buffer,
+            new JsonWriterOptions
+            {
+                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            }))
         {
             writer.WriteStartObject();
             writer.WriteString("skillName", request.SkillName);
