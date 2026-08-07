@@ -1,0 +1,4 @@
+interface:
+  display_name: "Madorin CLI"
+  short_description: "Operate and integrate Madorin Runtime CLI"
+  default_prompt: "Use $madorin-cli to operate or integrate the Madorin Runtime CLI."
