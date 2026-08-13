@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "运行中断与续跑状态机",
+    "subtitle": "Meeting 与 Work 共用控制面：输入耐久化、安全停靠、Continuation Run",
+    "output": "05-运行控制状态机.html",
+    "viewBox": [980, 660]
+  },
+  "lanes": [
+    { "id": "main", "label": "控制主路径" },
+    { "id": "safety", "label": "输入与安全点" },
+    { "id": "recovery", "label": "恢复与异常" },
+    { "id": "terminal", "label": "终态" }
+  ],
+  "states": [
+    { "id": "running", "type": "start", "label": "执行中", "sublabel": "Run Segment", "lane": "main", "col": 0, "step": "01", "tag": "active" },
+    { "id": "pause_requested", "type": "decision", "label": "暂停已请求", "sublabel": "代次已持久化", "lane": "main", "col": 1, "step": "02", "tag": "durable" },
+    { "id": "safe_point", "type": "active", "label": "安全点收敛", "sublabel": "调用与工具栅栏", "lane": "main", "col": 2, "step": "03", "tag": "fenced" },
+    { "id": "paused", "type": "waiting", "label": "已暂停", "sublabel": "等待补充或恢复", "lane": "main", "col": 3, "step": "04", "tag": "resumable" },
+    { "id": "continuation", "type": "active", "label": "续跑执行", "sublabel": "新的 Run Segment", "lane": "main", "col": 4, "step": "05", "tag": "new-run" },
+    { "id": "input_accepted", "type": "waiting", "label": "补充已入账", "sublabel": "待物化到历史", "lane": "safety", "col": 0, "tag": "idempotent" },
+    { "id": "external_settling", "type": "waiting", "label": "外部副作用收敛", "sublabel": "禁止重复派发", "lane": "safety", "col": 1, "tag": "fence" },
+    { "id": "recovery_required", "type": "decision", "label": "需要人工恢复", "sublabel": "副作用状态未知", "lane": "recovery", "col": 2, "tag": "blocked" },
+    { "id": "cancelled", "type": "failure", "label": "已取消", "sublabel": "用户终止优先", "lane": "terminal", "col": 0, "tag": "terminal" },
+    { "id": "completed", "type": "success", "label": "已完成", "sublabel": "模式正常结束", "lane": "terminal", "col": 1, "tag": "terminal" }
+  ],
+  "transitions": [
+    { "from": "running", "to": "pause_requested", "variant": "emphasis", "route": "straight" },
+    { "from": "pause_requested", "to": "safe_point", "variant": "emphasis", "route": "straight" },
+    { "from": "safe_point", "to": "paused", "variant": "emphasis", "route": "straight" },
+    { "from": "paused", "to": "continuation", "variant": "emphasis", "route": "straight" },
+    { "from": "pause_requested", "to": "input_accepted", "label": "supplement", "variant": "security", "fromSide": "bottom", "toSide": "top", "route": "drop" },
+    { "from": "input_accepted", "to": "paused", "variant": "default", "fromSide": "top", "toSide": "bottom", "via": [[402, 250], [556, 250]] },
+    { "from": "safe_point", "to": "external_settling", "variant": "security", "fromSide": "bottom", "toSide": "top", "via": [[402, 230], [556, 230]] },
+    { "from": "external_settling", "to": "paused", "variant": "default", "fromSide": "top", "toSide": "bottom", "via": [[556, 250]] },
+    { "from": "external_settling", "to": "recovery_required", "variant": "security", "fromSide": "bottom", "toSide": "bottom", "via": [[556, 380], [710, 380]] },
+    { "from": "running", "to": "cancelled", "variant": "security", "fromSide": "bottom", "toSide": "top", "route": "drop" },
+    { "from": "continuation", "to": "completed", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "route": "drop" }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "控制原则",
+      "items": [
+        "暂停结束旧 Run，恢复创建新的 Continuation Run",
+        "补充先进入可重放账本，再物化为 Canonical History",
+        "控制代次和请求哈希阻止重复或乱序操作"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "安全暂停",
+      "items": [
+        "外部工具未收敛前只能是 PauseRequested",
+        "已发工具调用使用既有意图记录去重",
+        "状态未知时进入人工恢复，不猜测结果"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "终态边界",
+      "items": [
+        "取消优先于未完成的暂停和恢复请求",
+        "Interrupted Run 永不复活为 Running",
+        "完成、失败、取消均不能再接受续跑"
+      ]
+    }
+  ]
+}
