@@ -1,9 +1,11 @@
 <Project>
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <MadorinRuntimeContractsVersion>0.1.25</MadorinRuntimeContractsVersion>
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageVersion Include="Madorin.AI.Runtime.Contracts" Version="$(MadorinRuntimeContractsVersion)" />
     <PackageVersion Include="Microsoft.Agents.AI" Version="1.7.0" />
     <PackageVersion Include="Microsoft.Agents.AI.OpenAI" Version="1.7.0" />
     <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.8" />

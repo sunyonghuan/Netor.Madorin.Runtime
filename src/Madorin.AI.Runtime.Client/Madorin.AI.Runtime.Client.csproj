@@ -1,9 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
-    <ProjectReference Include="..\Madorin.AI.Runtime.Contracts\Madorin.AI.Runtime.Contracts.csproj" />
-    <ProjectReference Include="..\Madorin.AI.Runtime.Transport.Abstractions\Madorin.AI.Runtime.Transport.Abstractions.csproj" />
-    <ProjectReference Include="..\Madorin.AI.Runtime.Transport.NamedPipes\Madorin.AI.Runtime.Transport.NamedPipes.csproj" />
+    <PackageReference Include="Madorin.AI.Runtime.Contracts" />
+    <ProjectReference Include="..\Madorin.AI.Runtime.Transport.Abstractions\Madorin.AI.Runtime.Transport.Abstractions.csproj" PrivateAssets="all" />
+    <ProjectReference Include="..\Madorin.AI.Runtime.Transport.NamedPipes\Madorin.AI.Runtime.Transport.NamedPipes.csproj" PrivateAssets="all" />
   </ItemGroup>
 
   <PropertyGroup>
@@ -11,5 +11,14 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
+
+  <Target Name="IncludeClientTransportDependenciesInPackage"
+          DependsOnTargets="BuildOnlySettings;ResolveReferences"
+          BeforeTargets="_GetBuildOutputFilesWithTfm">
+    <ItemGroup>
+      <BuildOutputInPackage Include="$(OutputPath)Madorin.AI.Runtime.Transport.Abstractions.dll" />
+      <BuildOutputInPackage Include="$(OutputPath)Madorin.AI.Runtime.Transport.NamedPipes.dll" />
+    </ItemGroup>
+  </Target>
 
 </Project>

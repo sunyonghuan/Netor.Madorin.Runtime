@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
-    <ProjectReference Include="..\Madorin.AI.Runtime.Contracts\Madorin.AI.Runtime.Contracts.csproj" />
+    <PackageReference Include="Madorin.AI.Runtime.Contracts" />
   </ItemGroup>
 
   <PropertyGroup>

@@ -7,7 +7,15 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\Madorin.AI.Runtime.Entities\Madorin.AI.Runtime.Entities.csproj" />
+    <ProjectReference Include="..\Madorin.AI.Runtime.Entities\Madorin.AI.Runtime.Entities.csproj" PrivateAssets="all" />
   </ItemGroup>
+
+  <Target Name="IncludeContractDependenciesInPackage"
+          DependsOnTargets="BuildOnlySettings;ResolveReferences"
+          BeforeTargets="_GetBuildOutputFilesWithTfm">
+    <ItemGroup>
+      <BuildOutputInPackage Include="$(OutputPath)Madorin.AI.Runtime.Entities.dll" />
+    </ItemGroup>
+  </Target>
 
 </Project>

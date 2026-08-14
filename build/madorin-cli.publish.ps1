@@ -15,10 +15,15 @@ $ErrorActionPreference = 'Stop'
 $BuildDir = [System.IO.Path]::GetFullPath($PSScriptRoot)
 $SolutionDir = [System.IO.Path]::GetFullPath((Join-Path $BuildDir '..'))
 $SolutionFile = Join-Path $SolutionDir 'Madorin.AI.Runtime.slnx'
+$PackageVersionsFile = Join-Path $SolutionDir 'Directory.Packages.props'
 $ProjectFile = Join-Path $SolutionDir 'src/Madorin.AI.Runtime.Cli/Madorin.AI.Runtime.Cli.csproj'
+$ContractsProjectFile = Join-Path $SolutionDir 'src/Madorin.AI.Runtime.Contracts/Madorin.AI.Runtime.Contracts.csproj'
+$ClientProjectFile = Join-Path $SolutionDir 'src/Madorin.AI.Runtime.Client/Madorin.AI.Runtime.Client.csproj'
 $BrandReleaseDirectoryName = 'Madorin-Cli'
+$PackagesDirectoryName = 'Packages'
 $ReleasesDir = Join-Path $SolutionDir 'releases'
 $OutputDir = Join-Path $ReleasesDir $BrandReleaseDirectoryName
+$PackagesDir = Join-Path $ReleasesDir $PackagesDirectoryName
 $CliName = 'madorin-cli'
 $exeFileName = $CliName
 if ($Rid.StartsWith('win')) { $exeFileName = "$CliName.exe" }
@@ -34,6 +39,16 @@ if (-not (Test-Path -LiteralPath $SolutionFile -PathType Leaf)) {
 
 if (-not (Test-Path -LiteralPath $ProjectFile -PathType Leaf)) {
     throw "CLI project file was not found: $ProjectFile"
+}
+
+if (-not (Test-Path -LiteralPath $PackageVersionsFile -PathType Leaf)) {
+    throw "Central package versions file was not found: $PackageVersionsFile"
+}
+
+foreach ($packageProjectFile in $ContractsProjectFile, $ClientProjectFile) {
+    if (-not (Test-Path -LiteralPath $packageProjectFile -PathType Leaf)) {
+        throw "Package project file was not found: $packageProjectFile"
+    }
 }
 
 if (-not (Test-Path -LiteralPath $SkillSourceDir -PathType Container)) {
@@ -85,7 +100,41 @@ function Bump-ProjectVersion {
     return $NewVersion
 }
 
+function Set-ContractsPackageVersion {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Version
+    )
+
+    $packageVersionsContent = Get-Content -Path $PackageVersionsFile -Raw -Encoding UTF8
+    if ([string]::IsNullOrEmpty($packageVersionsContent)) {
+        throw "Central package versions file is empty or could not be read: $PackageVersionsFile"
+    }
+
+    $versionPattern = '<MadorinRuntimeContractsVersion>[^<]+</MadorinRuntimeContractsVersion>'
+    if (-not [regex]::IsMatch($packageVersionsContent, $versionPattern)) {
+        throw "MadorinRuntimeContractsVersion was not found in: $PackageVersionsFile"
+    }
+
+    $packageVersionsContent = [regex]::Replace(
+        $packageVersionsContent,
+        $versionPattern,
+        "<MadorinRuntimeContractsVersion>$Version</MadorinRuntimeContractsVersion>")
+
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($PackageVersionsFile, $packageVersionsContent, $utf8NoBom)
+}
+
 $NewVersion = if ($NoBump) { Get-ProjectVersion } else { Bump-ProjectVersion }
+Set-ContractsPackageVersion -Version $NewVersion
+
+$RestorePackagesRoot = [System.IO.Path]::GetFullPath((Join-Path $SolutionDir 'obj/release-packages'))
+$RestorePackagesDir = [System.IO.Path]::GetFullPath((Join-Path $RestorePackagesRoot $NewVersion))
+$ReleaseNuGetConfigFile = Join-Path $RestorePackagesDir 'NuGet.Config'
+$restoreRootPrefix = $RestorePackagesRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+if (-not $RestorePackagesDir.StartsWith($restoreRootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Restore packages directory escapes the expected root: $RestorePackagesDir"
+}
 
 function Stop-DotNetBuildProcesses {
     Get-Process -Name 'dotnet', 'MSBuild', 'VBCSCompiler' -ErrorAction SilentlyContinue |
@@ -135,7 +184,10 @@ function Invoke-DotNetPublishWithRetry {
         '--self-contained', 'true',
         '-o', $OutputPath,
         '--disable-build-servers',
-        '--nologo'
+        '--nologo',
+        "-p:MadorinRuntimeContractsVersion=$NewVersion",
+        "-p:RestoreConfigFile=$ReleaseNuGetConfigFile",
+        "-p:RestorePackagesPath=$RestorePackagesDir"
     )
     if ($Rebuild) {
         $publishArgs += '-t:Rebuild;Publish'
@@ -153,18 +205,72 @@ function Invoke-DotNetPublishWithRetry {
     & dotnet @publishArgs
 }
 
+function Invoke-DotNetPackWithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Version,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    if ($Rebuild) {
+        Clear-ProjectReleaseCache -ProjectPath $ProjectPath
+    }
+
+    $packArgs = @(
+        'pack',
+        $ProjectPath,
+        '-c', 'Release',
+        '-o', $OutputPath,
+        '--disable-build-servers',
+        '--nologo',
+        "-p:Version=$Version",
+        "-p:PackageVersion=$Version",
+        "-p:AssemblyVersion=$Version",
+        "-p:FileVersion=$Version",
+        "-p:InformationalVersion=$Version",
+        "-p:MadorinRuntimeContractsVersion=$Version",
+        "-p:RestoreConfigFile=$ReleaseNuGetConfigFile",
+        "-p:RestorePackagesPath=$RestorePackagesDir"
+    )
+    & dotnet @packArgs
+
+    if ($LASTEXITCODE -eq 0) {
+        return
+    }
+
+    Write-Host "$Name pack failed, retrying after clearing build servers and NuGet HTTP cache..." -ForegroundColor Yellow
+    Stop-DotNetBuildProcesses
+    Clear-NuGetHttpCache
+
+    & dotnet @packArgs
+}
+
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "  Madorin AI CLI Native AOT Publish" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "Project: $ProjectFile"
-Write-Host "Skill:   $SkillSourceDir"
-Write-Host "Output:  $SkillOutputDir"
-Write-Host "Version: $NewVersion"
+Write-Host "Project:   $ProjectFile"
+Write-Host "Contracts: $ContractsProjectFile"
+Write-Host "Client:    $ClientProjectFile"
+Write-Host "Skill:     $SkillSourceDir"
+Write-Host "Output:    $SkillOutputDir"
+Write-Host "Packages:  $PackagesDir"
+Write-Host "Version:   $NewVersion"
 Write-Host ""
 
 if (-not (Test-Path $OutputDir)) {
     New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
+}
+if (-not (Test-Path $PackagesDir)) {
+    New-Item -ItemType Directory -Path $PackagesDir -Force | Out-Null
 }
 
 $running = Get-Process -Name $CliName -ErrorAction SilentlyContinue
@@ -180,7 +286,7 @@ foreach ($ext in $cleanExts) {
         Remove-Item -Force
 }
 
-Write-Host "[1/4] Copying skill files..." -ForegroundColor Green
+Write-Host "[1/6] Copying skill files..." -ForegroundColor Green
 
 if (Test-Path $SkillOutputDir) {
     Remove-Item $SkillOutputDir -Recurse -Force
@@ -193,7 +299,66 @@ if (Test-Path $BinDir) {
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
 }
 
-Write-Host "[2/4] Publishing CLI (Release | $Rid | AOT)..." -ForegroundColor Green
+if (Test-Path -LiteralPath $RestorePackagesDir -PathType Container) {
+    [System.IO.Directory]::Delete($RestorePackagesDir, $true)
+}
+[System.IO.Directory]::CreateDirectory($RestorePackagesDir) | Out-Null
+
+$escapedPackagesDir = [System.Security.SecurityElement]::Escape($PackagesDir)
+$releaseNuGetConfig = @"
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <packageSources>
+    <clear />
+    <add key="madorin-local" value="$escapedPackagesDir" />
+    <add key="nuget.org" value="https://api.nuget.org/v3/index.json" protocolVersion="3" />
+    <add key="netor.me" value="http://nuget.netor.me/v3/index.json" allowInsecureConnections="true" />
+  </packageSources>
+  <packageSourceMapping>
+    <packageSource key="madorin-local">
+      <package pattern="Madorin.AI.Runtime.*" />
+    </packageSource>
+    <packageSource key="nuget.org">
+      <package pattern="*" />
+    </packageSource>
+    <packageSource key="netor.me">
+      <package pattern="Netor.*" />
+      <package pattern="Madorin.AI.Runtime.*" />
+    </packageSource>
+  </packageSourceMapping>
+</configuration>
+"@
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($ReleaseNuGetConfigFile, $releaseNuGetConfig, $utf8NoBom)
+
+$contractsPackagePath = Join-Path $PackagesDir "Madorin.AI.Runtime.Contracts.$NewVersion.nupkg"
+$clientPackagePath = Join-Path $PackagesDir "Madorin.AI.Runtime.Client.$NewVersion.nupkg"
+$expectedPackages = @($contractsPackagePath, $clientPackagePath)
+
+foreach ($packagePath in $expectedPackages) {
+    if (Test-Path -LiteralPath $packagePath -PathType Leaf) {
+        [System.IO.File]::Delete($packagePath)
+    }
+}
+
+Write-Host "[2/6] Packing Contracts NuGet package (Release | v$NewVersion)..." -ForegroundColor Green
+
+Invoke-DotNetPackWithRetry `
+    -ProjectPath $ContractsProjectFile `
+    -OutputPath $PackagesDir `
+    -Version $NewVersion `
+    -Name 'Contracts'
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Contracts pack failed, exit code: $LASTEXITCODE" -ForegroundColor Red
+    exit $LASTEXITCODE
+}
+
+if (-not (Test-Path -LiteralPath $contractsPackagePath -PathType Leaf)) {
+    throw "Expected Contracts NuGet package was not found: $contractsPackagePath"
+}
+
+Write-Host "[3/6] Publishing CLI (Release | $Rid | AOT)..." -ForegroundColor Green
 
 Invoke-DotNetPublishWithRetry `
     -ProjectPath $ProjectFile `
@@ -205,7 +370,29 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-Write-Host "[3/4] Cleaning extra files..." -ForegroundColor Green
+Write-Host "[4/6] Packing Client NuGet package (Release | v$NewVersion)..." -ForegroundColor Green
+
+Invoke-DotNetPackWithRetry `
+    -ProjectPath $ClientProjectFile `
+    -OutputPath $PackagesDir `
+    -Version $NewVersion `
+    -Name 'Client'
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Client pack failed, exit code: $LASTEXITCODE" -ForegroundColor Red
+    exit $LASTEXITCODE
+}
+
+foreach ($packagePath in $expectedPackages) {
+    if (-not (Test-Path -LiteralPath $packagePath -PathType Leaf)) {
+        throw "Expected NuGet package was not found: $packagePath"
+    }
+
+    $packageSizeKb = [math]::Round((Get-Item -LiteralPath $packagePath).Length / 1KB, 2)
+    Write-Host "  Package: $packagePath (${packageSizeKb} KB)" -ForegroundColor Cyan
+}
+
+Write-Host "[5/6] Cleaning extra files..." -ForegroundColor Green
 $junkExts = @('*.pdb', '*.xml', '*.deps.json', '*.runtimeconfig.dev.json')
 foreach ($ext in $junkExts) {
     Get-ChildItem -Path $BinDir -Filter $ext -File -ErrorAction SilentlyContinue |
@@ -223,7 +410,7 @@ if (Test-Path $exePath) {
     Write-Host "Warning: $exeFileName was not found. Check publish output." -ForegroundColor Yellow
 }
 
-Write-Host "[4/4] Packaging to zip..." -ForegroundColor Green
+Write-Host "[6/6] Packaging CLI to zip..." -ForegroundColor Green
 
 $zipFileName = "$PackageName-v$NewVersion-$Rid.zip"
 $hashFileName = "$PackageName-v$NewVersion-$Rid.sha256"
