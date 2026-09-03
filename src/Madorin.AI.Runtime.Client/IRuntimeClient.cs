@@ -96,4 +96,8 @@ public interface IRuntimeClient : IAsyncDisposable
     public ValueTask UpdateCredentialsAsync(
         CredentialsUpdateParameters parameters,
         CancellationToken cancellationToken = default);
+
+    public ValueTask UpsertProvidersAsync(
+        IReadOnlyList<HostProviderConfig> providers,
+        CancellationToken cancellationToken = default);
 }

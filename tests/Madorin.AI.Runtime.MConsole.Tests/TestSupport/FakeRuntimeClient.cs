@@ -40,6 +40,8 @@ internal sealed class FakeRuntimeClient : IRuntimeClient
 
     public CredentialsUpdateParameters? LastCredentialsUpdate { get; private set; }
 
+    public IReadOnlyList<HostProviderConfig>? LastProviderUpsert { get; private set; }
+
     public SessionResumeResult? ResumeResult { get; set; }
 
     public SessionRehydrateResult? RehydrateResult { get; set; }
@@ -196,6 +198,14 @@ internal sealed class FakeRuntimeClient : IRuntimeClient
         CancellationToken cancellationToken = default)
     {
         LastCredentialsUpdate = parameters;
+        return ValueTask.CompletedTask;
+    }
+
+    public ValueTask UpsertProvidersAsync(
+        IReadOnlyList<HostProviderConfig> providers,
+        CancellationToken cancellationToken = default)
+    {
+        LastProviderUpsert = providers;
         return ValueTask.CompletedTask;
     }
 

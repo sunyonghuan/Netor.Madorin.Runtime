@@ -8,4 +8,5 @@ public sealed record NewSessionRunRequest(
     RuntimeMode Mode,
     NextTurnSelection Selection,
     ContentBlock[] InitialInput,
-    string? WorkspaceId = null);
+    string? WorkspaceId = null,
+    IReadOnlyList<HostProviderConfig>? ProviderConfigs = null);

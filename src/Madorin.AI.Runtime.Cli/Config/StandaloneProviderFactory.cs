@@ -38,12 +38,27 @@ internal static class StandaloneProviderFactory
             ?? throw new InvalidOperationException(
                 $"Provider '{providerId}' is not configured in ~/.madorin/config.json.");
 
-        if (!StandaloneProviderProtocolCatalog.TryGet(entry.Protocol, out var definition))
+        if (!StandaloneProviderProtocolCatalog.TryGet(entry.Protocol, out _))
         {
             throw new InvalidOperationException(
                 $"Provider '{providerId}' uses unsupported protocol '{entry.Protocol}'.");
         }
 
-        return definition!.BuildAdapter(entry);
+        // Shared Protocol → Adapter mapping (host Registry uses the same factory).
+        return Server.RuntimeProviderAdapterFactory.Create(
+            new Server.ProviderConnectionConfig(
+                entry.Name,
+                entry.Protocol,
+                entry.BaseUrl,
+                entry.ApiKey,
+                entry.AuthenticationHeader,
+                entry.AuthenticationScheme,
+                entry.UserAgent,
+                entry.ApiVersion,
+                entry.Models,
+                entry.ConfigurationVersion,
+                entry.Capabilities,
+                entry.ProbePath,
+                entry.MaxTools));
     }
 }

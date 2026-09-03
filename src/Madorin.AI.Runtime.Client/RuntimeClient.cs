@@ -1267,6 +1267,33 @@ public sealed class RuntimeClient : IRuntimeClient
         ThrowIfError(response);
     }
 
+    public async ValueTask UpsertProvidersAsync(
+        IReadOnlyList<HostProviderConfig> providers,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(providers);
+        if (providers.Count == 0)
+        {
+            throw new ArgumentException("At least one provider config is required.", nameof(providers));
+        }
+
+        ThrowIfTerminalFailure();
+        if (State != RuntimeClientState.Connected || _controlChannel is null)
+        {
+            throw new InvalidOperationException("The Runtime client is not connected.");
+        }
+
+        var parameters = new ProvidersUpsertParameters(providers);
+        var payload = JsonSerializer.SerializeToElement(
+            parameters,
+            RuntimeJsonContext.Default.ProvidersUpsertParameters);
+        var response = await _controlChannel.SendRequestAsync(
+            MessageTypes.ProvidersUpsert,
+            payload,
+            cancellationToken).ConfigureAwait(false);
+        ThrowIfError(response);
+    }
+
     public async ValueTask HeartbeatAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfTerminalFailure();

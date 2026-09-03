@@ -38,6 +38,7 @@ public sealed class RuntimeServer : IAsyncDisposable
     private readonly TimeSpan _hostLeaseTimeout;
     private readonly RuntimeLimits _limits;
     private readonly Func<NextTurnSelection, IRuntimeProviderAdapter>? _providerResolver;
+    private readonly HostProviderRegistry? _hostProviderRegistry;
     private readonly RuntimeExecutionCore _executionCore;
     private readonly BlobStagingStore _blobStore;
     private readonly RuntimeDiagnosticLog _diagnosticLog;
@@ -85,7 +86,17 @@ public sealed class RuntimeServer : IAsyncDisposable
         _heartbeatIntervalSeconds = options.HeartbeatIntervalSeconds;
         _hostLeaseTimeout = options.HostLeaseTimeout;
         _limits = options.BlobLimits;
-        _providerResolver = options.ProviderResolver;
+        if (options.ProviderResolver is null)
+        {
+            _hostProviderRegistry = new HostProviderRegistry();
+            _providerResolver = _hostProviderRegistry.CreateResolver();
+        }
+        else
+        {
+            _hostProviderRegistry = null;
+            _providerResolver = options.ProviderResolver;
+        }
+
         _diagnosticLog = diagnosticLog;
         var userHome = options.MemoryUserHome
             ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -1375,6 +1386,9 @@ public sealed class RuntimeServer : IAsyncDisposable
                 return Error(request.Id, -32004, "The Run is not active in this Runtime instance.");
             }
 
+            // Keep host Registry in sync so subsequent Runs resolve the rotated key.
+            _hostProviderRegistry?.TryUpdateCredential(parameters.ProviderId, parameters.Credential);
+
             if (!await credentialRun.UpdateCredentialsAsync(parameters, ct).ConfigureAwait(false))
             {
                 return Error(
@@ -1385,6 +1399,11 @@ public sealed class RuntimeServer : IAsyncDisposable
 
             var result = JsonSerializer.SerializeToElement(true, RuntimeJsonContext.Default.Boolean);
             return new JsonRpcResponse("2.0", request.Id, result);
+        }
+
+        if (string.Equals(request.Method, MessageTypes.ProvidersUpsert, StringComparison.Ordinal))
+        {
+            return CreateProvidersUpsertResponse(request);
         }
 
         return Error(request.Id, -32601, $"Unknown method '{request.Method}'.");
@@ -1835,6 +1854,12 @@ public sealed class RuntimeServer : IAsyncDisposable
             return Error(request.Id, -32602, "The session.selection.update parameters are invalid.");
         }
 
+        var upsertError = TryUpsertProviderConfigs(parameters.ProviderConfigs);
+        if (upsertError is not null)
+        {
+            return Error(request.Id, -32602, upsertError);
+        }
+
         var snapshot = await repository.GetSessionSnapshotAsync(parameters.SessionId, ct)
             .ConfigureAwait(false);
         if (snapshot is null)
@@ -1857,6 +1882,18 @@ public sealed class RuntimeServer : IAsyncDisposable
             if (selection.Mode != snapshot.Mode)
             {
                 return Error(request.Id, -32602, "A Session's mode cannot be changed.");
+            }
+
+            if (_hostProviderRegistry is not null)
+            {
+                var hostError = HostModeSelectionValidator.ValidateForRun(
+                    selection,
+                    snapshot.Mode,
+                    _hostProviderRegistry);
+                if (hostError is not null)
+                {
+                    return Error(request.Id, -32602, hostError);
+                }
             }
         }
         else
@@ -2242,6 +2279,12 @@ public sealed class RuntimeServer : IAsyncDisposable
             return Error(request.Id, -32602, "The Run mode and Selection mode must match.");
         }
 
+        var upsertError = TryUpsertProviderConfigs(runRequest.ProviderConfigs);
+        if (upsertError is not null)
+        {
+            return Error(request.Id, -32602, upsertError);
+        }
+
         switch (runRequest.Mode)
         {
             case RuntimeMode.Expert:
@@ -2281,6 +2324,18 @@ public sealed class RuntimeServer : IAsyncDisposable
                 return Error(request.Id, -32602, $"Run mode '{runRequest.Mode}' is not supported.");
         }
 
+        if (_hostProviderRegistry is not null)
+        {
+            var hostError = HostModeSelectionValidator.ValidateForRun(
+                runRequest.Selection,
+                runRequest.Mode,
+                _hostProviderRegistry);
+            if (hostError is not null)
+            {
+                return Error(request.Id, -32602, hostError);
+            }
+        }
+
         var plan = new RunStartPlan(
             $"new:{runRequest.SessionIdempotencyKey}",
             RuntimeRunMetadata.ComputeRequestHash(runRequest),
@@ -2314,6 +2369,12 @@ public sealed class RuntimeServer : IAsyncDisposable
             || existingRun.InputOverride is not { Length: > 0 })
         {
             return Error(request.Id, -32602, "run.existing_session parameters are invalid.");
+        }
+
+        var upsertError = TryUpsertProviderConfigs(existingRun.ProviderConfigs);
+        if (upsertError is not null)
+        {
+            return Error(request.Id, -32602, upsertError);
         }
 
         var snapshot = await repository.GetSessionSnapshotAsync(existingRun.SessionId, ct)
@@ -2388,12 +2449,25 @@ public sealed class RuntimeServer : IAsyncDisposable
                 return Error(request.Id, -32602, $"run.existing_session does not support mode '{snapshot.Mode}'.");
         }
 
+        if (_hostProviderRegistry is not null)
+        {
+            var hostError = HostModeSelectionValidator.ValidateForRun(
+                effectiveSelection,
+                snapshot.Mode,
+                _hostProviderRegistry);
+            if (hostError is not null)
+            {
+                return Error(request.Id, -32602, hostError);
+            }
+        }
+
         var executionRequest = new NewSessionRunRequest(
             $"existing:{existingRun.SessionId}",
             existingRun.RunIdempotencyKey,
             snapshot.Mode,
             effectiveSelection,
-            existingRun.InputOverride);
+            existingRun.InputOverride,
+            ProviderConfigs: existingRun.ProviderConfigs);
         var plan = new RunStartPlan(
             $"session:{existingRun.SessionId}",
             RuntimeRunMetadata.ComputeRequestHash(existingRun),
@@ -2421,8 +2495,18 @@ public sealed class RuntimeServer : IAsyncDisposable
         {
             DefaultSelection = selection.DefaultSelection with { ProviderId = providerId }
         };
-        var adapter = _providerResolver?.Invoke(providerSelection)
-            ?? new UnavailableProviderAdapter(providerId);
+
+        IRuntimeProviderAdapter adapter;
+        try
+        {
+            adapter = _providerResolver?.Invoke(providerSelection)
+                ?? new UnavailableProviderAdapter(providerId);
+        }
+        catch (InvalidOperationException) when (_hostProviderRegistry is not null)
+        {
+            // Preserve ProviderNotConfigured semantics for host-mode missing Registry entries.
+            adapter = new UnavailableProviderAdapter(providerId);
+        }
 
         if (!string.Equals(adapter.ProviderId, providerId, StringComparison.Ordinal))
         {
@@ -2431,6 +2515,61 @@ public sealed class RuntimeServer : IAsyncDisposable
         }
 
         return adapter;
+    }
+
+    private string? TryUpsertProviderConfigs(IReadOnlyList<HostProviderConfig>? configs)
+    {
+        if (configs is null || configs.Count == 0)
+        {
+            return null;
+        }
+
+        if (_hostProviderRegistry is null)
+        {
+            return "ProviderConfigs require host-mode Provider Registry.";
+        }
+
+        try
+        {
+            _hostProviderRegistry.Upsert(configs);
+            return null;
+        }
+        catch (ArgumentException ex)
+        {
+            return ex.Message;
+        }
+        catch (InvalidOperationException ex)
+        {
+            return ex.Message;
+        }
+    }
+
+    private JsonRpcResponse CreateProvidersUpsertResponse(JsonRpcRequest request)
+    {
+        if (_hostProviderRegistry is null)
+        {
+            return Error(
+                request.Id,
+                -32602,
+                "providers.upsert is only available in host mode.");
+        }
+
+        var parameters = request.Params is { } json
+            ? json.Deserialize(RuntimeJsonContext.Default.ProvidersUpsertParameters)
+            : null;
+        if (parameters?.Providers is null || parameters.Providers.Count == 0)
+        {
+            return Error(request.Id, -32602, "The providers.upsert parameters are invalid.");
+        }
+
+        var upsertError = TryUpsertProviderConfigs(parameters.Providers);
+        if (upsertError is not null)
+        {
+            return Error(request.Id, -32602, upsertError);
+        }
+
+        var result = JsonSerializer.SerializeToElement(true, RuntimeJsonContext.Default.Boolean);
+        return new JsonRpcResponse("2.0", request.Id, result);
     }
 
     private async Task<JsonRpcResponse> StartRunResponseAsync(
@@ -2442,16 +2581,18 @@ public sealed class RuntimeServer : IAsyncDisposable
         CancellationToken ct)
     {
         var runRequest = plan.ExecutionRequest;
-        var primaryProviderId = runRequest.Selection.ModeOptions switch
-        {
-            ExpertModeOptions expert => expert.Agent.ProviderId
-                ?? runRequest.Selection.DefaultSelection.ProviderId,
-            MeetingModeOptions => runRequest.Selection.DefaultSelection.ProviderId,
-            WorkModeOptions work => work.GeneralManager.ProviderId
-                ?? runRequest.Selection.DefaultSelection.ProviderId,
-            _ => throw new NotSupportedException(
-                $"Mode '{runRequest.Selection.ModeOptions.GetType().Name}' is not supported.")
-        };
+        var primaryProviderId = _hostProviderRegistry is not null
+            ? HostModeSelectionValidator.ResolvePrimaryProviderId(runRequest.Selection)
+            : runRequest.Selection.ModeOptions switch
+            {
+                ExpertModeOptions expert => expert.Agent.ProviderId
+                    ?? runRequest.Selection.DefaultSelection.ProviderId,
+                MeetingModeOptions => runRequest.Selection.DefaultSelection.ProviderId,
+                WorkModeOptions work => work.GeneralManager.ProviderId
+                    ?? runRequest.Selection.DefaultSelection.ProviderId,
+                _ => throw new NotSupportedException(
+                    $"Mode '{runRequest.Selection.ModeOptions.GetType().Name}' is not supported.")
+            };
         if (_activeRunRequests.TryGetValue(
             runRequest.RunIdempotencyKey,
             out var existingRequest))

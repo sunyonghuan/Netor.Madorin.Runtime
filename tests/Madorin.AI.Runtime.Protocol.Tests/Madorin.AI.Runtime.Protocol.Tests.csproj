@@ -17,6 +17,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Madorin.AI.Runtime.Contracts\Madorin.AI.Runtime.Contracts.csproj" />
+    <ProjectReference Include="..\..\src\Madorin.AI.Runtime.Entities\Madorin.AI.Runtime.Entities.csproj" />
     <ProjectReference Include="..\..\src\Madorin.AI.Runtime.Transport.Abstractions\Madorin.AI.Runtime.Transport.Abstractions.csproj" />
   </ItemGroup>
 

@@ -9,4 +9,5 @@ public sealed record SessionSelectionUpdateParameters(
     string SessionId,
     int ExpectedSelectionVersion,
     NextTurnSelection? Selection = null,
-    MeetingParticipantPatch[]? MeetingPatches = null);
+    MeetingParticipantPatch[]? MeetingPatches = null,
+    IReadOnlyList<HostProviderConfig>? ProviderConfigs = null);

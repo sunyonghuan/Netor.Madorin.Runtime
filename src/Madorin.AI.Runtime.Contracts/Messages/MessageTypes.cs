@@ -32,6 +32,7 @@ public static class MessageTypes
     public const string RunStatusChanged = "run.stage.changed";
     public const string CredentialsRefreshRequested = "credentials.refresh.request";
     public const string CredentialsUpdate = "credentials.update";
+    public const string ProvidersUpsert = "providers.upsert";
     public const string ToolCatalogReplace = "tool.catalog.replace";
     public const string ToolCatalogPatch = "tool.catalog.patch";
     public const string ToolPermissionRequest = "tool.permission.request";

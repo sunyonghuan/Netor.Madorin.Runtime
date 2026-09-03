@@ -5,4 +5,5 @@ public sealed record ExistingSessionRunRequest(
     string RunIdempotencyKey,
     NextTurnSelection? TurnOverride = null,
     ContentBlock[]? InputOverride = null,
-    int? ExpectedSelectionVersion = null);
+    int? ExpectedSelectionVersion = null,
+    IReadOnlyList<HostProviderConfig>? ProviderConfigs = null);
