@@ -517,9 +517,7 @@ Run 结束 + 再发送：
 | F06 | 进程与 Gateway |
 | F09 | 设置与凭据材料库。疑点 A：**本文 §5.2 / §3.6 提供闭合输入**；台账关闭归 F09 回写 + 总纲，本文不替代关闭 |
 
-Workstation 仓主文（相对 `Madorin/`）：`../Netor.Madorin.Workstation/docs/CLI/开发文档/22-宿主模式配置注入与Selection颗粒度.md`。
-
-本文为 Runtime 仓同步副本（编号 08）。
+权威位置：本文件（Ai.Runtime 方案设计）。Workstation 开发文档不再保留独立策划副本；宿主接入落地见 `docs/开发文档/04-宿主集成指南` 与 Workstation `docs/CLI/开发文档/04-宿主集成指南`。
 
 ---
 
