@@ -73,6 +73,10 @@ public interface IRuntimeClient : IAsyncDisposable
         SessionMessagesListParameters parameters,
         CancellationToken cancellationToken = default);
 
+    public ValueTask<SessionHistoryReadResult> ReadSessionHistoryAsync(
+        SessionHistoryReadParameters parameters,
+        CancellationToken cancellationToken = default);
+
     public ValueTask<NextTurnSelection> UpdateSessionSelectionAsync(
         SessionSelectionUpdateParameters parameters,
         CancellationToken cancellationToken = default);

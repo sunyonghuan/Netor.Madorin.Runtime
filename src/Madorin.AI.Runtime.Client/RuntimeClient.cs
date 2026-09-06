@@ -1128,6 +1128,18 @@ public sealed class RuntimeClient : IRuntimeClient
             cancellationToken).ConfigureAwait(false);
     }
 
+    public async ValueTask<SessionHistoryReadResult> ReadSessionHistoryAsync(
+        SessionHistoryReadParameters parameters,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(parameters);
+        return await SendControlRequestAsync(
+            MessageTypes.SessionHistoryRead,
+            parameters,
+            RuntimeJsonContext.Default.SessionHistoryReadResult,
+            cancellationToken).ConfigureAwait(false);
+    }
+
     public async ValueTask<NextTurnSelection> UpdateSessionSelectionAsync(
         SessionSelectionUpdateParameters parameters,
         CancellationToken cancellationToken = default)

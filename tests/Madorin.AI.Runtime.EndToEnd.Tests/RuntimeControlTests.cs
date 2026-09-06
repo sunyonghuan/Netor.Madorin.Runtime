@@ -670,6 +670,17 @@ public sealed class RuntimeControlTests
                 firstPage.Messages[^1].Sequence,
                 secondPage.Messages[0].Sequence);
 
+            var history = await client.ReadSessionHistoryAsync(
+                new SessionHistoryReadParameters(firstRun.SessionId, PageSize: 100),
+                timeout.Token);
+            Assert.IsGreaterThanOrEqualTo(2, history.Messages.Length);
+            Assert.IsTrue(
+                history.Messages.Any(static message =>
+                    message.Content.OfType<TextContentBlock>().Any(static block =>
+                        !string.IsNullOrWhiteSpace(block.Text))),
+                "session.history.read must return message text.");
+            Assert.AreEqual("user", history.Messages[0].Role.ToLowerInvariant());
+
             shutdown.Cancel();
             await serverTask;
         }

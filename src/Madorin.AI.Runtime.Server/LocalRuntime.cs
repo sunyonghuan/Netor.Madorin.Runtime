@@ -343,6 +343,54 @@ public sealed class LocalRuntime : IAsyncDisposable
             hasMore ? messages[^1].Sequence : null);
     }
 
+    /// <summary>Reads canonical Session history with content blocks.</summary>
+    public async Task<SessionHistoryReadResult> ReadSessionHistoryAsync(
+        SessionHistoryReadParameters parameters,
+        CancellationToken ct = default)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(parameters);
+        ArgumentException.ThrowIfNullOrWhiteSpace(parameters.SessionId);
+        if (parameters.PageSize is < 1 or > 500)
+        {
+            throw new ArgumentOutOfRangeException(nameof(parameters));
+        }
+
+        if (parameters.Cursor is < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(parameters));
+        }
+
+        if (!TryParseBlobMode(parameters.BlobMode, out var blobMode))
+        {
+            throw new ArgumentOutOfRangeException(nameof(parameters));
+        }
+
+        if (await GetSessionSnapshotAsync(parameters.SessionId, ct).ConfigureAwait(false) is null)
+        {
+            throw new KeyNotFoundException($"Session '{parameters.SessionId}' was not found.");
+        }
+
+        var store = new ConversationStore(_dataDirectory);
+        var page = await store.ReadPageAsync(
+                parameters.SessionId,
+                parameters.Cursor,
+                parameters.PageSize + 1,
+                new ConversationReadOptions(blobMode),
+                ct)
+            .ConfigureAwait(false);
+        var hasMore = page.Count > parameters.PageSize;
+        var messages = page.Take(parameters.PageSize)
+            .Select(record => MapHistoryMessage(
+                record,
+                parameters.IncludeReasoning,
+                parameters.IncludeToolCalls))
+            .ToArray();
+        return new SessionHistoryReadResult(
+            messages,
+            hasMore && messages.Length > 0 ? messages[^1].Sequence : null);
+    }
+
     /// <summary>Reads the canonical message history for Session export.</summary>
     public async Task<IReadOnlyList<ConversationRecordV1>> ReadSessionHistoryAsync(
         string sessionId,
@@ -1468,6 +1516,77 @@ public sealed class LocalRuntime : IAsyncDisposable
         }
 
         return (int)Math.Min(int.MaxValue, (utf8Bytes + 3) / 4);
+    }
+
+    internal static bool TryParseBlobMode(string? blobMode, out ConversationBlobReadMode mode)
+    {
+        switch (blobMode?.Trim().ToLowerInvariant())
+        {
+            case null:
+            case "":
+            case "metadata":
+                mode = ConversationBlobReadMode.Metadata;
+                return true;
+            case "omit":
+                mode = ConversationBlobReadMode.Omit;
+                return true;
+            case "stream":
+                mode = ConversationBlobReadMode.Stream;
+                return true;
+            default:
+                mode = ConversationBlobReadMode.Metadata;
+                return false;
+        }
+    }
+
+    internal static SessionHistoryMessage MapHistoryMessage(
+        ConversationRecordV1 record,
+        bool includeReasoning,
+        bool includeToolCalls)
+    {
+        var blocks = DeserializeHistoryContent(record.Content)
+            .Where(block => block switch
+            {
+                ReasoningContentBlock => includeReasoning,
+                ToolCallContentBlock or ToolResultContentBlock => includeToolCalls,
+                _ => true
+            })
+            .ToArray();
+        return new SessionHistoryMessage(
+            record.MessageId,
+            record.Sequence,
+            record.InvocationId,
+            record.AgentId,
+            record.Role,
+            record.Timestamp,
+            blocks);
+    }
+
+    private static ContentBlock[] DeserializeHistoryContent(JsonElement content)
+    {
+        if (content.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
+        {
+            return [];
+        }
+
+        if (content.ValueKind is JsonValueKind.Array)
+        {
+            try
+            {
+                return content.Deserialize(RuntimeJsonContext.Default.ContentBlockArray) ?? [];
+            }
+            catch (JsonException)
+            {
+                return [new TextContentBlock(content.GetRawText())];
+            }
+        }
+
+        if (content.ValueKind is JsonValueKind.String)
+        {
+            return [new TextContentBlock(content.GetString() ?? string.Empty)];
+        }
+
+        return [new TextContentBlock(content.GetRawText())];
     }
 
     private static bool IsMatchingCompactCache(

@@ -1191,6 +1191,12 @@ public sealed class RuntimeServer : IAsyncDisposable
                 .ConfigureAwait(false);
         }
 
+        if (string.Equals(request.Method, MessageTypes.SessionHistoryRead, StringComparison.Ordinal))
+        {
+            return await CreateSessionHistoryReadResponseAsync(request, repository, ct)
+                .ConfigureAwait(false);
+        }
+
         if (string.Equals(request.Method, MessageTypes.SessionSelectionUpdate, StringComparison.Ordinal))
         {
             return await CreateSessionSelectionUpdateResponseAsync(request, repository, ct)
@@ -1832,6 +1838,54 @@ public sealed class RuntimeServer : IAsyncDisposable
         var payload = JsonSerializer.SerializeToElement(
             result,
             RuntimeJsonContext.Default.SessionMessagesListResult);
+        return new JsonRpcResponse("2.0", request.Id, payload);
+    }
+
+    private async Task<JsonRpcResponse> CreateSessionHistoryReadResponseAsync(
+        JsonRpcRequest request,
+        SqliteSessionRepository repository,
+        CancellationToken ct)
+    {
+        var parameters = request.Params is { } json
+            ? json.Deserialize(RuntimeJsonContext.Default.SessionHistoryReadParameters)
+            : null;
+        if (parameters is null
+            || string.IsNullOrWhiteSpace(parameters.SessionId)
+            || parameters.PageSize is <= 0 or > 500
+            || parameters.Cursor is < 0
+            || !LocalRuntime.TryParseBlobMode(parameters.BlobMode, out var blobMode))
+        {
+            return Error(request.Id, -32602, "The session.history.read parameters are invalid.");
+        }
+
+        var snapshot = await repository.GetSessionSnapshotAsync(parameters.SessionId, ct)
+            .ConfigureAwait(false);
+        if (snapshot is null)
+        {
+            return Error(request.Id, -32004, $"Session '{parameters.SessionId}' was not found.");
+        }
+
+        var store = new ConversationStore(_dataDirectory);
+        var page = await store.ReadPageAsync(
+                parameters.SessionId,
+                parameters.Cursor,
+                parameters.PageSize + 1,
+                new ConversationReadOptions(blobMode),
+                ct)
+            .ConfigureAwait(false);
+        var hasMore = page.Count > parameters.PageSize;
+        var messages = page.Take(parameters.PageSize)
+            .Select(record => LocalRuntime.MapHistoryMessage(
+                record,
+                parameters.IncludeReasoning,
+                parameters.IncludeToolCalls))
+            .ToArray();
+        var result = new SessionHistoryReadResult(
+            messages,
+            hasMore && messages.Length > 0 ? messages[^1].Sequence : null);
+        var payload = JsonSerializer.SerializeToElement(
+            result,
+            RuntimeJsonContext.Default.SessionHistoryReadResult);
         return new JsonRpcResponse("2.0", request.Id, payload);
     }
 

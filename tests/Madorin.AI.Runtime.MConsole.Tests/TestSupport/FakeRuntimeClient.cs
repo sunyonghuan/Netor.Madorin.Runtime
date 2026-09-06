@@ -153,6 +153,11 @@ internal sealed class FakeRuntimeClient : IRuntimeClient
         CancellationToken cancellationToken = default) =>
         throw new NotSupportedException();
 
+    public ValueTask<SessionHistoryReadResult> ReadSessionHistoryAsync(
+        SessionHistoryReadParameters parameters,
+        CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException();
+
     public ValueTask<NextTurnSelection> UpdateSessionSelectionAsync(
         SessionSelectionUpdateParameters parameters,
         CancellationToken cancellationToken = default) =>
