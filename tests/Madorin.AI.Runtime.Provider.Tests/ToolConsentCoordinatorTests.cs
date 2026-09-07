@@ -315,7 +315,15 @@ public sealed class ToolConsentCoordinatorTests
         ToolIntentStatus expected)
     {
         var intent = await store.GetIntentAsync(invocation.CallId);
-        Assert.IsNotNull(intent);
+        // Authorize-before-begin: consent denied/cancelled before Grant may never create a CallId.
+        if (intent is null)
+        {
+            Assert.IsTrue(
+                expected is ToolIntentStatus.Failed or ToolIntentStatus.Cancelled,
+                "Missing intent is only valid for pre-begin consent failure/cancel.");
+            return;
+        }
+
         Assert.AreEqual(expected, intent.Status);
         Assert.AreNotEqual(ToolIntentStatus.Pending, intent.Status);
         Assert.IsNotNull(intent.CompletedAt);
@@ -408,10 +416,9 @@ public sealed class ToolConsentCoordinatorTests
                 Catalog,
                 ct);
             Assert.AreEqual(expected, pending.Kind);
+            // NeedsPermission/Approval must not reserve a CallId before Grant.
             var intent = await Store.GetIntentAsync(invocation.CallId, ct);
-            Assert.IsNotNull(intent);
-            Assert.AreEqual(ToolIntentStatus.Pending, intent.Status);
-            Assert.IsNull(intent.CompletedAt);
+            Assert.IsNull(intent);
             return pending;
         }
 

@@ -446,7 +446,7 @@ public sealed class ToolGatewayTests
     }
 
     [TestMethod]
-    public async Task ExecuteAsync_PrepareFails_CompletesPendingIntentAsFailed()
+    public async Task ExecuteAsync_PrepareFails_DoesNotReserveCallId()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync(TestContext.CancellationToken);
@@ -479,13 +479,11 @@ public sealed class ToolGatewayTests
         Assert.AreEqual(RuntimeErrorCodes.ToolExecutionFailed, result.Error?.Code);
         Assert.AreEqual(1, executor.PreparationCount);
         Assert.AreEqual(0, executor.ExecutionCount);
+        // Prepare runs before TryBegin: failure must not leave a CallId intent.
         var intent = await repository.GetIntentAsync(
             invocation.CallId,
             TestContext.CancellationToken);
-        Assert.IsNotNull(intent);
-        Assert.AreEqual(ToolIntentStatus.Failed, intent.Status);
-        Assert.AreEqual(RuntimeErrorCodes.ToolExecutionFailed, intent.ErrorCode);
-        Assert.IsNotNull(intent.CompletedAt);
+        Assert.IsNull(intent);
         Assert.IsEmpty(await repository.ListRecoverableIntentsAsync(
             TestContext.CancellationToken));
     }

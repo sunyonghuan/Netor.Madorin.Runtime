@@ -121,28 +121,17 @@ public sealed class ToolGateway(
             SHA256.HashData(Encoding.UTF8.GetBytes(invocation.ArgumentsJson)));
         var requestedPermission = permission ?? invocation.PermissionContext;
 
-        // Authorize before creating a tool intent so NeedsPermission/Approval does not
-        // leave a pending CallId that later collides when catalog version advances
-        // (e.g. after tool_search inject) and consent re-enters ExecuteAsync.
-        var authorization = await _authorizationService.AuthorizeAsync(
+        // Lifecycle (durable against search-inject + consent re-entry):
+        // 1) Replay existing CallId (terminal / Sent) before auth.
+        // 2) Authorize (NeedsApproval/Permission) with no intent reserved.
+        // 3) Prepare (may still request permission) with no intent reserved.
+        // 4) TryBegin only after prepare succeeds, then MarkSent + execute.
+        var existingResult = await TryResolveExistingExecutionAsync(
             invocation,
-            descriptor,
-            requestedPermission,
-            ct).ConfigureAwait(false);
-        if (authorization.Decision is not ToolAuthorizationDecision.Granted
-            || authorization.EffectivePermission is null)
-        {
-            return ToAuthorizationResult(invocation, descriptor, authorization);
-        }
-
-        var existingResult = await TryBeginExecutionAsync(
-            invocation,
-            descriptor,
             catalogSnapshot.EffectiveVersion,
             argumentsHash,
             requestedPermission,
-            ct)
-            .ConfigureAwait(false);
+            ct).ConfigureAwait(false);
         var isIdempotentResend = false;
         if (existingResult is not null)
         {
@@ -167,6 +156,17 @@ public sealed class ToolGateway(
             {
                 return existingResult;
             }
+        }
+
+        var authorization = await _authorizationService.AuthorizeAsync(
+            invocation,
+            descriptor,
+            requestedPermission,
+            ct).ConfigureAwait(false);
+        if (authorization.Decision is not ToolAuthorizationDecision.Granted
+            || authorization.EffectivePermission is null)
+        {
+            return ToAuthorizationResult(invocation, descriptor, authorization);
         }
 
         var effectivePermission = authorization.EffectivePermission;
@@ -205,7 +205,8 @@ public sealed class ToolGateway(
                 isIdempotentResend ? ToolIntentStatus.Sent : ToolIntentStatus.Pending,
                 ToolIntentStatus.Cancelled,
                 RuntimeErrorCodes.ToolExecutionCancelled,
-                CancellationToken.None).ConfigureAwait(false);
+                CancellationToken.None,
+                tolerateMissingIntent: !isIdempotentResend).ConfigureAwait(false);
             throw;
         }
         catch (OperationCanceledException)
@@ -220,7 +221,8 @@ public sealed class ToolGateway(
                 isIdempotentResend ? ToolIntentStatus.Sent : ToolIntentStatus.Pending,
                 ToolIntentStatus.Failed,
                 RuntimeErrorCodes.ToolExecutionTimedOut,
-                ct).ConfigureAwait(false);
+                ct,
+                tolerateMissingIntent: !isIdempotentResend).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is JsonException
             or ArgumentException
@@ -239,7 +241,24 @@ public sealed class ToolGateway(
                 isIdempotentResend ? ToolIntentStatus.Sent : ToolIntentStatus.Pending,
                 ToolIntentStatus.Failed,
                 RuntimeErrorCodes.ToolExecutionFailed,
+                ct,
+                tolerateMissingIntent: !isIdempotentResend).ConfigureAwait(false);
+        }
+
+        if (!isIdempotentResend)
+        {
+            existingResult = await TryBeginExecutionAsync(
+                invocation,
+                descriptor,
+                catalogSnapshot.EffectiveVersion,
+                argumentsHash,
+                requestedPermission,
                 ct).ConfigureAwait(false);
+            if (existingResult is not null)
+            {
+                await prepared.DisposeAsync().ConfigureAwait(false);
+                return existingResult;
+            }
         }
 
         await using var preparedScope = prepared;
@@ -466,6 +485,48 @@ public sealed class ToolGateway(
     public void Dispose()
     {
         _persistenceGate.Dispose();
+    }
+
+    /// <summary>
+    /// Returns a gateway result for an already-recorded CallId without creating a new intent.
+    /// Pending orphans (should be rare after authorize-before-begin) surface as in-progress.
+    /// </summary>
+    private async Task<ToolGatewayResult?> TryResolveExistingExecutionAsync(
+        ToolInvocation invocation,
+        string catalogVersion,
+        string argumentsHash,
+        ToolPermissionContext? permission,
+        CancellationToken ct)
+    {
+        await _persistenceGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var workStepId = permission?.StepId ?? invocation.WorkStepId;
+            var planVersion = permission?.PlanVersion ?? invocation.PlanVersion;
+            if (!string.IsNullOrWhiteSpace(workStepId)
+                && !string.IsNullOrWhiteSpace(planVersion))
+            {
+                // Work-step completed replay is handled in TryBegin after grant when descriptor is known.
+            }
+
+            var existing = await _stateStore.GetIntentAsync(invocation.CallId, ct)
+                .ConfigureAwait(false);
+            if (existing is null)
+            {
+                return null;
+            }
+
+            return ValidateExistingIdentity(existing, invocation, catalogVersion, argumentsHash)
+                ?? ToExistingResult(existing)
+                ?? Failed(
+                    RuntimeErrorCodes.ToolCallInProgress,
+                    $"Tool call '{invocation.CallId}' is waiting to be sent.",
+                    isRetryable: true);
+        }
+        finally
+        {
+            _persistenceGate.Release();
+        }
     }
 
     private async Task<ToolGatewayResult?> TryBeginExecutionAsync(

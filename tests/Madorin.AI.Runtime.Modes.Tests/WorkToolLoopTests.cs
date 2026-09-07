@@ -194,13 +194,9 @@ public sealed class WorkToolLoopTests
             Assert.AreEqual(1, provider.WorkerCallCount);
             Assert.IsNull(provider.WorkerContinuationRequest);
 
+            // No effective Grant → NeedsPermission path; authorize-before-begin leaves no CallId.
             var intent = await toolState.GetIntentAsync("call-work-1", ct);
-            Assert.IsNotNull(intent);
-            Assert.AreEqual(ToolIntentStatus.Pending, intent.Status);
-            Assert.AreEqual("worker", intent.AgentId);
-            Assert.AreEqual("manager", intent.ParentAgentId);
-            Assert.AreEqual("run-1:step-1", intent.WorkStepId);
-            Assert.AreEqual("1", intent.PlanVersion);
+            Assert.IsNull(intent);
         }
         finally
         {
