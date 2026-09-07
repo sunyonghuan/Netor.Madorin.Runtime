@@ -1,4 +1,4 @@
-using Madorin.AI.Runtime.Providers.Abstractions;
+﻿using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Tools.Abstractions;
 using Madorin.AI.Runtime.Tools.Builtin;
 
@@ -31,6 +31,22 @@ public sealed class ProviderToolNamePolicyTests
         var tool = CreateTool("host.weather", "get_weather");
 
         Assert.AreEqual("get_weather", ProviderToolNamePolicy.GetName(tool));
+    }
+
+    [TestMethod]
+    public void GetName_DottedDisplayName_SanitizesToShortCallName()
+    {
+        var tool = CreateTool("host.host..tool.search..1.0.0", "tool.search");
+
+        Assert.AreEqual("tool_search", ProviderToolNamePolicy.GetName(tool));
+    }
+
+    [TestMethod]
+    public void GetName_AlreadyShortCallName_Preserved()
+    {
+        var tool = CreateTool("host.host..tool.search..1.0.0", "tool_search");
+
+        Assert.AreEqual("tool_search", ProviderToolNamePolicy.GetName(tool));
     }
 
     [TestMethod]

@@ -1,4 +1,4 @@
-using System.Buffers;
+﻿using System.Buffers;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -155,7 +155,7 @@ public sealed partial class ToolCatalogStore : IToolCatalogStore
             if (!match.Success)
             {
                 throw new ArgumentException(
-                    $"Host tool id '{item.ToolId}' must use host.* or mcp.<server>.*.",
+                    $"Host tool id '{item.ToolId}' must use host.* or mcp.*.",
                     nameof(items));
             }
 
@@ -310,7 +310,7 @@ public sealed partial class ToolCatalogStore : IToolCatalogStore
     }
 
     [GeneratedRegex(
-        "^(?<namespace>host)\\.[A-Za-z0-9][A-Za-z0-9_.-]*$|^(?<namespace>mcp\\.[A-Za-z0-9][A-Za-z0-9_-]*)\\.[A-Za-z0-9][A-Za-z0-9_.-]*$",
+        "^(?<namespace>host|mcp)\\.[A-Za-z0-9][A-Za-z0-9_.-]*$",
         RegexOptions.CultureInvariant)]
     private static partial Regex HostToolIdRegex();
 

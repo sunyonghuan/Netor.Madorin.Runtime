@@ -47,6 +47,8 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
     private readonly MeetingInvocationRecord? _resumedInvocation;
     private readonly ConversationRecordV1? _resumedCanonicalMessage;
     private readonly RuntimeError? _resumedFailure;
+    private readonly bool _isHostModeSkills;
+    private readonly SkillActivationStore? _skillActivationStore;
 
     /// <summary>Initializes the meeting orchestrator and its V1 persistence dependencies.</summary>
     /// <param name="providerFactory">Resolves a provider by its ID.</param>
@@ -86,12 +88,16 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
         ConversationRecordV1? resumedCanonicalMessage = null,
         RuntimeError? resumedFailure = null,
         Func<CancellationToken, Task<SkillCatalogSnapshot?>>? skillCatalogSnapshotProvider = null,
-        Func<RuntimeSkillScriptInvocation, CancellationToken, Task<RuntimeSkillScriptResult>>? scriptInvoker = null)
+        Func<RuntimeSkillScriptInvocation, CancellationToken, Task<RuntimeSkillScriptResult>>? scriptInvoker = null,
+        bool isHostModeSkills = false,
+        SkillActivationStore? skillActivationStore = null)
     {
         ArgumentNullException.ThrowIfNull(providerFactory);
         _providerFactory = providerFactory;
         ArgumentNullException.ThrowIfNull(store);
         _store = store;
+        _isHostModeSkills = isHostModeSkills;
+        _skillActivationStore = skillActivationStore;
         _invocationExecutor = new MeetingInvocationExecutor(
             new ProviderAgentInvocationExecutor(providerFactory, scriptInvoker),
             store,
@@ -1829,20 +1835,23 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             SkillSourceIds: skillCatalogSnapshot?.Skills.Select(static skill => skill.SourceId).ToArray(),
             SkillMaterializedPaths: skillCatalogSnapshot?.Skills.Select(static skill => skill.MaterializedPath).ToArray());
         return new ProjectedInvocationRequest(
-            new AgentInvocationRequest(
-                invocationId,
-                runId,
-                sessionId,
-                agent.AgentId,
-                providerId,
-                modelId,
-                [
-                    systemMessage,
-                    .. projection.Messages,
-                ],
-                snapshot,
-                AvailableTools: ResolveAvailableTools(agent, providerId),
-                HistoryMessageCount: 1 + projection.Messages.Length),
+            ApplyHostSkills(
+                new AgentInvocationRequest(
+                    invocationId,
+                    runId,
+                    sessionId,
+                    agent.AgentId,
+                    providerId,
+                    modelId,
+                    [
+                        systemMessage,
+                        .. projection.Messages,
+                    ],
+                    snapshot,
+                    AvailableTools: ResolveAvailableTools(agent, providerId),
+                    HistoryMessageCount: 1 + projection.Messages.Length),
+                agent.SkillIds,
+                skillCatalogSnapshot),
             projection);
     }
 
@@ -1904,23 +1913,26 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             + ". Return a concise factual summary only; do not add new decisions or tool calls.";
 
         return new ProjectedInvocationRequest(
-            new AgentInvocationRequest(
-                invocationId,
-                runId,
-                sessionId,
-                agent.AgentId,
-                providerId,
-                modelId,
-                [
-                    systemMessage,
-                    .. projection.Messages,
-                    new RuntimeProviderMessage(
-                        RuntimeProviderRoles.User,
-                        [new TextContentBlock(instruction)])
-                ],
-                snapshot,
-                AvailableTools: null,
-                HistoryMessageCount: 1 + projection.Messages.Length),
+            ApplyHostSkills(
+                new AgentInvocationRequest(
+                    invocationId,
+                    runId,
+                    sessionId,
+                    agent.AgentId,
+                    providerId,
+                    modelId,
+                    [
+                        systemMessage,
+                        .. projection.Messages,
+                        new RuntimeProviderMessage(
+                            RuntimeProviderRoles.User,
+                            [new TextContentBlock(instruction)])
+                    ],
+                    snapshot,
+                    AvailableTools: null,
+                    HistoryMessageCount: 1 + projection.Messages.Length),
+                agent.SkillIds,
+                skillCatalogSnapshot),
             projection);
     }
 
@@ -2524,6 +2536,36 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
     private Task<SkillCatalogSnapshot?> CaptureSkillCatalogSnapshotAsync(CancellationToken ct) =>
         _skillCatalogSnapshotProvider?.Invoke(ct)
         ?? Task.FromResult<SkillCatalogSnapshot?>(null);
+
+    private AgentInvocationRequest ApplyHostSkills(
+        AgentInvocationRequest request,
+        string[]? skillIds,
+        SkillCatalogSnapshot? filteredCatalog)
+    {
+        if (!_isHostModeSkills)
+        {
+            return request;
+        }
+
+        var maps = HostModeSkillsSnapshot.BuildMaps(filteredCatalog);
+        var snapshot = HostModeSkillsSnapshot.ProjectAdvertiseEmpty(
+            request.Snapshot with
+            {
+                SkillCatalogVersion = request.Snapshot.SkillCatalogVersion
+                    ?? filteredCatalog?.Version
+            },
+            filteredCatalog);
+        return request with
+        {
+            Snapshot = snapshot,
+            IsHostModeSkills = true,
+            SkillActivationStore = _skillActivationStore,
+            SkillAllowlistIds = skillIds,
+            SkillCatalogPathsByName = maps.PathsByName,
+            SkillCatalogDescriptionsByName = maps.DescriptionsByName,
+            SkillScopeSourceRoots = maps.ScopeSourceRoots
+        };
+    }
 
     private static string ComputeHash(string value) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
@@ -3202,26 +3244,29 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             SkillMaterializedPaths: skillCatalogSnapshot?.Skills.Select(static skill => skill.MaterializedPath).ToArray());
 
         return new ProjectedInvocationRequest(
-            new AgentInvocationRequest(
-                invocationId,
-                runId,
-                sessionId,
-                agent.AgentId,
-                providerId,
-                modelId,
-                [
-                    systemMessage,
-                    .. projection.Messages,
-                    new RuntimeProviderMessage(
-                        RuntimeProviderRoles.User,
-                        [new TextContentBlock(
-                            "Active participants:\n" + CreateCandidateJson(candidates)
-                            + "\nReturn conclude=true and participantId=null to end, or conclude=false with one participantId.")])
-                ],
-                snapshot,
-                AvailableTools: null,
-                StructuredOutput: CreateHostStructuredOutput(),
-                HistoryMessageCount: 1 + projection.Messages.Length),
+            ApplyHostSkills(
+                new AgentInvocationRequest(
+                    invocationId,
+                    runId,
+                    sessionId,
+                    agent.AgentId,
+                    providerId,
+                    modelId,
+                    [
+                        systemMessage,
+                        .. projection.Messages,
+                        new RuntimeProviderMessage(
+                            RuntimeProviderRoles.User,
+                            [new TextContentBlock(
+                                "Active participants:\n" + CreateCandidateJson(candidates)
+                                + "\nReturn conclude=true and participantId=null to end, or conclude=false with one participantId.")])
+                    ],
+                    snapshot,
+                    AvailableTools: null,
+                    StructuredOutput: CreateHostStructuredOutput(),
+                    HistoryMessageCount: 1 + projection.Messages.Length),
+                agent.SkillIds,
+                skillCatalogSnapshot),
             projection);
     }
 
@@ -3280,24 +3325,27 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             SkillMaterializedPaths: skillCatalogSnapshot?.Skills.Select(static skill => skill.MaterializedPath).ToArray());
 
         return new ProjectedInvocationRequest(
-            new AgentInvocationRequest(
-                invocationId,
-                runId,
-                sessionId,
-                agent.AgentId,
-                providerId,
-                modelId,
-                [
-                    systemMessage,
-                    .. projection.Messages,
-                    new RuntimeProviderMessage(
-                        RuntimeProviderRoles.User,
-                        [new TextContentBlock("Candidates (choose one participantId):\n" + CreateCandidateJson(candidates))])
-                ],
-                snapshot,
-                AvailableTools: null,
-                StructuredOutput: CreateSelectorStructuredOutput(),
-                HistoryMessageCount: 1 + projection.Messages.Length),
+            ApplyHostSkills(
+                new AgentInvocationRequest(
+                    invocationId,
+                    runId,
+                    sessionId,
+                    agent.AgentId,
+                    providerId,
+                    modelId,
+                    [
+                        systemMessage,
+                        .. projection.Messages,
+                        new RuntimeProviderMessage(
+                            RuntimeProviderRoles.User,
+                            [new TextContentBlock("Candidates (choose one participantId):\n" + CreateCandidateJson(candidates))])
+                    ],
+                    snapshot,
+                    AvailableTools: null,
+                    StructuredOutput: CreateSelectorStructuredOutput(),
+                    HistoryMessageCount: 1 + projection.Messages.Length),
+                agent.SkillIds,
+                skillCatalogSnapshot),
             projection);
     }
 

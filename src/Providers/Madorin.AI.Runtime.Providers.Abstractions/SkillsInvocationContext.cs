@@ -37,4 +37,16 @@ public sealed record SkillsInvocationContext(
     [property: JsonIgnore] string? ParentAgentId = null,
     [property: JsonIgnore] string? ParentInvocationId = null,
     [property: JsonIgnore] string? WorkStepId = null,
-    [property: JsonIgnore] string? PlanVersion = null);
+    [property: JsonIgnore] string? PlanVersion = null,
+    /// <summary>When true, Advertise uses Loadable only and Provider is always created.</summary>
+    [property: JsonIgnore] bool IsHostMode = false,
+    /// <summary>Run-scoped activation table (host mode only).</summary>
+    [property: JsonIgnore] SkillActivationStore? ActivationStore = null,
+    /// <summary>Agent allowlist (SkillIds). null=undeclared/all; []=none; non-empty=names.</summary>
+    [property: JsonIgnore] string[]? AllowlistSkillIds = null,
+    /// <summary>Allowlisted catalog name → materialized path for host load resolution.</summary>
+    [property: JsonIgnore] IReadOnlyDictionary<string, string>? CatalogMaterializedPathsByName = null,
+    /// <summary>Allowlisted catalog name → description (used for short Advertise text).</summary>
+    [property: JsonIgnore] IReadOnlyDictionary<string, string>? CatalogDescriptionsByName = null,
+    /// <summary>Bound source roots (workspace / user-global / host-global) for lazy path resolve.</summary>
+    [property: JsonIgnore] IReadOnlyList<SkillScopeSourceRoot>? ScopeSourceRoots = null);

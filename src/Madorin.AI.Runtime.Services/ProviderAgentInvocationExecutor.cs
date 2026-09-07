@@ -71,6 +71,32 @@ public sealed class ProviderAgentInvocationExecutor : IAgentInvocationExecutor
             return null;
         }
 
+        if (request.IsHostModeSkills)
+        {
+            var loadablePaths = ResolveHostPaths(request);
+            return new SkillsInvocationContext(
+                snapshot.SkillCatalogVersion,
+                snapshot.SkillNames ?? [],
+                snapshot.SkillContentHashes ?? [],
+                snapshot.SkillSourceIds ?? [],
+                loadablePaths,
+                scriptInvoker,
+                request.RunId,
+                request.SessionId,
+                request.AgentId,
+                request.InvocationId,
+                request.ParentAgentId,
+                snapshot.ParentInvocationId,
+                snapshot.WorkStepId,
+                snapshot.WorkPlanVersion,
+                IsHostMode: true,
+                ActivationStore: request.SkillActivationStore,
+                AllowlistSkillIds: request.SkillAllowlistIds,
+                CatalogMaterializedPathsByName: request.SkillCatalogPathsByName,
+                CatalogDescriptionsByName: request.SkillCatalogDescriptionsByName,
+                ScopeSourceRoots: request.SkillScopeSourceRoots);
+        }
+
         return new SkillsInvocationContext(
             snapshot.SkillCatalogVersion,
             snapshot.SkillNames ?? [],
@@ -86,5 +112,22 @@ public sealed class ProviderAgentInvocationExecutor : IAgentInvocationExecutor
             snapshot.ParentInvocationId,
             snapshot.WorkStepId,
             snapshot.WorkPlanVersion);
+    }
+
+    private static string[] ResolveHostPaths(AgentInvocationRequest request)
+    {
+        var probe = new SkillsInvocationContext(
+            request.Snapshot.SkillCatalogVersion ?? string.Empty,
+            request.Snapshot.SkillNames ?? [],
+            request.Snapshot.SkillContentHashes ?? [],
+            request.Snapshot.SkillSourceIds ?? [],
+            request.Snapshot.SkillMaterializedPaths,
+            IsHostMode: true,
+            ActivationStore: request.SkillActivationStore,
+            AllowlistSkillIds: request.SkillAllowlistIds,
+            CatalogMaterializedPathsByName: request.SkillCatalogPathsByName,
+            CatalogDescriptionsByName: request.SkillCatalogDescriptionsByName,
+            ScopeSourceRoots: request.SkillScopeSourceRoots);
+        return MafSkillsAgentFactory.ResolveHostLoadableMaterializedPaths(probe);
     }
 }

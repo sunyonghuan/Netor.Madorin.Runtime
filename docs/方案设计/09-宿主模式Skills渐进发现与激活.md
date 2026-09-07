@@ -13,10 +13,10 @@
 
 | 落点 | 内容 |
 |------|------|
-| `MafSkillsAgentFactory` | 宿主/独立双分支；宿主 **Provider 永不因空 Loadable 为 null** |
+| `MafSkillsAgentFactory` | 宿主/独立双分支；宿主 **Provider 永不因空 Loadable 为 null**；宿主始终动态 Source |
 | 新 `SkillActivationStore` | Run 级激活表 |
 | Tool result 钩子 | 识别宿主 `skill.search` hits → upsert 激活（**唯一**同轮激活主路径） |
-| 宿主模式 Skills Source | Loadable 视图 + 短 description；Get* 优先 MaterializedPath |
+| 宿主模式 Skills Source | Loadable 视图 + 短 description；Catalog path 优先，否则按 scope/源根惰性解析 |
 | 模式判定 | 与 `HostModeSelectionValidator` / 宿主集成 Run 一致 |
 | 测试 | 独立回归 + 宿主同轮 search→load + 空 Provider 探针 |
 
@@ -84,7 +84,7 @@ skill.search（宿主工具，Reverse RPC）
   → 交模型
 load_skill(name)
   → name ∈ Loadable
-  → Content：Catalog 命中则 MaterializedPath，否则按 scope 惰性物化
+  → Content：Catalog MaterializedPath 优先；否则按激活 scope / 绑定源根（workspace > user-global > 显式）惰性解析目录中的 SKILL.md（不信任模型绝对路径）
 ```
 
 禁止：宿主回调内同步 Runtime activation RPC。  
@@ -152,3 +152,28 @@ load_skill(name)
 |------|------|
 | 2026-09-07 | 初稿与评审修订 |
 | 2026-09-07 | 严格复审：Runtime 自知 workspace/user-global；删除对 workspace 目录工具依赖；与宿主双根 Allowlist 对齐；爆炸半径与探针门禁写死 |
+
+---
+
+## 10. 发现策略 Direct（2026-03-26 增补）
+
+> 完整策划见同目录 `10-宿主模式Skills发现策略Direct.md`。  
+> 对端：Workstation F08 `备档/裁决-渐进发现双开关-20260326.md`。
+
+宿主任务开关 **技能按需发现 = 关** 时，Run 材料携带 `SkillDiscoveryMode=direct`。  
+Runtime 宿主模式：
+
+- `Loadable = Allowlist`（全启用名），Advertise 短描述；  
+- **仍禁止**全量 MaterializedPaths 长正文广告；  
+- search 钩子 no-op；load/resource/script 门禁与 Grant 同 09；  
+- 缺省 mode = progressive；须 **capabilities 声明** 支持 direct 供宿主门闩。
+
+§7「禁止全 Allowlist 当 Advertise」修订为：禁止全 Allowlist 当 **长正文/全 paths** Advertise；**短描述名表**在 direct 下允许等于 Allowlist。
+
+---
+
+## 11. 变更记录（续）
+
+| 日期 | 说明 |
+|------|------|
+| 2026-03-26 | §10 Direct 发现策略；详规见 `10-宿主模式Skills发现策略Direct.md`；对端 F08 双开关 |

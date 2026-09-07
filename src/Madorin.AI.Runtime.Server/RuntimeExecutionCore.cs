@@ -1,4 +1,4 @@
-using System.Runtime.CompilerServices;
+﻿using System.Runtime.CompilerServices;
 using System.Buffers;
 using System.Collections.Concurrent;
 using System.Text.Encodings.Web;
@@ -68,6 +68,7 @@ internal sealed class RuntimeExecutionCore(
         RuntimeError? resumedMeetingFailure = null,
         IToolConsentHandler? localToolConsentHandler = null,
         SkillCatalogService? skillCatalog = null,
+        bool isHostModeSkills = false,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
@@ -82,6 +83,11 @@ internal sealed class RuntimeExecutionCore(
                 "A Runtime execution cannot use both a control peer and a local tool consent handler.",
                 nameof(localToolConsentHandler));
         }
+
+        // Host-mode progressive discovery: one Run-scoped activation table shared by all agents.
+        SkillActivationStore? skillActivationStore = isHostModeSkills
+            ? new SkillActivationStore()
+            : null;
 
         var gatewayCatalogSnapshot = skillCatalog is null
             ? toolCatalogSnapshot
@@ -215,7 +221,13 @@ internal sealed class RuntimeExecutionCore(
                 isRunTimedOut,
                 toolConsentCoordinator,
                 skillCatalogSnapshotProvider,
-                scriptInvoker),
+                scriptInvoker,
+                liveCatalogProvider: () => skillCatalog is null
+                    ? toolCatalogStore.CaptureSnapshot()
+                    : toolCatalogStore.CaptureSnapshot()
+                        .WithInternalTools([SkillScriptToolDefinition.Descriptor]),
+                isHostModeSkills: isHostModeSkills,
+                skillActivationStore: skillActivationStore),
 
             RuntimeMode.Meeting => new MeetingModeOrchestrator(
                 providerFactory: requestedProviderId =>
@@ -254,7 +266,9 @@ internal sealed class RuntimeExecutionCore(
                 resumedInvocation: resumedMeetingInvocation,
                 resumedCanonicalMessage: resumedCanonicalMessage,
                 resumedFailure: resumedMeetingFailure,
-                scriptInvoker: scriptInvoker),
+                scriptInvoker: scriptInvoker,
+                isHostModeSkills: isHostModeSkills,
+                skillActivationStore: skillActivationStore),
             RuntimeMode.Work => new WorkModeOrchestrator(
                 providerFactory: requestedProviderId =>
                 {
@@ -290,7 +304,13 @@ internal sealed class RuntimeExecutionCore(
                 workRepo: workRepo,
                 connection: repositoryConnection,
                 credentialRefreshHandler: credentialRefreshHandler,
-                scriptInvoker: scriptInvoker),
+                scriptInvoker: scriptInvoker,
+                liveCatalogProvider: () => skillCatalog is null
+                    ? toolCatalogStore.CaptureSnapshot()
+                    : toolCatalogStore.CaptureSnapshot()
+                        .WithInternalTools([SkillScriptToolDefinition.Descriptor]),
+                isHostModeSkills: isHostModeSkills,
+                skillActivationStore: skillActivationStore),
 
             _ => throw new NotSupportedException(
                 $"Runtime mode '{request.Mode}' is not supported.")

@@ -19,4 +19,10 @@ public sealed record AgentInvocationRequest(
     bool IsIdempotent = true,
     bool HasIrreversibleToolSideEffects = false,
     string? ParentAgentId = null,
-    int HistoryMessageCount = 0);
+    int HistoryMessageCount = 0,
+    bool IsHostModeSkills = false,
+    SkillActivationStore? SkillActivationStore = null,
+    string[]? SkillAllowlistIds = null,
+    IReadOnlyDictionary<string, string>? SkillCatalogPathsByName = null,
+    IReadOnlyDictionary<string, string>? SkillCatalogDescriptionsByName = null,
+    IReadOnlyList<SkillScopeSourceRoot>? SkillScopeSourceRoots = null);

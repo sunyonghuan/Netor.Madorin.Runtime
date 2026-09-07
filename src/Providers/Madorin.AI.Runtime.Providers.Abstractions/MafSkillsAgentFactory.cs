@@ -44,7 +44,7 @@ public static class MafSkillsAgentFactory
 
     public static AgentSkillsProvider? CreateSkillsProvider(SkillsInvocationContext? context)
     {
-        if (context?.SkillMaterializedPaths is not { Length: > 0 } paths)
+        if (context is null)
         {
             return null;
         }
@@ -55,15 +55,247 @@ public static class MafSkillsAgentFactory
             ScriptApproval = false,
             DisableCaching = true
         };
+        var scriptRunner = context.ScriptInvoker is null
+            ? null
+            : (AgentFileSkillScriptRunner)((skill, script, arguments, serviceProvider, ct) =>
+                RunScriptThroughRuntimeAsync(context, skill, script, arguments, serviceProvider, ct));
+
+        if (context.IsHostMode)
+        {
+            // Host mode: always create a live Provider. Loadable is resolved dynamically per
+            // GetSkillsAsync so same-turn search→load and multi-round activation both work.
+            var builder = new AgentSkillsProviderBuilder()
+                .UseSource(new HostModeLoadableSkillsSource(context, scriptRunner))
+                .UseOptions(providerOptions =>
+                {
+                    providerOptions.ScriptApproval = options.ScriptApproval;
+                    providerOptions.DisableCaching = options.DisableCaching;
+                    if (options.SkillsInstructionPrompt is not null)
+                    {
+                        providerOptions.SkillsInstructionPrompt = options.SkillsInstructionPrompt;
+                    }
+                });
+            if (scriptRunner is not null)
+            {
+                builder.UseFileScriptRunner(scriptRunner);
+            }
+
+            return builder.Build();
+        }
+
+        // Independent mode: paths must be non-empty (existing behavior, zero regression).
+        if (context.SkillMaterializedPaths is not { Length: > 0 } paths)
+        {
+            return null;
+        }
+
         return new AgentSkillsProvider(
             paths,
-            scriptRunner: context.ScriptInvoker is null
-                ? null
-                : (skill, script, arguments, serviceProvider, ct) =>
-                    RunScriptThroughRuntimeAsync(context, skill, script, arguments, serviceProvider, ct),
+            scriptRunner,
             fileOptions: null,
             options,
             loggerFactory: null);
+    }
+
+    /// <summary>
+    /// Resolves materialized paths for the current host-mode Loadable set
+    /// (Activation ∩ Allowlist), preferring catalog MaterializedPath entries.
+    /// </summary>
+    public static string[] ResolveHostLoadableMaterializedPaths(SkillsInvocationContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        var loadableNames = context.ActivationStore?.GetLoadableNames(context.AllowlistSkillIds)
+            ?? [];
+        if (loadableNames.Length == 0
+            && context.SkillNames is { Length: > 0 }
+            && context.SkillMaterializedPaths is { Length: > 0 })
+        {
+            // Optional InitialSkills already projected into SkillNames/paths.
+            loadableNames = context.SkillNames
+                .Where(name => SkillActivationStore.IsAllowed(name, context.AllowlistSkillIds))
+                .ToArray();
+        }
+
+        if (loadableNames.Length == 0)
+        {
+            return [];
+        }
+
+        var paths = new List<string>(loadableNames.Length);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var name in loadableNames)
+        {
+            if (!TryResolveMaterializedPath(context, name, out var path)
+                || !seen.Add(path))
+            {
+                continue;
+            }
+
+            paths.Add(path);
+        }
+
+        return [.. paths];
+    }
+
+    /// <summary>
+    /// Validates that <paramref name="name"/> is loadable in host mode (activated + allowlisted)
+    /// and resolves its materialized path. Independent mode always returns the path map hit.
+    /// </summary>
+    public static bool TryResolveLoadPath(
+        SkillsInvocationContext context,
+        string name,
+        out string materializedPath,
+        out string? error)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        materializedPath = string.Empty;
+        error = null;
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            error = "Skill name is required.";
+            return false;
+        }
+
+        var normalized = name.Trim();
+        if (context.IsHostMode)
+        {
+            if (!SkillActivationStore.IsAllowed(normalized, context.AllowlistSkillIds))
+            {
+                error = $"Skill '{normalized}' is outside the current allowlist.";
+                return false;
+            }
+
+            if (context.ActivationStore is null
+                || !context.ActivationStore.IsLoadable(normalized, context.AllowlistSkillIds))
+            {
+                error = $"Skill '{normalized}' is not activated. Call skill.search first.";
+                return false;
+            }
+        }
+
+        if (!TryResolveMaterializedPath(context, normalized, out materializedPath))
+        {
+            error = $"Skill '{normalized}' has no materialized path in the current catalog.";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool TryResolveMaterializedPath(
+        SkillsInvocationContext context,
+        string name,
+        out string path)
+    {
+        path = string.Empty;
+        if (context.CatalogMaterializedPathsByName is not null
+            && context.CatalogMaterializedPathsByName.TryGetValue(name, out var catalogPath)
+            && !string.IsNullOrWhiteSpace(catalogPath))
+        {
+            path = catalogPath;
+            return true;
+        }
+
+        if (context.SkillNames is { Length: > 0 }
+            && context.SkillMaterializedPaths is { Length: > 0 })
+        {
+            var count = Math.Min(context.SkillNames.Length, context.SkillMaterializedPaths.Length);
+            for (var i = 0; i < count; i++)
+            {
+                if (string.Equals(context.SkillNames[i], name, StringComparison.OrdinalIgnoreCase)
+                    && !string.IsNullOrWhiteSpace(context.SkillMaterializedPaths[i]))
+                {
+                    path = context.SkillMaterializedPaths[i];
+                    return true;
+                }
+            }
+        }
+
+        // Lazy resolve from bound source roots (scope from activation when present).
+        return TryResolveFromScopeRoots(context, name, out path);
+    }
+
+    private static bool TryResolveFromScopeRoots(
+        SkillsInvocationContext context,
+        string name,
+        out string path)
+    {
+        path = string.Empty;
+        if (context.ScopeSourceRoots is not { Count: > 0 })
+        {
+            return false;
+        }
+
+        string? preferredScope = null;
+        if (context.ActivationStore is not null)
+        {
+            foreach (var entry in context.ActivationStore.Snapshot())
+            {
+                if (string.Equals(entry.Name, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    preferredScope = entry.Scope;
+                    break;
+                }
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(preferredScope))
+        {
+            foreach (var root in context.ScopeSourceRoots)
+            {
+                if (string.Equals(root.ScopeId, preferredScope, StringComparison.OrdinalIgnoreCase)
+                    && TryResolveSkillDirectory(root.DirectoryPath, name, out path))
+                {
+                    return true;
+                }
+            }
+        }
+
+        // Shadow order follows catalog source order: workspace > user-global > explicit.
+        foreach (var root in context.ScopeSourceRoots)
+        {
+            if (TryResolveSkillDirectory(root.DirectoryPath, name, out path))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryResolveSkillDirectory(string sourceRoot, string skillName, out string path)
+    {
+        path = string.Empty;
+        if (string.IsNullOrWhiteSpace(sourceRoot) || !Directory.Exists(sourceRoot))
+        {
+            return false;
+        }
+
+        var direct = Path.Combine(sourceRoot, skillName);
+        if (Directory.Exists(direct)
+            && File.Exists(Path.Combine(direct, "SKILL.md")))
+        {
+            path = direct;
+            return true;
+        }
+
+        foreach (var directory in Directory.EnumerateDirectories(sourceRoot))
+        {
+            var folderName = Path.GetFileName(directory);
+            if (!string.Equals(folderName, skillName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (File.Exists(Path.Combine(directory, "SKILL.md")))
+            {
+                path = directory;
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static async Task<object?> RunScriptThroughRuntimeAsync(
@@ -78,6 +310,14 @@ public static class MafSkillsAgentFactory
         if (context.ScriptInvoker is null)
         {
             throw new InvalidOperationException("The Runtime Skills script invoker is unavailable.");
+        }
+
+        if (context.IsHostMode)
+        {
+            if (!TryResolveLoadPath(context, skill.Frontmatter.Name, out _, out var error))
+            {
+                throw new InvalidOperationException(error ?? "Skill is not loadable.");
+            }
         }
 
         var values = arguments is { } argumentValue

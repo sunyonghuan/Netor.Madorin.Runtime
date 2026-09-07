@@ -154,6 +154,40 @@ var options = new RuntimeClientOptions
 
 `skill.catalog.changed` 事件通知宿主目录已变化，宿主可以据此更新 UI 或日志。
 
+### 8.1 宿主模式渐进发现与激活
+
+当 Runtime 以宿主集成方式启动（by-value Selection / Host Provider Registry）时，Skills 走与独立 CLI 不同的 Advertise/激活路径；Catalog 扫描、物化、脚本 Grant 基线不变。
+
+| 概念 | 含义 |
+| --- | --- |
+| **Allowlist** | `AgentRef.SkillIds`：`null`=未声明（兼容全开，慎用）；`[]`=全关；非空=仅这些 Name 可进入 Loadable |
+| **ActivationSet** | Run 级激活表（`SkillActivationStore`），由 tool-result 钩子累积 |
+| **Loadable** | `(Initial ∪ Activation) ∩ Allowlist`；V1 的 Initial 默认为空 |
+| **Advertise** | 仅 Loadable 的短描述，**禁止**把全 Allowlist 的 MaterializedPaths 一次性交给 Provider |
+
+同轮路径（反死锁）：
+
+```text
+skill.search（宿主工具，Reverse RPC）
+  → 宿主只返回 hits JSON（name / scope / description）
+  → Runtime 收 result【钩子】Activation ∪= hit.Name（∈ Allowlist）
+  → 更新 Loadable
+  → 交模型
+load_skill(name)
+  → name ∈ Loadable
+  → Content：Catalog MaterializedPath 优先；未命中则按激活 scope / 绑定源根惰性解析（忽略模型传入绝对路径）
+  → Advertise 仅短 description（激活 hit 或截断后的 catalog 描述）
+```
+
+约束：
+
+- 宿主模式 `CreateSkillsProvider` **始终建**动态 Source Provider；空 Loadable 时暴露引导技能 `host-skills-guide`（保证 MAF 仍注册三工具），激活后 `GetSkillsAsync` 按 Activation 展开真实 Loadable。
+- 激活**唯一**同轮主路径是 Runtime 消化 `skill.search` tool result 的钩子；禁止在宿主回调栈内同步 Runtime activation RPC。
+- 独立模式 paths → Provider 现网路径零行为回归。
+- workspace / user-global 路径由本进程自知；宿主仅需 `skill.dir.host_global`（安装侧全局根），**无** workspace 目录元工具依赖。
+
+完整裁决见 [`../方案设计/09-宿主模式Skills渐进发现与激活.md`](../方案设计/09-宿主模式Skills渐进发现与激活.md)。
+
 ## 9. 脚本执行
 
 `scripts/` 目录下的脚本可以通过 `AgentFileSkillScriptToolExecutor` 执行。脚本执行受以下约束：
@@ -196,3 +230,12 @@ Skills 系统在 `RuntimeCapabilities` 中声明：
 | `SkillSourceUnavailable` | error | 来源不可用。触发场景：源目录无法枚举、来源 ID 为空或重复、来源与物化目录重叠、来源为符号链接、有效技能总数超过 512 上限 |
 | `SkillSourceKindNotSupported` | error | 来源类型不支持 |
 | `SkillSourceNotFound` | error | 显式来源目录不存在 |
+
+---
+
+## 附录 · 宿主发现策略 Direct（2026-03-26）
+
+宿主任务关闭「技能按需发现」时，材料下发 SkillDiscoveryMode=direct（缺省 progressive）。  
+Runtime 宿主模式将 **Loadable 初值 = Allowlist 全名**（短描述 Advertise），**不**把全量 SKILL 正文灌进 Provider。  
+详规：方案设计/10-宿主模式Skills发现策略Direct.md；基线渐进见 方案设计/09。  
+能力声明须暴露 direct，供宿主门闩（防摘 meta 后假死）。

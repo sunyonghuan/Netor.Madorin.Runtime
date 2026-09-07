@@ -36,6 +36,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
     private readonly IToolStateStore? _toolStateStore;
     private readonly ToolGateway? _toolGateway;
     private readonly ToolCatalogSnapshot? _toolCatalogSnapshot;
+    private readonly Func<ToolCatalogSnapshot>? _liveCatalogProvider;
     private readonly Func<CancellationToken, Task<SkillCatalogSnapshot?>>? _skillCatalogSnapshotProvider;
     private readonly ToolConsentCoordinator? _toolConsentCoordinator;
     private readonly Func<ApprovalRequest, CancellationToken, Task<ApprovalResponse>>?
@@ -45,6 +46,8 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
     private readonly Func<RuntimeSkillScriptInvocation, CancellationToken, Task<RuntimeSkillScriptResult>>?
         _scriptInvoker;
     private readonly RuntimeLimits _runtimeLimits;
+    private readonly bool _isHostModeSkills;
+    private readonly SkillActivationStore? _skillActivationStore;
 
     public WorkModeOrchestrator(
         Func<string, IRuntimeProviderAdapter> providerFactory,
@@ -66,7 +69,10 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         Func<CredentialsRefreshRequestedEvent, CancellationToken, Task<bool>>?
             credentialRefreshHandler = null,
         Func<CancellationToken, Task<SkillCatalogSnapshot?>>? skillCatalogSnapshotProvider = null,
-        Func<RuntimeSkillScriptInvocation, CancellationToken, Task<RuntimeSkillScriptResult>>? scriptInvoker = null)
+        Func<RuntimeSkillScriptInvocation, CancellationToken, Task<RuntimeSkillScriptResult>>? scriptInvoker = null,
+        Func<ToolCatalogSnapshot>? liveCatalogProvider = null,
+        bool isHostModeSkills = false,
+        SkillActivationStore? skillActivationStore = null)
     {
         _providerFactory = providerFactory ?? throw new ArgumentNullException(nameof(providerFactory));
         _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -78,6 +84,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         _toolStateStore = toolStateStore;
         _toolGateway = toolGateway;
         _toolCatalogSnapshot = toolCatalogSnapshot;
+        _liveCatalogProvider = liveCatalogProvider;
         _toolConsentCoordinator = toolConsentCoordinator;
         _workflowApprovalHandler = workflowApprovalHandler
             ?? (toolConsentCoordinator is { CanRequestApproval: true }
@@ -86,6 +93,8 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         _credentialRefreshHandler = credentialRefreshHandler;
         _skillCatalogSnapshotProvider = skillCatalogSnapshotProvider;
         _scriptInvoker = scriptInvoker;
+        _isHostModeSkills = isHostModeSkills;
+        _skillActivationStore = skillActivationStore;
         _runtimeLimits = runtimeLimits ?? new RuntimeLimits(
             MaxToolResultBytesPerInvocation: 4 * 1024 * 1024);
         if (workRepo is not null)
@@ -1349,7 +1358,8 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 yield break;
             }
 
-            if (_toolGateway is null || _toolCatalogSnapshot is null)
+            var liveCatalog = CaptureCatalogSnapshot();
+            if (_toolGateway is null || liveCatalog is null)
             {
                 yield return new InvocationFailedProviderEvent(
                     request.InvocationId,
@@ -1359,6 +1369,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 yield break;
             }
 
+            // 允许集按「本轮暴露给模型的 tools」校验；tools 会在每轮后随 live catalog 刷新
             if (tools is not null)
             {
                 var allowedToolIds = tools
@@ -1381,6 +1392,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
 
             foreach (var toolCall in toolCalls)
             {
+                var callCatalog = CaptureCatalogSnapshot() ?? liveCatalog;
                 var invocation = new ToolInvocation(
                     toolCall.CallId,
                     toolCall.ToolId,
@@ -1390,7 +1402,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                     request.RunId,
                     request.SessionId,
                     request.InvocationId,
-                    ToolCatalogVersion: _toolCatalogSnapshot.EffectiveVersion,
+                    ToolCatalogVersion: callCatalog.EffectiveVersion,
                     WorkStepId: request.Snapshot.WorkStepId,
                     PlanVersion: request.Snapshot.WorkPlanVersion,
                     ParentInvocationId: request.Snapshot.ParentInvocationId);
@@ -1401,7 +1413,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                     gatewayResult = await _toolGateway.ExecuteAsync(
                         invocation,
                         permission: null,
-                        _toolCatalogSnapshot,
+                        callCatalog,
                         ct).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -1455,6 +1467,18 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 }
 
                 var toolResult = CreateToolResultContent(toolCall, gatewayResult);
+                if (_isHostModeSkills
+                    && gatewayResult.Kind is ToolGatewayResultKind.Success
+                    && gatewayResult.Result is { Success: true, OutputJson: { } outputJson })
+                {
+                    HostModeSkillsSnapshot.TryApplyToolResult(
+                        _skillActivationStore,
+                        request.SkillAllowlistIds,
+                        toolCall.ToolId,
+                        toolCall.Name,
+                        outputJson);
+                }
+
                 totalToolResultBytes += GetContentByteCount(toolResult);
                 if (HasOversizedInlineContent(toolResult, _runtimeLimits.MaxInlineContentBytes)
                     || totalToolResultBytes > maxToolResultBytes)
@@ -1472,6 +1496,9 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                     [toolResult]));
                 hasIrreversibleToolSideEffects = true;
             }
+
+            // search 注入后刷新本轮 tools，下一轮 Provider 能看到短名工具
+            tools = RefreshExposedTools(tools);
         }
     }
 
@@ -1744,8 +1771,11 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             ];
         }
 
-        var skillCatalogSnapshot = (await CaptureSkillCatalogSnapshotAsync(ct).ConfigureAwait(false))
-            ?.FilterBySkillIds(agent.SkillIds);
+        var fullSkillCatalog = await CaptureSkillCatalogSnapshotAsync(ct).ConfigureAwait(false);
+        var skillCatalogSnapshot = fullSkillCatalog?.FilterBySkillIds(agent.SkillIds);
+        var hostMaps = _isHostModeSkills
+            ? HostModeSkillsSnapshot.BuildMaps(skillCatalogSnapshot)
+            : null;
         var snapshot = new InvocationSnapshot(
             invocationId,
             agent.AgentId,
@@ -1761,11 +1791,17 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             workStepId,
             workPlanVersion,
             projectionSnapshot,
-            SkillCatalogVersion: skillCatalogSnapshot?.Version,
+            SkillCatalogVersion: skillCatalogSnapshot?.Version ?? fullSkillCatalog?.Version,
             SkillNames: skillCatalogSnapshot?.Skills.Select(static skill => skill.Name).ToArray(),
             SkillContentHashes: skillCatalogSnapshot?.Skills.Select(static skill => skill.ContentHash).ToArray(),
             SkillSourceIds: skillCatalogSnapshot?.Skills.Select(static skill => skill.SourceId).ToArray(),
             SkillMaterializedPaths: skillCatalogSnapshot?.Skills.Select(static skill => skill.MaterializedPath).ToArray());
+        if (_isHostModeSkills)
+        {
+            snapshot = HostModeSkillsSnapshot.ProjectAdvertiseEmpty(
+                snapshot,
+                skillCatalogSnapshot ?? fullSkillCatalog);
+        }
 
         return new AgentInvocationRequest(
             invocationId,
@@ -1781,7 +1817,13 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             snapshot,
             AvailableTools: availableTools,
             ParentAgentId: parentAgentId,
-            HistoryMessageCount: Math.Max(0, projectedMessages.Length));
+            HistoryMessageCount: Math.Max(0, projectedMessages.Length),
+            IsHostModeSkills: _isHostModeSkills,
+            SkillActivationStore: _skillActivationStore,
+            SkillAllowlistIds: agent.SkillIds,
+            SkillCatalogPathsByName: hostMaps?.PathsByName,
+            SkillCatalogDescriptionsByName: hostMaps?.DescriptionsByName,
+            SkillScopeSourceRoots: hostMaps?.ScopeSourceRoots);
     }
 
     private static string BuildManagerPlanningInput(
@@ -1833,7 +1875,8 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
 
     private ToolDescriptor[]? ResolveAvailableTools(AgentRef agent, string providerId)
     {
-        if (_toolGateway is null || _toolCatalogSnapshot is null)
+        var catalog = CaptureCatalogSnapshot();
+        if (_toolGateway is null || catalog is null)
         {
             return null;
         }
@@ -1851,7 +1894,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                         nameof(agent));
                 }
 
-                if (!_toolCatalogSnapshot.TryGetTool(toolId, out _))
+                if (!catalog.TryGetTool(toolId, out _))
                 {
                     throw new ArgumentException(
                         $"Work-mode Agent '{agent.AgentId}' declares unknown tool ID '{toolId}'.",
@@ -1868,16 +1911,64 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                     nameof(agent));
             }
 
-            return _toolCatalogSnapshot.Tools
+            return catalog.Tools
                 .Where(tool => requestedToolIds.Contains(tool.ToolId))
                 .ToArray();
         }
 
-        // Expert-compatible default: expose the full catalog when the Runtime has a gateway.
-        return [.. _toolCatalogSnapshot.Tools];
+        return [.. catalog.Tools];
     }
 
+    private ToolCatalogSnapshot? CaptureCatalogSnapshot()
+    {
+        if (_liveCatalogProvider is not null)
+        {
+            return _liveCatalogProvider();
+        }
 
+        return _toolCatalogSnapshot;
+    }
+
+    /// <summary>
+    /// Refresh tools exposed to the Provider after a tool round.
+    /// Full-catalog agents follow live growth (search injection).
+    /// Allowlist agents only refresh descriptors for already-allowed ToolIds.
+    /// </summary>
+    private ToolDescriptor[]? RefreshExposedTools(ToolDescriptor[]? previouslyExposed)
+    {
+        var catalog = CaptureCatalogSnapshot();
+        if (_toolGateway is null || catalog is null)
+        {
+            return previouslyExposed;
+        }
+
+        if (previouslyExposed is null)
+        {
+            return [.. catalog.Tools];
+        }
+
+        var previousIds = previouslyExposed
+            .Select(static tool => tool.ToolId)
+            .ToHashSet(StringComparer.Ordinal);
+
+        // Full catalog: initial snapshot tools were all exposed -> follow live growth.
+        // Allowlist: initial snapshot had tools not in previousIds -> do not expand.
+        var initial = _toolCatalogSnapshot;
+        // initial 缺失时不推断为全量，避免把 allowlist 放大成 live 全目录
+        var wasFullCatalog = initial is not null
+            && initial.Tools.Count > 0
+            && initial.Tools.All(tool => previousIds.Contains(tool.ToolId))
+            && previouslyExposed.Length >= initial.Tools.Count;
+
+        if (wasFullCatalog)
+        {
+            return [.. catalog.Tools];
+        }
+
+        return catalog.Tools
+            .Where(tool => previousIds.Contains(tool.ToolId))
+            .ToArray();
+    }
     private static void ValidateWorkRequest(NewSessionRunRequest request)
     {
         ArgumentNullException.ThrowIfNull(request.Selection);
@@ -1936,9 +2027,14 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
     private SkillsInvocationContext? CreateSkillsContext(AgentInvocationRequest request)
     {
         var snapshot = request.Snapshot;
-        return string.IsNullOrWhiteSpace(snapshot.SkillCatalogVersion)
-            ? null
-            : new SkillsInvocationContext(
+        if (string.IsNullOrWhiteSpace(snapshot.SkillCatalogVersion))
+        {
+            return null;
+        }
+
+        if (request.IsHostModeSkills)
+        {
+            var hostContext = new SkillsInvocationContext(
                 snapshot.SkillCatalogVersion,
                 snapshot.SkillNames ?? [],
                 snapshot.SkillContentHashes ?? [],
@@ -1952,8 +2048,31 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 request.ParentAgentId,
                 snapshot.ParentInvocationId,
                 snapshot.WorkStepId,
-                snapshot.WorkPlanVersion);
+                snapshot.WorkPlanVersion,
+                IsHostMode: true,
+                ActivationStore: request.SkillActivationStore ?? _skillActivationStore,
+                AllowlistSkillIds: request.SkillAllowlistIds,
+                CatalogMaterializedPathsByName: request.SkillCatalogPathsByName,
+                CatalogDescriptionsByName: request.SkillCatalogDescriptionsByName,
+                ScopeSourceRoots: request.SkillScopeSourceRoots);
+            var loadablePaths = MafSkillsAgentFactory.ResolveHostLoadableMaterializedPaths(hostContext);
+            return hostContext with { SkillMaterializedPaths = loadablePaths };
+        }
+
+        return new SkillsInvocationContext(
+            snapshot.SkillCatalogVersion,
+            snapshot.SkillNames ?? [],
+            snapshot.SkillContentHashes ?? [],
+            snapshot.SkillSourceIds ?? [],
+            snapshot.SkillMaterializedPaths,
+            _scriptInvoker,
+            request.RunId,
+            request.SessionId,
+            request.AgentId,
+            request.InvocationId,
+            request.ParentAgentId,
+            snapshot.ParentInvocationId,
+            snapshot.WorkStepId,
+            snapshot.WorkPlanVersion);
     }
-
-
 }

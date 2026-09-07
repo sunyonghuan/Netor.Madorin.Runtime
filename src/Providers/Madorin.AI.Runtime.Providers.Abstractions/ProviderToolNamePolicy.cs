@@ -15,15 +15,24 @@ public static class ProviderToolNamePolicy
     {
         ArgumentNullException.ThrowIfNull(tool);
 
-        // 1) DisplayName 已是短调用名（tool_search / csx_run_file / mcli_fs_read）
-        // 2) 否则把 DisplayName 中的点等字符压成 _（tool.search → tool_search）
-        // 3) 仍不合法才回退编码 ToolId（历史 host.cap.* 兜底）
-        var fromDisplay = SanitizeForProvider(tool.DisplayName);
-        if (IsProviderSafe(fromDisplay))
+        // 1) DisplayName 已是 Provider 安全短名
+        if (IsProviderSafe(tool.DisplayName))
         {
-            return fromDisplay;
+            return tool.DisplayName;
         }
 
+        // 2) 仅对“调用名风格”的轻度非法（含 . / : @）做短名化：tool.search → tool_search
+        //    描述性名称（空格、中文等）不压成短名，避免 Read file → Read_file
+        if (IsCallNameStyle(tool.DisplayName))
+        {
+            var sanitized = SanitizeForProvider(tool.DisplayName);
+            if (IsProviderSafe(sanitized))
+            {
+                return sanitized;
+            }
+        }
+
+        // 3) 回退编码 ToolId
         return EncodeToolId(tool.ToolId);
     }
 
@@ -47,10 +56,21 @@ public static class ProviderToolNamePolicy
             }
         }
 
-        var sanitized = SanitizeForProvider(storedName);
-        return IsProviderSafe(sanitized)
-            ? sanitized
-            : EncodeToolId(toolId);
+        if (IsProviderSafe(storedName))
+        {
+            return storedName;
+        }
+
+        if (IsCallNameStyle(storedName))
+        {
+            var sanitized = SanitizeForProvider(storedName);
+            if (IsProviderSafe(sanitized))
+            {
+                return sanitized;
+            }
+        }
+
+        return EncodeToolId(toolId);
     }
 
     /// <summary>Resolves a Provider function name back to the canonical Runtime tool ID.</summary>
@@ -149,6 +169,26 @@ public static class ProviderToolNamePolicy
         }
 
         return result;
+    }
+
+    private static bool IsCallNameStyle(string name)
+    {
+        if (string.IsNullOrEmpty(name))
+        {
+            return false;
+        }
+
+        foreach (var character in name)
+        {
+            if (IsAsciiLetterOrDigit(character) || character is '_' or '-' or '.' or '/' or ':' or '@')
+            {
+                continue;
+            }
+
+            return false;
+        }
+
+        return true;
     }
 
     private static bool IsProviderSafe(string name)

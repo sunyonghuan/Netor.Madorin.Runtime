@@ -8,6 +8,7 @@ using Madorin.AI.Runtime.Entities;
 using Madorin.AI.Runtime.Orchestration.Abstractions;
 using Madorin.AI.Runtime.Persistence.Files;
 using Madorin.AI.Runtime.Providers.Abstractions;
+using Madorin.AI.Runtime.Services.Skills;
 using Madorin.AI.Runtime.Services.Tools;
 using Madorin.AI.Runtime.Tools.Abstractions;
 
@@ -182,6 +183,18 @@ internal sealed class MeetingInvocationExecutor(
                 }
 
                 var toolResult = CreateToolResultContent(toolCall, gatewayResult);
+                if (request.IsHostModeSkills
+                    && gatewayResult.Kind is ToolGatewayResultKind.Success
+                    && gatewayResult.Result is { Success: true, OutputJson: { } outputJson })
+                {
+                    HostModeSkillsSnapshot.TryApplyToolResult(
+                        request.SkillActivationStore,
+                        request.SkillAllowlistIds,
+                        toolCall.ToolId,
+                        toolCall.Name,
+                        outputJson);
+                }
+
                 totalToolResultBytes += GetContentByteCount(toolResult);
                 if (HasOversizedInlineContent(
                         toolResult,

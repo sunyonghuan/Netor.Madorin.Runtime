@@ -2895,6 +2895,7 @@ public sealed class RuntimeServer : IAsyncDisposable
                 resumedCanonicalMessage: resumedCanonicalMessage,
                 resumedMeetingFailure: resumedMeetingFailure,
                 skillCatalog: session.SkillCatalog,
+                isHostModeSkills: _hostProviderRegistry is not null,
                 ct: ct).ConfigureAwait(false))
             {
                 if (string.Equals(envelope.MessageType, MessageTypes.RunStatusChanged, StringComparison.Ordinal)

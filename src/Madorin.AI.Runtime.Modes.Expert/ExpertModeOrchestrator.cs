@@ -1,4 +1,4 @@
-using System.Runtime.CompilerServices;
+﻿using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -39,7 +39,10 @@ public sealed class ExpertModeOrchestrator(
     Func<bool>? isRunTimedOut = null,
     ToolConsentCoordinator? toolConsentCoordinator = null,
     Func<CancellationToken, Task<SkillCatalogSnapshot?>>? skillCatalogSnapshotProvider = null,
-    Func<RuntimeSkillScriptInvocation, CancellationToken, Task<RuntimeSkillScriptResult>>? scriptInvoker = null) : IModeOrchestrator
+    Func<RuntimeSkillScriptInvocation, CancellationToken, Task<RuntimeSkillScriptResult>>? scriptInvoker = null,
+    Func<ToolCatalogSnapshot>? liveCatalogProvider = null,
+    bool isHostModeSkills = false,
+    SkillActivationStore? skillActivationStore = null) : IModeOrchestrator
 {
     private const string ProjectionVersion = "expert-full-tail-v1";
     private readonly SqliteEventOutbox _outbox = outbox
@@ -70,6 +73,13 @@ public sealed class ExpertModeOrchestrator(
         skillCatalogSnapshotProvider;
     private readonly Func<RuntimeSkillScriptInvocation, CancellationToken, Task<RuntimeSkillScriptResult>>?
         _scriptInvoker = scriptInvoker;
+    private readonly Func<ToolCatalogSnapshot>? _liveCatalogProvider = liveCatalogProvider;
+    private readonly bool _isHostModeSkills = isHostModeSkills;
+    private readonly SkillActivationStore? _skillActivationStore = skillActivationStore;
+    private string[]? _hostAllowlistSkillIds;
+    private IReadOnlyDictionary<string, string>? _hostCatalogPathsByName;
+    private IReadOnlyDictionary<string, string>? _hostCatalogDescriptionsByName;
+    private IReadOnlyList<SkillScopeSourceRoot>? _hostScopeSourceRoots;
 
     public RuntimeMode Mode => RuntimeMode.Expert;
 
@@ -101,9 +111,10 @@ public sealed class ExpertModeOrchestrator(
             : await _agentContextComposer.ComposeAsync(expert.Agent.SystemPrompt, ct)
                 .ConfigureAwait(false);
         using var memorySnapshotLease = CaptureMemorySnapshot(invocationId, agentContext);
-        var skillCatalogSnapshot = (await CaptureSkillCatalogSnapshotAsync(ct).ConfigureAwait(false))
-            ?.FilterBySkillIds(expert.Agent.SkillIds);
-        var catalogVersion = _toolCatalogSnapshot?.EffectiveVersion
+        var fullSkillCatalog = await CaptureSkillCatalogSnapshotAsync(ct).ConfigureAwait(false);
+        var skillCatalogSnapshot = fullSkillCatalog?.FilterBySkillIds(expert.Agent.SkillIds);
+        BindHostSkillsState(expert.Agent.SkillIds, skillCatalogSnapshot);
+        var catalogVersion = CaptureCatalogSnapshot()?.EffectiveVersion
             ?? request.Selection.ToolCatalogVersion;
         var snapshot = new InvocationSnapshot(
             invocationId,
@@ -116,11 +127,18 @@ public sealed class ExpertModeOrchestrator(
             catalogVersion,
             ProjectionVersion,
             startedAt,
-            SkillCatalogVersion: skillCatalogSnapshot?.Version,
+            SkillCatalogVersion: skillCatalogSnapshot?.Version ?? fullSkillCatalog?.Version,
             SkillNames: skillCatalogSnapshot?.Skills.Select(static skill => skill.Name).ToArray(),
             SkillContentHashes: skillCatalogSnapshot?.Skills.Select(static skill => skill.ContentHash).ToArray(),
             SkillSourceIds: skillCatalogSnapshot?.Skills.Select(static skill => skill.SourceId).ToArray(),
             SkillMaterializedPaths: skillCatalogSnapshot?.Skills.Select(static skill => skill.MaterializedPath).ToArray());
+        if (_isHostModeSkills)
+        {
+            // Host mode: cut full-allowlist Advertise; Loadable starts empty (V1 InitialSkills=∅).
+            snapshot = HostModeSkillsSnapshot.ProjectAdvertiseEmpty(
+                snapshot,
+                skillCatalogSnapshot ?? fullSkillCatalog);
+        }
 
         await AppendContentAsync(
             sessionId,
@@ -148,8 +166,9 @@ public sealed class ExpertModeOrchestrator(
         var systemMessage = new RuntimeProviderMessage(
             RuntimeProviderRoles.System,
             [new TextContentBlock(agentContext.Instructions)]);
-        ToolDescriptor[]? tools = _toolGateway is not null && _toolCatalogSnapshot is not null
-            ? [.. _toolCatalogSnapshot.Tools]
+        var catalogSnapshot = CaptureCatalogSnapshot();
+        ToolDescriptor[]? tools = _toolGateway is not null && catalogSnapshot is not null
+            ? [.. catalogSnapshot.Tools]
             : null;
         ValueTask<ProviderTokenEstimate> EstimateProjectionAsync(
             RuntimeProviderMessage[] candidateMessages,
@@ -443,7 +462,9 @@ public sealed class ExpertModeOrchestrator(
                 break;
             }
 
-            if (_toolGateway is null || _toolCatalogSnapshot is null)
+            // 每轮工具调用前刷新 live catalog（search 命中注入后必须可见）
+            catalogSnapshot = CaptureCatalogSnapshot();
+            if (_toolGateway is null || catalogSnapshot is null)
             {
                 failure = CreateRuntimeError(
                     RuntimeErrorCodes.ToolExecutorUnavailable,
@@ -473,6 +494,8 @@ public sealed class ExpertModeOrchestrator(
 
             foreach (var toolCall in toolCalls)
             {
+                // 单次调用再采一次，覆盖 search 注入与并发 Patch
+                var liveCatalog = CaptureCatalogSnapshot() ?? catalogSnapshot;
                 var invocation = new ToolInvocation(
                     toolCall.CallId,
                     toolCall.ToolId,
@@ -482,14 +505,14 @@ public sealed class ExpertModeOrchestrator(
                     runId,
                     sessionId,
                     invocationId,
-                    ToolCatalogVersion: _toolCatalogSnapshot.EffectiveVersion);
+                    ToolCatalogVersion: liveCatalog.EffectiveVersion);
                 ToolGatewayResult gatewayResult;
                 try
                 {
                     gatewayResult = await _toolGateway.ExecuteAsync(
                         invocation,
                         permission: null,
-                        _toolCatalogSnapshot,
+                        liveCatalog,
                         ct).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -516,7 +539,7 @@ public sealed class ExpertModeOrchestrator(
                     gatewayResult = await ResolveConsentAndExecuteAsync(
                         invocation,
                         gatewayResult,
-                        _toolCatalogSnapshot,
+                        CaptureCatalogSnapshot() ?? catalogSnapshot,
                         ct).ConfigureAwait(false);
                     runSequence = await _outbox.GetNextRunSequenceAsync(runId, ct)
                         .ConfigureAwait(false);
@@ -537,6 +560,18 @@ public sealed class ExpertModeOrchestrator(
                     .ConfigureAwait(false);
 
                 var toolResult = CreateToolResultContent(toolCall, gatewayResult);
+                if (_isHostModeSkills
+                    && gatewayResult.Kind is ToolGatewayResultKind.Success
+                    && gatewayResult.Result is { Success: true, OutputJson: { } outputJson })
+                {
+                    HostModeSkillsSnapshot.TryApplyToolResult(
+                        _skillActivationStore,
+                        _hostAllowlistSkillIds,
+                        toolCall.ToolId,
+                        toolCall.Name,
+                        outputJson);
+                }
+
                 var resultBytes = GetContentByteCount(toolResult);
                 totalToolResultBytes += resultBytes;
                 if (HasOversizedInlineContent(
@@ -579,9 +614,13 @@ public sealed class ExpertModeOrchestrator(
                 runSequence++,
                 RunStatus.Running,
                 ct).ConfigureAwait(false);
+            // search/browse 注入后，下一轮必须带上新工具短名；宿主 Skills Loadable 也需按激活表重建
+            tools = CaptureAvailableTools();
             providerRequest = providerRequest with
             {
                 Messages = [.. providerMessages],
+                Tools = tools,
+                Skills = CreateSkillsContext(snapshot, runId, sessionId),
                 HistoryMessageCount = providerMessages.Count,
                 InternalRequestId = null,
                 AttemptNumber = 0,
@@ -1170,10 +1209,16 @@ public sealed class ExpertModeOrchestrator(
     private SkillsInvocationContext? CreateSkillsContext(
         InvocationSnapshot snapshot,
         string runId,
-        string sessionId) =>
-        string.IsNullOrWhiteSpace(snapshot.SkillCatalogVersion)
-            ? null
-            : new SkillsInvocationContext(
+        string sessionId)
+    {
+        if (string.IsNullOrWhiteSpace(snapshot.SkillCatalogVersion))
+        {
+            return null;
+        }
+
+        if (_isHostModeSkills)
+        {
+            var hostContext = new SkillsInvocationContext(
                 snapshot.SkillCatalogVersion,
                 snapshot.SkillNames ?? [],
                 snapshot.SkillContentHashes ?? [],
@@ -1187,7 +1232,51 @@ public sealed class ExpertModeOrchestrator(
                 ParentAgentId: null,
                 ParentInvocationId: snapshot.ParentInvocationId,
                 WorkStepId: snapshot.WorkStepId,
-                PlanVersion: snapshot.WorkPlanVersion);
+                PlanVersion: snapshot.WorkPlanVersion,
+                IsHostMode: true,
+                ActivationStore: _skillActivationStore,
+                AllowlistSkillIds: _hostAllowlistSkillIds,
+                CatalogMaterializedPathsByName: _hostCatalogPathsByName,
+                CatalogDescriptionsByName: _hostCatalogDescriptionsByName,
+                ScopeSourceRoots: _hostScopeSourceRoots);
+            var loadablePaths = MafSkillsAgentFactory.ResolveHostLoadableMaterializedPaths(hostContext);
+            return hostContext with { SkillMaterializedPaths = loadablePaths };
+        }
+
+        return new SkillsInvocationContext(
+            snapshot.SkillCatalogVersion,
+            snapshot.SkillNames ?? [],
+            snapshot.SkillContentHashes ?? [],
+            snapshot.SkillSourceIds ?? [],
+            snapshot.SkillMaterializedPaths,
+            _scriptInvoker,
+            runId,
+            sessionId,
+            snapshot.AgentId,
+            snapshot.InvocationId,
+            ParentAgentId: null,
+            ParentInvocationId: snapshot.ParentInvocationId,
+            WorkStepId: snapshot.WorkStepId,
+            PlanVersion: snapshot.WorkPlanVersion);
+    }
+
+    private void BindHostSkillsState(string[]? allowlistSkillIds, SkillCatalogSnapshot? allowlistedCatalog)
+    {
+        if (!_isHostModeSkills)
+        {
+            _hostAllowlistSkillIds = null;
+            _hostCatalogPathsByName = null;
+            _hostCatalogDescriptionsByName = null;
+            _hostScopeSourceRoots = null;
+            return;
+        }
+
+        _hostAllowlistSkillIds = allowlistSkillIds;
+        var maps = HostModeSkillsSnapshot.BuildMaps(allowlistedCatalog);
+        _hostCatalogPathsByName = maps.PathsByName;
+        _hostCatalogDescriptionsByName = maps.DescriptionsByName;
+        _hostScopeSourceRoots = maps.ScopeSourceRoots;
+    }
 
     private Task<SkillCatalogSnapshot?> CaptureSkillCatalogSnapshotAsync(CancellationToken ct) =>
         _skillCatalogSnapshotProvider?.Invoke(ct)
@@ -1195,6 +1284,27 @@ public sealed class ExpertModeOrchestrator(
 
     private static string ComputeHash(string value) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+
+    private ToolCatalogSnapshot? CaptureCatalogSnapshot()
+    {
+        if (_liveCatalogProvider is not null)
+        {
+            return _liveCatalogProvider();
+        }
+
+        return _toolCatalogSnapshot;
+    }
+
+    private ToolDescriptor[]? CaptureAvailableTools()
+    {
+        if (_toolGateway is null)
+        {
+            return null;
+        }
+
+        var snapshot = CaptureCatalogSnapshot();
+        return snapshot is null ? null : [.. snapshot.Tools];
+    }
 
     private sealed class MemorySnapshotLease(
         MemoryInvocationSnapshotStore store,
