@@ -35,6 +35,7 @@ public sealed class RuntimeClient : IRuntimeClient
     private Task? _ownedProcessMonitorTask;
     private CancellationTokenSource? _ownedProcessMonitorCancellation;
     private RuntimeInstanceBinding? _instanceBinding;
+    private RuntimeCapabilities? _negotiatedCapabilities;
     private bool _forceOwnedProcessShutdown;
     private Exception? _terminalFailure;
     private int _disposed;
@@ -447,6 +448,9 @@ public sealed class RuntimeClient : IRuntimeClient
             ? _instanceBinding
             : throw new InvalidOperationException("The Runtime instance is not connected.");
 
+    /// <inheritdoc />
+    public RuntimeCapabilities? NegotiatedCapabilities => _negotiatedCapabilities;
+
     public DateTimeOffset? LastSentAt => _controlChannel?.LastSentAt;
 
     public DateTimeOffset? LastReceivedAt => _controlChannel?.LastReceivedAt;
@@ -658,6 +662,7 @@ public sealed class RuntimeClient : IRuntimeClient
 
             _heartbeatIntervalSeconds = initializeResponse.HeartbeatIntervalSeconds;
             _limits = initializeResponse.Limits;
+            _negotiatedCapabilities = initializeResponse.Capabilities;
             _blobChannel = new FramedBlobChannel(_controlChannel);
             if (!string.Equals(
                 _confirmedRuntimeInstanceId,
@@ -720,6 +725,7 @@ public sealed class RuntimeClient : IRuntimeClient
             ConsecutiveFailures++;
             State = RuntimeClientState.Faulted;
             _instanceBinding = null;
+            _negotiatedCapabilities = null;
             await DisposeTransportAsync().ConfigureAwait(false);
 
             if (ex is OperationCanceledException
@@ -1328,6 +1334,8 @@ public sealed class RuntimeClient : IRuntimeClient
             return;
         }
 
+        _negotiatedCapabilities = null;
+
         try
         {
             if (_lifecycleCancellation is not null)
@@ -1405,6 +1413,7 @@ public sealed class RuntimeClient : IRuntimeClient
 
                 State = RuntimeClientState.Closed;
                 _instanceBinding = null;
+                _negotiatedCapabilities = null;
                 _stateGate.Dispose();
                 _hostCallbackDispatcher?.Dispose();
                 _lifecycleCancellation?.Dispose();
@@ -1467,6 +1476,7 @@ public sealed class RuntimeClient : IRuntimeClient
 
         State = RuntimeClientState.Faulted;
         _instanceBinding = null;
+        _negotiatedCapabilities = null;
         _completion.TrySetException(failure);
         if (_lifecycleCancellation is not null)
         {
@@ -1734,6 +1744,8 @@ public sealed class RuntimeClient : IRuntimeClient
 
         _runtimeInstanceId = null;
         _instanceBinding = null;
+        // Keep null-until-connected: reconnect/fault/dispose must not expose stale initialize caps.
+        _negotiatedCapabilities = null;
         _sessionKey = null;
     }
 

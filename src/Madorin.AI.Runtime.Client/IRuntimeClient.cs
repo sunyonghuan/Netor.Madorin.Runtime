@@ -7,6 +7,13 @@ public interface IRuntimeClient : IAsyncDisposable
     /// <summary>Gets the authenticated and initialized Runtime instance binding.</summary>
     public RuntimeInstanceBinding InstanceBinding { get; }
 
+    /// <summary>
+    /// Capabilities negotiated during initialize.
+    /// Null when not connected (including faulted, reconnecting, closed, and never-connected).
+    /// Hosts read <c>Skills.DiscoveryDirect</c> for skill progressive/direct gating.
+    /// </summary>
+    public RuntimeCapabilities? NegotiatedCapabilities { get; }
+
     /// <summary>Gets the current Client lifecycle state.</summary>
     public RuntimeClientState State { get; }
 

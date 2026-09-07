@@ -889,13 +889,7 @@ public sealed class RuntimeServer : IAsyncDisposable
                     ReverseRpc: supportsStage5 ? true : null,
                     ToolCatalog: supportsStage5 ? true : null,
                     ToolPermissions: supportsStage5 ? true : null,
-                    Skills: new SkillsCapabilities(
-                        Enabled: true,
-                        SourceKinds: ["directory"],
-                        ResourcesSupported: true,
-                        ScriptsSupported: true,
-                        HotRefreshSupported: true,
-                        DiscoveryDirect: true)),
+                    Skills: CreateSkillsCapabilities()),
                 CreateNegotiatedLimits(supportsStage5),
                 EventPipeName,
                 _heartbeatIntervalSeconds);
@@ -4290,6 +4284,20 @@ public sealed class RuntimeServer : IAsyncDisposable
                 ? _limits.MaxToolResultBytesPerInvocation ?? 4L * 1024 * 1024
                 : null
         };
+
+    /// <summary>
+    /// Skills capability surface advertised on initialize.
+    /// <see cref="SkillsCapabilities.DiscoveryDirect"/> is the sole host-facing gate;
+    /// Runtime mode parsing only normalizes the agent string (no second process flag).
+    /// </summary>
+    private static SkillsCapabilities CreateSkillsCapabilities() =>
+        new(
+            Enabled: true,
+            SourceKinds: ["directory"],
+            ResourcesSupported: true,
+            ScriptsSupported: true,
+            HotRefreshSupported: true,
+            DiscoveryDirect: true);
 
     private static JsonRpcResponse Error(long id, int code, string message)
         => new("2.0", id, Error: new JsonRpcError(code, message));

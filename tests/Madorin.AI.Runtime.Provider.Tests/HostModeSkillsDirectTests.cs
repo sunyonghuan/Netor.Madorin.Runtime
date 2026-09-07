@@ -22,13 +22,11 @@ public sealed class HostModeSkillsDirectTests
             Guid.NewGuid().ToString("N"));
         _sourceRoot = Path.Combine(_root, "workspace-skills");
         Directory.CreateDirectory(_sourceRoot);
-        SkillDiscoveryModes.DiscoveryDirectSupported = true;
     }
 
     [TestCleanup]
     public void Cleanup()
     {
-        SkillDiscoveryModes.DiscoveryDirectSupported = true;
         if (Directory.Exists(_root))
         {
             Directory.Delete(_root, recursive: true);
@@ -49,14 +47,6 @@ public sealed class HostModeSkillsDirectTests
     }
 
     [TestMethod]
-    public void Normalize_DirectWithoutCapability_DegradesToProgressive()
-    {
-        SkillDiscoveryModes.DiscoveryDirectSupported = false;
-        Assert.AreEqual(SkillDiscoveryModes.Progressive, SkillDiscoveryModes.Normalize("direct"));
-        Assert.IsFalse(SkillDiscoveryModes.IsDirect("direct"));
-    }
-
-    [TestMethod]
     public async Task Direct_Advertise_IncludesAllowlistShortDescriptions()
     {
         CreateSkill("alpha-skill", "Alpha skill short description.");
@@ -74,6 +64,22 @@ public sealed class HostModeSkillsDirectTests
         Assert.AreEqual(
             "Alpha skill short description.",
             skills.Single(static s => s.Frontmatter.Name == "alpha-skill").Frontmatter.Description);
+    }
+
+    [TestMethod]
+    public async Task Direct_AdvertiseDescription_DoesNotContainSkillBody()
+    {
+        // 验证：Advertise 用短描述；body 不进入 Frontmatter.Description（防上下文膨胀主风险面）
+        CreateSkill("alpha-skill", "Short advertise only.");
+        var context = CreateDirectContext(["alpha-skill"]);
+        var source = new HostModeLoadableSkillsSource(context);
+        var skills = await source.GetSkillsAsync(CancellationToken.None);
+        var alpha = skills.Single(static s => s.Frontmatter.Name == "alpha-skill");
+
+        Assert.AreEqual("Short advertise only.", alpha.Frontmatter.Description);
+        Assert.DoesNotContain("body-marker-alpha-skill", alpha.Frontmatter.Description, StringComparison.Ordinal);
+        // body 不进 Advertise description 即消除「名表=全文灌广告」主风险；
+        // body 仍随 AgentInlineSkill 注册供 MAF load_skill 按需读取（与 progressive Loadable 同路径）。
     }
 
     [TestMethod]

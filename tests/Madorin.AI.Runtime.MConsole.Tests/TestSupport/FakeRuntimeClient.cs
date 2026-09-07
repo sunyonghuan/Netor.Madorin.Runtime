@@ -18,6 +18,8 @@ internal sealed class FakeRuntimeClient : IRuntimeClient
 
     public RuntimeClientState State { get; set; } = RuntimeClientState.Connected;
 
+    public RuntimeCapabilities? NegotiatedCapabilities { get; set; }
+
     public Task Completion { get; set; } = Task.CompletedTask;
 
     public IReadOnlyList<RuntimeEventEnvelope> Events { get; set; } = [];

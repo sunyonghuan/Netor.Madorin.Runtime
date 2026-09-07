@@ -6,8 +6,10 @@ using Madorin.AI.Runtime.Providers.Abstractions;
 namespace Madorin.AI.Runtime.Services.Skills;
 
 /// <summary>
-/// Builds host-mode Invocation skill fields: catalog metadata is retained for load,
-/// but Advertise paths stay empty until activation (Loadable).
+/// Builds host-mode Invocation skill fields: catalog metadata is retained for load.
+/// Snapshot MaterializedPaths stay empty at request build; live Loadable is resolved later
+/// via <c>MafSkillsAgentFactory.ResolveHostLoadableMaterializedPaths</c>
+/// (progressive: activation; direct: full allowlist).
 /// </summary>
 public static class HostModeSkillsSnapshot
 {
@@ -42,7 +44,8 @@ public static class HostModeSkillsSnapshot
 
     /// <summary>
     /// Projects an InvocationSnapshot for host mode: keeps catalog version for script routing,
-    /// but does not advertise the full allowlist as MaterializedPaths.
+    /// but clears snapshot paths so host mode never uses independent-mode full-path Provider.
+    /// Live Loadable (progressive activation or direct allowlist) is resolved at invoke time.
     /// </summary>
     public static InvocationSnapshot ProjectAdvertiseEmpty(
         InvocationSnapshot baseSnapshot,
@@ -52,7 +55,7 @@ public static class HostModeSkillsSnapshot
         return baseSnapshot with
         {
             SkillCatalogVersion = version,
-            // Advertise starts empty (InitialSkills = ∅ in V1). Activation fills Loadable later.
+            // Empty here is intentional: host Loadable is dynamic (activation or direct allowlist).
             SkillNames = [],
             SkillContentHashes = [],
             SkillSourceIds = [],
