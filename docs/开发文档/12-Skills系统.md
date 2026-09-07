@@ -8,6 +8,8 @@
 
 Skills 是带有结构化定义的扩展包，每个 Skill 包含一份 `SKILL.md` 定义文件和可选的资源/脚本。Runtime 在 Invocation 开始时加载当前目录快照，将 Skill 内容注入 Agent 上下文或暴露为工具。
 
+> **宿主集成模式（2026-09-07，严格复审）**：宿主提供 `skill.search` 与 **`skill.dir.host_global`**（仅安装侧全局技能根）；工作区技能根由本进程 `WorkspaceDirectory` 解析，**无** workspace 目录元工具。激活 = Runtime tool-result 钩子；`load_skill` 本地物化。独立 CLI 以本节为准。详见 [`../方案设计/09-宿主模式Skills渐进发现与激活.md`](../方案设计/09-宿主模式Skills渐进发现与激活.md)。
+
 核心特性：
 
 - **目录扫描**：从工作区和全局目录自动发现技能

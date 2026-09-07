@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using Madorin.AI.Runtime.Tools.Abstractions;
@@ -15,9 +15,16 @@ public static class ProviderToolNamePolicy
     {
         ArgumentNullException.ThrowIfNull(tool);
 
-        return IsProviderSafe(tool.DisplayName)
-            ? tool.DisplayName
-            : EncodeToolId(tool.ToolId);
+        // 1) DisplayName 已是短调用名（tool_search / csx_run_file / mcli_fs_read）
+        // 2) 否则把 DisplayName 中的点等字符压成 _（tool.search → tool_search）
+        // 3) 仍不合法才回退编码 ToolId（历史 host.cap.* 兜底）
+        var fromDisplay = SanitizeForProvider(tool.DisplayName);
+        if (IsProviderSafe(fromDisplay))
+        {
+            return fromDisplay;
+        }
+
+        return EncodeToolId(tool.ToolId);
     }
 
     /// <summary>Returns a safe function name for a canonical history tool call.</summary>
@@ -40,8 +47,9 @@ public static class ProviderToolNamePolicy
             }
         }
 
-        return IsProviderSafe(storedName)
-            ? storedName
+        var sanitized = SanitizeForProvider(storedName);
+        return IsProviderSafe(sanitized)
+            ? sanitized
             : EncodeToolId(toolId);
     }
 
@@ -69,7 +77,8 @@ public static class ProviderToolNamePolicy
         foreach (var tool in tools)
         {
             if (string.Equals(tool.DisplayName, providerName, StringComparison.Ordinal)
-                || string.Equals(tool.ToolId, providerName, StringComparison.Ordinal))
+                || string.Equals(tool.ToolId, providerName, StringComparison.Ordinal)
+                || string.Equals(SanitizeForProvider(tool.DisplayName), providerName, StringComparison.Ordinal))
             {
                 return tool.ToolId;
             }
@@ -93,6 +102,53 @@ public static class ProviderToolNamePolicy
                     $"Provider tool name '{name}' is duplicated in the current tool catalog.");
             }
         }
+    }
+
+    /// <summary>
+    /// 将任意显示名压成 Provider 安全短名：点/空白等 → _，去掉非法字符。
+    /// </summary>
+    public static string SanitizeForProvider(string? name)
+    {
+        if (string.IsNullOrEmpty(name))
+        {
+            return string.Empty;
+        }
+
+        if (IsProviderSafe(name))
+        {
+            return name;
+        }
+
+        var builder = new StringBuilder(name.Length);
+        var lastWasUnderscore = false;
+        foreach (var character in name)
+        {
+            if (IsAsciiLetterOrDigit(character) || character is '-' or '_')
+            {
+                builder.Append(character);
+                lastWasUnderscore = character == '_';
+                continue;
+            }
+
+            if (character is '.' or '/' or ':' or '@' or ' ' or '+')
+            {
+                if (builder.Length == 0 || lastWasUnderscore)
+                {
+                    continue;
+                }
+
+                builder.Append('_');
+                lastWasUnderscore = true;
+            }
+        }
+
+        var result = builder.ToString().Trim('_');
+        if (result.Length > MaximumNameLength)
+        {
+            result = result[..MaximumNameLength].TrimEnd('_');
+        }
+
+        return result;
     }
 
     private static bool IsProviderSafe(string name)

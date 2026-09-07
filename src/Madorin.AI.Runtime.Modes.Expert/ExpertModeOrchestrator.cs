@@ -101,7 +101,8 @@ public sealed class ExpertModeOrchestrator(
             : await _agentContextComposer.ComposeAsync(expert.Agent.SystemPrompt, ct)
                 .ConfigureAwait(false);
         using var memorySnapshotLease = CaptureMemorySnapshot(invocationId, agentContext);
-        var skillCatalogSnapshot = await CaptureSkillCatalogSnapshotAsync(ct).ConfigureAwait(false);
+        var skillCatalogSnapshot = (await CaptureSkillCatalogSnapshotAsync(ct).ConfigureAwait(false))
+            ?.FilterBySkillIds(expert.Agent.SkillIds);
         var catalogVersion = _toolCatalogSnapshot?.EffectiveVersion
             ?? request.Selection.ToolCatalogVersion;
         var snapshot = new InvocationSnapshot(

@@ -1810,7 +1810,8 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             MeetingInvocationRole.Participant,
             projectionStrategyOverride,
             ct: ct).ConfigureAwait(false);
-        var skillCatalogSnapshot = await CaptureSkillCatalogSnapshotAsync(ct).ConfigureAwait(false);
+        var skillCatalogSnapshot = (await CaptureSkillCatalogSnapshotAsync(ct).ConfigureAwait(false))
+            ?.FilterBySkillIds(agent.SkillIds);
         var snapshot = new InvocationSnapshot(
             invocationId,
             agent.AgentId,
@@ -1880,7 +1881,8 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             MeetingInvocationRole.Summarizer,
             MeetingContextStrategy.Full,
             ct).ConfigureAwait(false);
-        var skillCatalogSnapshot = await CaptureSkillCatalogSnapshotAsync(ct).ConfigureAwait(false);
+        var skillCatalogSnapshot = (await CaptureSkillCatalogSnapshotAsync(ct).ConfigureAwait(false))
+            ?.FilterBySkillIds(agent.SkillIds);
         var snapshot = new InvocationSnapshot(
             invocationId,
             agent.AgentId,
@@ -3180,7 +3182,8 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             MeetingInvocationRole.Host,
             projectionStrategyOverride,
             ct: ct).ConfigureAwait(false);
-        var skillCatalogSnapshot = await CaptureSkillCatalogSnapshotAsync(ct).ConfigureAwait(false);
+        var skillCatalogSnapshot = (await CaptureSkillCatalogSnapshotAsync(ct).ConfigureAwait(false))
+            ?.FilterBySkillIds(agent.SkillIds);
         var snapshot = new InvocationSnapshot(
             invocationId,
             agent.AgentId,
@@ -3257,7 +3260,8 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             MeetingInvocationRole.Selector,
             projectionStrategyOverride,
             ct: ct).ConfigureAwait(false);
-        var skillCatalogSnapshot = await CaptureSkillCatalogSnapshotAsync(ct).ConfigureAwait(false);
+        var skillCatalogSnapshot = (await CaptureSkillCatalogSnapshotAsync(ct).ConfigureAwait(false))
+            ?.FilterBySkillIds(agent.SkillIds);
         var snapshot = new InvocationSnapshot(
             invocationId,
             agent.AgentId,

@@ -53,6 +53,26 @@ public sealed class SkillCatalogSnapshot
         return _skills.TryGetValue(name, out skill);
     }
 
+    /// <summary>
+    /// 按 AgentRef.SkillIds 过滤：null=未声明（保留全部）；[]=显式无；非空=仅保留名单内技能。
+    /// </summary>
+    public SkillCatalogSnapshot FilterBySkillIds(string[]? skillIds)
+    {
+        if (skillIds is null)
+        {
+            return this;
+        }
+
+        if (skillIds.Length == 0)
+        {
+            return new SkillCatalogSnapshot(Version, [], Sources, Diagnostics);
+        }
+
+        var allowed = skillIds.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var filtered = Skills.Where(skill => allowed.Contains(skill.Name));
+        return new SkillCatalogSnapshot(Version, filtered, Sources, Diagnostics);
+    }
+
     public SkillCatalogSummary ToContract() =>
         new(Version, Skills.Length, Skills.Select(static x => x.ToContract()).ToArray(), Sources.ToArray(), Diagnostics.ToArray());
 }

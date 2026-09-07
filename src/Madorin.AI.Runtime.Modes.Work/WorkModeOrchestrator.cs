@@ -1744,7 +1744,8 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             ];
         }
 
-        var skillCatalogSnapshot = await CaptureSkillCatalogSnapshotAsync(ct).ConfigureAwait(false);
+        var skillCatalogSnapshot = (await CaptureSkillCatalogSnapshotAsync(ct).ConfigureAwait(false))
+            ?.FilterBySkillIds(agent.SkillIds);
         var snapshot = new InvocationSnapshot(
             invocationId,
             agent.AgentId,

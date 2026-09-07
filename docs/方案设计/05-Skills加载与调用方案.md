@@ -7,6 +7,8 @@
 > 前置文档：[总体方案](../README.md) · [架构修订 V1](./02-架构修订-V1.md) · [实现框架参考](./03-实现框架参考.md) · [CLI 命令规范](../命令规范/04-CLI命令规范.md)
 >
 > 本文同时记录已落地的协议、Catalog、MAF 注入和脚本授权边界；最终发布门禁仍以阶段 5A 和阶段 8 的验证结果为准。
+>
+> **宿主模式增量（2026-09-07，严格复审）**：见 [`09-宿主模式Skills渐进发现与激活.md`](./09-宿主模式Skills渐进发现与激活.md)。要点：workspace/user-global 路径 Runtime **自知**（不依赖宿主 workspace 目录工具）；激活 = tool-result 钩子；Provider 常驻；Advertise≠Allowlist；独立模式以本文为准。
 
 ---
 
@@ -825,6 +827,10 @@ Catalog 成功更新后发送 `skill.catalog.changed`，至少包含旧版本、
 
 ## 20. 禁止事项
 
+- 禁止在**宿主模式**下将全 Allowlist 的 MaterializedPaths 直接作为 Provider 全量 Advertise（见 `09`）；独立模式不受该条实施进度阻塞。
+- 禁止宿主模式因激活集为空而不创建 `AgentSkillsProvider`（三工具必须可出现）。
+- 禁止在宿主 Reverse RPC **工具回调栈内**同步依赖 Runtime activation 控制调用才能完成 `skill.search`（激活须在 Runtime 消化 tool result 时完成，见 `09`）。
+- 禁止将「提供 workspace 技能目录元工具」列为宿主依赖（Runtime 已绑定 `WorkspaceDirectory`）。
 - 禁止 Runtime 对宿主传入的 Skill 来源再做信任审批或要求签名。
 - 禁止把宿主来源数组拼接成单个命令行字符串传递。
 - 禁止宿主重复传入工作区 Skills 路径并覆盖 Runtime 的工作区绑定。
