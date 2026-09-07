@@ -94,7 +94,8 @@ public sealed class ProviderAgentInvocationExecutor : IAgentInvocationExecutor
                 AllowlistSkillIds: request.SkillAllowlistIds,
                 CatalogMaterializedPathsByName: request.SkillCatalogPathsByName,
                 CatalogDescriptionsByName: request.SkillCatalogDescriptionsByName,
-                ScopeSourceRoots: request.SkillScopeSourceRoots);
+                ScopeSourceRoots: request.SkillScopeSourceRoots,
+                SkillDiscoveryMode: request.SkillDiscoveryMode);
         }
 
         return new SkillsInvocationContext(
@@ -127,7 +128,8 @@ public sealed class ProviderAgentInvocationExecutor : IAgentInvocationExecutor
             AllowlistSkillIds: request.SkillAllowlistIds,
             CatalogMaterializedPathsByName: request.SkillCatalogPathsByName,
             CatalogDescriptionsByName: request.SkillCatalogDescriptionsByName,
-            ScopeSourceRoots: request.SkillScopeSourceRoots);
+            ScopeSourceRoots: request.SkillScopeSourceRoots,
+            SkillDiscoveryMode: request.SkillDiscoveryMode);
         return MafSkillsAgentFactory.ResolveHostLoadableMaterializedPaths(probe);
     }
 }

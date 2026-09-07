@@ -77,6 +77,7 @@ public sealed class ExpertModeOrchestrator(
     private readonly bool _isHostModeSkills = isHostModeSkills;
     private readonly SkillActivationStore? _skillActivationStore = skillActivationStore;
     private string[]? _hostAllowlistSkillIds;
+    private string? _hostSkillDiscoveryMode;
     private IReadOnlyDictionary<string, string>? _hostCatalogPathsByName;
     private IReadOnlyDictionary<string, string>? _hostCatalogDescriptionsByName;
     private IReadOnlyList<SkillScopeSourceRoot>? _hostScopeSourceRoots;
@@ -113,7 +114,10 @@ public sealed class ExpertModeOrchestrator(
         using var memorySnapshotLease = CaptureMemorySnapshot(invocationId, agentContext);
         var fullSkillCatalog = await CaptureSkillCatalogSnapshotAsync(ct).ConfigureAwait(false);
         var skillCatalogSnapshot = fullSkillCatalog?.FilterBySkillIds(expert.Agent.SkillIds);
-        BindHostSkillsState(expert.Agent.SkillIds, skillCatalogSnapshot);
+        BindHostSkillsState(
+            expert.Agent.SkillIds,
+            skillCatalogSnapshot,
+            expert.Agent.SkillDiscoveryMode);
         var catalogVersion = CaptureCatalogSnapshot()?.EffectiveVersion
             ?? request.Selection.ToolCatalogVersion;
         var snapshot = new InvocationSnapshot(
@@ -569,7 +573,8 @@ public sealed class ExpertModeOrchestrator(
                         _hostAllowlistSkillIds,
                         toolCall.ToolId,
                         toolCall.Name,
-                        outputJson);
+                        outputJson,
+                        _hostSkillDiscoveryMode);
                 }
 
                 var resultBytes = GetContentByteCount(toolResult);
@@ -1238,7 +1243,8 @@ public sealed class ExpertModeOrchestrator(
                 AllowlistSkillIds: _hostAllowlistSkillIds,
                 CatalogMaterializedPathsByName: _hostCatalogPathsByName,
                 CatalogDescriptionsByName: _hostCatalogDescriptionsByName,
-                ScopeSourceRoots: _hostScopeSourceRoots);
+                ScopeSourceRoots: _hostScopeSourceRoots,
+                SkillDiscoveryMode: _hostSkillDiscoveryMode);
             var loadablePaths = MafSkillsAgentFactory.ResolveHostLoadableMaterializedPaths(hostContext);
             return hostContext with { SkillMaterializedPaths = loadablePaths };
         }
@@ -1260,11 +1266,15 @@ public sealed class ExpertModeOrchestrator(
             PlanVersion: snapshot.WorkPlanVersion);
     }
 
-    private void BindHostSkillsState(string[]? allowlistSkillIds, SkillCatalogSnapshot? allowlistedCatalog)
+    private void BindHostSkillsState(
+        string[]? allowlistSkillIds,
+        SkillCatalogSnapshot? allowlistedCatalog,
+        string? skillDiscoveryMode)
     {
         if (!_isHostModeSkills)
         {
             _hostAllowlistSkillIds = null;
+            _hostSkillDiscoveryMode = null;
             _hostCatalogPathsByName = null;
             _hostCatalogDescriptionsByName = null;
             _hostScopeSourceRoots = null;
@@ -1272,6 +1282,7 @@ public sealed class ExpertModeOrchestrator(
         }
 
         _hostAllowlistSkillIds = allowlistSkillIds;
+        _hostSkillDiscoveryMode = SkillDiscoveryModes.Normalize(skillDiscoveryMode);
         var maps = HostModeSkillsSnapshot.BuildMaps(allowlistedCatalog);
         _hostCatalogPathsByName = maps.PathsByName;
         _hostCatalogDescriptionsByName = maps.DescriptionsByName;

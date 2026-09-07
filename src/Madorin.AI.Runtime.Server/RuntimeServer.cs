@@ -894,7 +894,8 @@ public sealed class RuntimeServer : IAsyncDisposable
                         SourceKinds: ["directory"],
                         ResourcesSupported: true,
                         ScriptsSupported: true,
-                        HotRefreshSupported: true)),
+                        HotRefreshSupported: true,
+                        DiscoveryDirect: true)),
                 CreateNegotiatedLimits(supportsStage5),
                 EventPipeName,
                 _heartbeatIntervalSeconds);

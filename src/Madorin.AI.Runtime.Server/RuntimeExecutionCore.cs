@@ -168,12 +168,14 @@ internal sealed class RuntimeExecutionCore(
             gatewayCatalogSnapshot,
             workRepo);
         await recoveryService.RecoverSentToolIntentsAsync(ct).ConfigureAwait(false);
+        // Host reverse-RPC 与 Standalone 共用 scope 解析：人审只回答是否同意，
+        // AllowedExecutables/路径等由 Runtime 按本次 arguments 收窄（避免 Host Grant 空白名单）。
         var toolConsentCoordinator = new ToolConsentCoordinator(
             toolGateway,
             authorizationService,
             gatewayCatalogSnapshot,
             consentHandler,
-            localToolConsentHandler is null ? null : new BuiltinToolConsentScopeResolver(),
+            new BuiltinToolConsentScopeResolver(),
             _workspaceRoot,
             toolStateStore);
 

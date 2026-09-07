@@ -1476,7 +1476,8 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                         request.SkillAllowlistIds,
                         toolCall.ToolId,
                         toolCall.Name,
-                        outputJson);
+                        outputJson,
+                        request.SkillDiscoveryMode);
                 }
 
                 totalToolResultBytes += GetContentByteCount(toolResult);
@@ -1823,7 +1824,10 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             SkillAllowlistIds: agent.SkillIds,
             SkillCatalogPathsByName: hostMaps?.PathsByName,
             SkillCatalogDescriptionsByName: hostMaps?.DescriptionsByName,
-            SkillScopeSourceRoots: hostMaps?.ScopeSourceRoots);
+            SkillScopeSourceRoots: hostMaps?.ScopeSourceRoots,
+            SkillDiscoveryMode: _isHostModeSkills
+                ? SkillDiscoveryModes.Normalize(agent.SkillDiscoveryMode)
+                : null);
     }
 
     private static string BuildManagerPlanningInput(
@@ -2054,7 +2058,8 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 AllowlistSkillIds: request.SkillAllowlistIds,
                 CatalogMaterializedPathsByName: request.SkillCatalogPathsByName,
                 CatalogDescriptionsByName: request.SkillCatalogDescriptionsByName,
-                ScopeSourceRoots: request.SkillScopeSourceRoots);
+                ScopeSourceRoots: request.SkillScopeSourceRoots,
+                SkillDiscoveryMode: request.SkillDiscoveryMode);
             var loadablePaths = MafSkillsAgentFactory.ResolveHostLoadableMaterializedPaths(hostContext);
             return hostContext with { SkillMaterializedPaths = loadablePaths };
         }

@@ -40,7 +40,6 @@ public sealed class ToolConsentCoordinatorTests
     [DataRow("denied", "denied")]
     [DataRow("mismatch", "invalid-response")]
     [DataRow("exception", "handler-error")]
-    [DataRow("missing-grant", "invalid-grant")]
     [DataRow("invalid-grant", "invalid-grant")]
     public async Task ResolveAndExecuteAsync_PermissionFailureTerminatesIntentAndLedger(
         string behavior,
@@ -213,13 +212,6 @@ public sealed class ToolConsentCoordinatorTests
                 ToolAuthorizationDecision.Denied,
                 Reason: "mismatch")),
         "exception" => new DelegateConsentHandler(permissionException: true),
-        "missing-grant" => new DelegateConsentHandler(permission: context =>
-            new ToolPermissionResponse(
-                context.Request.CorrelationId ?? string.Empty,
-                context.Request.CallId,
-                ToolAuthorizationDecision.Granted,
-                Grant: null,
-                Reason: "missing")),
         "invalid-grant" => new DelegateConsentHandler(permission: context =>
             new ToolPermissionResponse(
                 context.Request.CorrelationId ?? string.Empty,
@@ -233,6 +225,39 @@ public sealed class ToolConsentCoordinatorTests
                 "expired")),
         _ => throw new ArgumentOutOfRangeException(nameof(behavior), behavior, null)
     };
+
+    [TestMethod]
+    public async Task ResolveAndExecuteAsync_GrantedWithoutHostGrant_BuildsFromScope()
+    {
+        // 人审只回 Granted、不带 Grant 时，Runtime 应用 scope 定稿（Host 空 Grant 同源能力）。
+        var descriptor = CreateDescriptor(requiresApproval: false);
+        await using var harness = await ConsentHarness.CreateAsync(
+            _workspace,
+            descriptor,
+            new CountingExecutor(descriptor.ToolId),
+            TestContext.CancellationToken);
+        var invocation = CreateInvocation(descriptor.ToolId, "call-scope-grant");
+        var pending = await harness.CreatePendingAsync(
+            invocation,
+            ToolGatewayResultKind.NeedsPermission,
+            TestContext.CancellationToken);
+        var coordinator = harness.CreateCoordinator(
+            new DelegateConsentHandler(permission: context =>
+                new ToolPermissionResponse(
+                    context.Request.CorrelationId ?? string.Empty,
+                    context.Request.CallId,
+                    ToolAuthorizationDecision.Granted,
+                    Grant: null,
+                    Reason: "approved without host grant body")));
+
+        var result = await coordinator.ResolveAndExecuteAsync(
+            invocation,
+            pending,
+            TestContext.CancellationToken);
+
+        Assert.AreEqual(ToolGatewayResultKind.Success, result.Kind, result.Error?.Message);
+        await AssertIntentStatusAsync(harness.Store, invocation, ToolIntentStatus.Succeeded);
+    }
 
     private static ToolDescriptor CreateDescriptor(bool requiresApproval) =>
         new(

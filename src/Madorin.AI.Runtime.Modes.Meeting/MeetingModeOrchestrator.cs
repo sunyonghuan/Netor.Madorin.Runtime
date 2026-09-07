@@ -1851,7 +1851,8 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                     AvailableTools: ResolveAvailableTools(agent, providerId),
                     HistoryMessageCount: 1 + projection.Messages.Length),
                 agent.SkillIds,
-                skillCatalogSnapshot),
+                skillCatalogSnapshot,
+                agent.SkillDiscoveryMode),
             projection);
     }
 
@@ -1932,7 +1933,8 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                     AvailableTools: null,
                     HistoryMessageCount: 1 + projection.Messages.Length),
                 agent.SkillIds,
-                skillCatalogSnapshot),
+                skillCatalogSnapshot,
+                agent.SkillDiscoveryMode),
             projection);
     }
 
@@ -2540,7 +2542,8 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
     private AgentInvocationRequest ApplyHostSkills(
         AgentInvocationRequest request,
         string[]? skillIds,
-        SkillCatalogSnapshot? filteredCatalog)
+        SkillCatalogSnapshot? filteredCatalog,
+        string? skillDiscoveryMode = null)
     {
         if (!_isHostModeSkills)
         {
@@ -2563,7 +2566,8 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             SkillAllowlistIds = skillIds,
             SkillCatalogPathsByName = maps.PathsByName,
             SkillCatalogDescriptionsByName = maps.DescriptionsByName,
-            SkillScopeSourceRoots = maps.ScopeSourceRoots
+            SkillScopeSourceRoots = maps.ScopeSourceRoots,
+            SkillDiscoveryMode = SkillDiscoveryModes.Normalize(skillDiscoveryMode)
         };
     }
 
@@ -3266,7 +3270,8 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                     StructuredOutput: CreateHostStructuredOutput(),
                     HistoryMessageCount: 1 + projection.Messages.Length),
                 agent.SkillIds,
-                skillCatalogSnapshot),
+                skillCatalogSnapshot,
+                agent.SkillDiscoveryMode),
             projection);
     }
 
@@ -3345,7 +3350,8 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                     StructuredOutput: CreateSelectorStructuredOutput(),
                     HistoryMessageCount: 1 + projection.Messages.Length),
                 agent.SkillIds,
-                skillCatalogSnapshot),
+                skillCatalogSnapshot,
+                agent.SkillDiscoveryMode),
             projection);
     }
 

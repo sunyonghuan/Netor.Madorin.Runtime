@@ -1,6 +1,6 @@
 # 宿主模式 Skills 渐进发现与激活
 
-> **状态**：已裁决（2026-09-07；**严格复审修订**）  
+> **状态**：Progressive **已落地**（2026-09-07 裁决 + 主干实现）；Direct 见 `10`（**已落地**）  
 > **前置**：`05-Skills加载与调用方案.md`  
 > **对端**：Workstation `备档/裁决-技能渐进发现与激活模式-20260907.md`（宿主爆炸半径、元工具、Allowlist）  
 > **原则**：独立模式零行为回归；宿主模式只改 Advertise/激活/Provider 装配，不改脚本 Grant、Catalog 物化基线、非 Skills 子系统
@@ -157,25 +157,54 @@ load_skill(name)
 
 ---
 
-## 10. 发现策略 Direct（2026-03-26 增补）
+## 10. 发现策略 Direct（指针）
 
-> 完整策划见同目录 `10-宿主模式Skills发现策略Direct.md`。  
-> 对端：Workstation F08 `备档/裁决-渐进发现双开关-20260326.md`。
+> **完整策划 + 代码推演**：同目录 `10-宿主模式Skills发现策略Direct.md`（含 R1–R10）。  
+> 对端：Workstation F08 裁决 / 执行规格。
 
-宿主任务开关 **技能按需发现 = 关** 时，Run 材料携带 `SkillDiscoveryMode=direct`。  
-Runtime 宿主模式：
+| 项 | 状态 |
+|----|------|
+| Progressive（本文 §1–§8） | **已实现** |
+| `SkillDiscoveryMode=direct` | **已实现**（`AgentRef` / Context / Meeting JSON） |
+| `skills.discoveryDirect` | **已实现**（initialize `true`） |
 
-- `Loadable = Allowlist`（全启用名），Advertise 短描述；  
-- **仍禁止**全量 MaterializedPaths 长正文广告；  
-- search 钩子 no-op；load/resource/script 门禁与 Grant 同 09；  
-- 缺省 mode = progressive；须 **capabilities 声明** 支持 direct 供宿主门闩。
+宿主关「技能按需发现」前仍应读 `skills.discoveryDirect=true`。
 
-§7「禁止全 Allowlist 当 Advertise」修订为：禁止全 Allowlist 当 **长正文/全 paths** Advertise；**短描述名表**在 direct 下允许等于 Allowlist。
+Direct 摘要：
+
+- `Loadable` 名集 = Allowlist（短描述 Advertise）；**不**灌全文 paths  
+- **不**占用 `DefaultMaxLoadableSkills=24` 激活名额  
+- search 钩子 no-op；load 仅 Allowlist 门禁  
+- §7「禁止全 Allowlist 当 Advertise」= 禁止当 **长正文/全 paths**；短描述名表在 direct 下允许
+
+### 10.1 Progressive 现码锚点（防漂移）
+
+| 锚点 | 符号 |
+|------|------|
+| Source | `HostModeLoadableSkillsSource` |
+| 工厂 | `MafSkillsAgentFactory.CreateSkillsProvider` / `ResolveHostLoadableMaterializedPaths` |
+| 激活 | `SkillActivationStore`（Max 24） |
+| 钩子 | `SkillSearchActivationHook`（MaxHits 8） |
+| 投影 | `HostModeSkillsSnapshot.ProjectAdvertiseEmpty` |
+| 空 Loadable | 内联 `host-skills-guide` 保 MAF 工具注册 |
+| 上下文 | `SkillsInvocationContext.IsHostMode` + maps |
 
 ---
 
-## 11. 变更记录（续）
+## 11. skill.search hits 规约（宿主主责）
+
+- hits：**完整 description**（非 body），宿主 **1024 + 边界截断**（可对齐 `BoundDescription`；Runtime 边界字符见 10 §R8）。  
+- **topK ≤ 8**；宽查询宿主先收窄；Runtime 钩子防御性再限 8。  
+- body 只经 `load_skill`。  
+- 详见 `10` §9 与宿主 F08 裁决。
+
+---
+
+## 12. 变更记录（续）
 
 | 日期 | 说明 |
 |------|------|
-| 2026-03-26 | §10 Direct 发现策略；详规见 `10-宿主模式Skills发现策略Direct.md`；对端 F08 双开关 |
+| 2026-03-26 | §10 Direct 指针；详规见 `10` |
+| 2026-03-26 | **代码推演**：标明 Direct 未落地；补 Progressive 锚点与 capabilities/AgentRef 缺口；hits 规约并入 §11 |
+| 2026-03-26 | Direct 落地（见 `10`）；§10 状态改为已实现 |
+

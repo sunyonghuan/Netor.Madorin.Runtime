@@ -35,7 +35,7 @@ public static partial class SkillSearchActivationHook
     /// Parses search hits from tool output JSON and activates names within the allowlist.
     /// At most <paramref name="maxHitsPerResult"/> distinct allowlisted hits are applied
     /// (order preserved). Existing activations still refresh description/scope when re-hit
-    /// within the cap window.
+    /// within the cap window. Direct discovery mode is a no-op (does not consume activation slots).
     /// </summary>
     /// <returns>Number of names newly accepted or refreshed in the activation store.</returns>
     public static int TryApplySearchResult(
@@ -44,9 +44,15 @@ public static partial class SkillSearchActivationHook
         string? toolName,
         string? outputJson,
         string[]? allowlistSkillIds,
-        int maxHitsPerResult = DefaultMaxHitsPerSearchResult)
+        int maxHitsPerResult = DefaultMaxHitsPerSearchResult,
+        string? skillDiscoveryMode = null)
     {
         ArgumentNullException.ThrowIfNull(store);
+        if (SkillDiscoveryModes.IsDirect(skillDiscoveryMode))
+        {
+            return 0;
+        }
+
         if (!IsSkillSearchTool(toolId, toolName))
         {
             return 0;

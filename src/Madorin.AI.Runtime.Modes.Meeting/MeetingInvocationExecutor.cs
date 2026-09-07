@@ -192,7 +192,8 @@ internal sealed class MeetingInvocationExecutor(
                         request.SkillAllowlistIds,
                         toolCall.ToolId,
                         toolCall.Name,
-                        outputJson);
+                        outputJson,
+                        request.SkillDiscoveryMode);
                 }
 
                 totalToolResultBytes += GetContentByteCount(toolResult);

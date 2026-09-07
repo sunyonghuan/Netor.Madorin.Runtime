@@ -49,4 +49,9 @@ public sealed record SkillsInvocationContext(
     /// <summary>Allowlisted catalog name → description (used for short Advertise text).</summary>
     [property: JsonIgnore] IReadOnlyDictionary<string, string>? CatalogDescriptionsByName = null,
     /// <summary>Bound source roots (workspace / user-global / host-global) for lazy path resolve.</summary>
-    [property: JsonIgnore] IReadOnlyList<SkillScopeSourceRoot>? ScopeSourceRoots = null);
+    [property: JsonIgnore] IReadOnlyList<SkillScopeSourceRoot>? ScopeSourceRoots = null,
+    /// <summary>
+    /// Host discovery strategy: <c>progressive</c> (default) or <c>direct</c>.
+    /// Independent mode ignores this field.
+    /// </summary>
+    [property: JsonIgnore] string? SkillDiscoveryMode = null);

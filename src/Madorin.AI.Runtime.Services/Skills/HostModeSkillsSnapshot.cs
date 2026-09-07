@@ -65,7 +65,8 @@ public static class HostModeSkillsSnapshot
         string[]? allowlistSkillIds,
         string toolId,
         string? toolName,
-        string? outputJson)
+        string? outputJson,
+        string? skillDiscoveryMode = null)
     {
         if (store is null)
         {
@@ -77,7 +78,8 @@ public static class HostModeSkillsSnapshot
             toolId,
             toolName,
             outputJson,
-            allowlistSkillIds);
+            allowlistSkillIds,
+            skillDiscoveryMode: skillDiscoveryMode);
     }
 
     private static List<SkillScopeSourceRoot> BuildScopeRoots(SkillCatalogSnapshot catalog)

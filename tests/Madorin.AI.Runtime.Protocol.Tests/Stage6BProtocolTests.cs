@@ -132,7 +132,8 @@ public sealed class Stage6BProtocolTests
                 "v1",
                 "Use only the assigned capabilities.",
                 AllowedToolIds: ["mcli_fs_read", "host.erp.lookup"],
-                SkillIds: ["finance", "risk-review"]),
+                SkillIds: ["finance", "risk-review"],
+                SkillDiscoveryMode: "direct"),
             "Tool participant",
             0);
 
@@ -150,8 +151,10 @@ public sealed class Stage6BProtocolTests
         CollectionAssert.AreEqual(
             participant.Agent.SkillIds,
             actual.Agent.SkillIds);
+        Assert.AreEqual("direct", actual.Agent.SkillDiscoveryMode);
         StringAssert.Contains(json, "\"allowedToolIds\":[");
         StringAssert.Contains(json, "\"skillIds\":[");
+        StringAssert.Contains(json, "\"skillDiscoveryMode\":\"direct\"");
     }
 
     [TestMethod]

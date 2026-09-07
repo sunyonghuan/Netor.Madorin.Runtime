@@ -98,24 +98,17 @@ public static class MafSkillsAgentFactory
     }
 
     /// <summary>
-    /// Resolves materialized paths for the current host-mode Loadable set
-    /// (Activation ∩ Allowlist), preferring catalog MaterializedPath entries.
+    /// Resolves materialized paths for the current host-mode Loadable set.
+    /// Progressive: Activation ∩ Allowlist (optional Initial SkillNames).
+    /// Direct: Allowlist names with resolvable catalog/scope paths (no activation ceiling).
     /// </summary>
     public static string[] ResolveHostLoadableMaterializedPaths(SkillsInvocationContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
 
-        var loadableNames = context.ActivationStore?.GetLoadableNames(context.AllowlistSkillIds)
-            ?? [];
-        if (loadableNames.Length == 0
-            && context.SkillNames is { Length: > 0 }
-            && context.SkillMaterializedPaths is { Length: > 0 })
-        {
-            // Optional InitialSkills already projected into SkillNames/paths.
-            loadableNames = context.SkillNames
-                .Where(name => SkillActivationStore.IsAllowed(name, context.AllowlistSkillIds))
-                .ToArray();
-        }
+        var loadableNames = SkillDiscoveryModes.IsDirect(context.SkillDiscoveryMode)
+            ? ResolveDirectLoadableNames(context)
+            : ResolveProgressiveLoadableNames(context);
 
         if (loadableNames.Length == 0)
         {
@@ -139,8 +132,9 @@ public static class MafSkillsAgentFactory
     }
 
     /// <summary>
-    /// Validates that <paramref name="name"/> is loadable in host mode (activated + allowlisted)
-    /// and resolves its materialized path. Independent mode always returns the path map hit.
+    /// Validates that <paramref name="name"/> is loadable in host mode and resolves its path.
+    /// Progressive requires activation; direct only requires allowlist + resolvable path.
+    /// Independent mode always returns the path map hit.
     /// </summary>
     public static bool TryResolveLoadPath(
         SkillsInvocationContext context,
@@ -166,8 +160,10 @@ public static class MafSkillsAgentFactory
                 return false;
             }
 
-            if (context.ActivationStore is null
-                || !context.ActivationStore.IsLoadable(normalized, context.AllowlistSkillIds))
+            var isDirect = SkillDiscoveryModes.IsDirect(context.SkillDiscoveryMode);
+            if (!isDirect
+                && (context.ActivationStore is null
+                    || !context.ActivationStore.IsLoadable(normalized, context.AllowlistSkillIds)))
             {
                 error = $"Skill '{normalized}' is not activated. Call skill.search first.";
                 return false;
@@ -181,6 +177,67 @@ public static class MafSkillsAgentFactory
         }
 
         return true;
+    }
+
+    private static string[] ResolveProgressiveLoadableNames(SkillsInvocationContext context)
+    {
+        var loadableNames = context.ActivationStore?.GetLoadableNames(context.AllowlistSkillIds)
+            ?? [];
+        if (loadableNames.Length == 0
+            && context.SkillNames is { Length: > 0 }
+            && context.SkillMaterializedPaths is { Length: > 0 })
+        {
+            // Optional InitialSkills already projected into SkillNames/paths.
+            loadableNames = context.SkillNames
+                .Where(name => SkillActivationStore.IsAllowed(name, context.AllowlistSkillIds))
+                .ToArray();
+        }
+
+        return loadableNames;
+    }
+
+    /// <summary>
+    /// Direct Loadable names = Allowlist (null → all catalog names; [] → none),
+    /// without consuming progressive activation slots.
+    /// Path resolvability is checked by the caller when building path lists.
+    /// </summary>
+    private static string[] ResolveDirectLoadableNames(SkillsInvocationContext context)
+    {
+        var allowlist = context.AllowlistSkillIds;
+        if (allowlist is { Length: 0 })
+        {
+            return [];
+        }
+
+        if (allowlist is { Length: > 0 })
+        {
+            return allowlist
+                .Where(static name => !string.IsNullOrWhiteSpace(name))
+                .Select(static name => name.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(static name => name, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        // null allowlist = undeclared → all known catalog names (use with care).
+        if (context.CatalogMaterializedPathsByName is { Count: > 0 } catalog)
+        {
+            return catalog.Keys
+                .OrderBy(static name => name, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        if (context.SkillNames is { Length: > 0 })
+        {
+            return context.SkillNames
+                .Where(static name => !string.IsNullOrWhiteSpace(name))
+                .Select(static name => name.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(static name => name, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        return [];
     }
 
     private static bool TryResolveMaterializedPath(

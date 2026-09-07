@@ -322,9 +322,14 @@ public sealed class ToolConsentCoordinator
                     ct).ConfigureAwait(false);
             }
 
-            grant = response.Grant is null
-                ? null
-                : response.Grant with { ApprovalRequestId = approvalRequestId };
+            // 人审只决定 Granted/Denied；可执行维度以 Runtime 解析的 scope 为准（Host Grant 常缺 AllowedExecutables）。
+            grant = FinalizeGrantedGrant(
+                response.Grant,
+                invocation,
+                descriptor,
+                scopeResolution,
+                approvalRequestId,
+                pinToCall: false);
         }
         else
         {
@@ -458,9 +463,14 @@ public sealed class ToolConsentCoordinator
                     ct).ConfigureAwait(false);
             }
 
-            grant = response.Grant is null
-                ? null
-                : response.Grant with { ApprovalRequestId = permissionRequestId };
+            // 人审通过后：有 scope 则按本次调用最小权限造 Grant（对齐 Standalone）；否则沿用宿主 Grant。
+            grant = FinalizeGrantedGrant(
+                response.Grant,
+                invocation,
+                descriptor,
+                scopeResolution,
+                permissionRequestId,
+                pinToCall: scopeResolution.Scope?.CanGrantForRun != true);
             if (!await SaveFinalDecisionAsync(
                     permissionState,
                     "granted",
@@ -557,6 +567,163 @@ public sealed class ToolConsentCoordinator
         var identity = $"{invocation.RunId}\n{invocation.CallId}";
         return $"{prefix}-{Convert.ToHexString(
             SHA256.HashData(Encoding.UTF8.GetBytes(identity)))}";
+    }
+
+    /// <summary>
+    /// 宿主人审通过后的 Grant 定稿：
+    /// 保留宿主 Grant 身份/过期/风险上限；用 Runtime scope 补全空的可执行文件、路径、网络等维度。
+    /// 无宿主 Grant 且有 scope 时直接按 scope 新建（Standalone 同源）。
+    /// </summary>
+    private ToolGrant? FinalizeGrantedGrant(
+        ToolGrant? hostGrant,
+        ToolInvocation invocation,
+        ToolDescriptor descriptor,
+        ToolConsentScopeResolution scopeResolution,
+        string approvalRequestId,
+        bool pinToCall)
+    {
+        if (hostGrant is null)
+        {
+            return scopeResolution.IsSuccess && scopeResolution.Scope is { } scopeOnly
+                ? CreateGrantFromScope(
+                    invocation,
+                    descriptor,
+                    scopeOnly,
+                    approvalRequestId,
+                    pinToCall)
+                : null;
+        }
+
+        var withApproval = hostGrant with { ApprovalRequestId = approvalRequestId };
+        if (!scopeResolution.IsSuccess || scopeResolution.Scope is not { } scope)
+        {
+            return withApproval;
+        }
+
+        return EnrichHostGrantWithScope(
+            withApproval,
+            invocation,
+            descriptor,
+            scope,
+            pinToCall);
+    }
+
+    private static ToolGrant EnrichHostGrantWithScope(
+        ToolGrant hostGrant,
+        ToolInvocation invocation,
+        ToolDescriptor descriptor,
+        ToolRequestedScope scope,
+        bool pinToCall)
+    {
+        string[]? scriptKeys = hostGrant.AllowedSkillScriptKeys;
+        string? skillCatalogVersion = hostGrant.SkillCatalogVersion;
+        if (string.Equals(descriptor.ToolId, SkillScriptAuthorization.ToolId, StringComparison.Ordinal)
+            && SkillScriptAuthorization.TryReadScope(
+                invocation.ArgumentsJson,
+                out var skillName,
+                out var scriptHash,
+                out var interpreter,
+                out var catalogVersion))
+        {
+            scriptKeys = [SkillScriptAuthorization.CreateKey(skillName, scriptHash, interpreter)];
+            skillCatalogVersion = catalogVersion;
+        }
+
+        // 宿主空白名单不能与 scope 做交集（空∩非空=空）；空则采用 scope。
+        var allowedExecutables = hostGrant.AllowedExecutables.Length > 0
+            ? hostGrant.AllowedExecutables
+            : scope.AllowedExecutables;
+        var allowedEnvironmentVariables =
+            hostGrant.AllowedEnvironmentVariables is { Length: > 0 } hostEnv
+                ? hostEnv
+                : scope.AllowedEnvironmentVariables;
+        var allowedReadRoots = scope.AllowedReadRoots.Length > 0
+            ? scope.AllowedReadRoots
+            : hostGrant.AllowedReadRoots;
+        var allowedWriteRoots = scope.AllowedWriteRoots.Length > 0
+            ? scope.AllowedWriteRoots
+            : hostGrant.AllowedWriteRoots;
+        var networkPolicy = scope.NetworkPolicy.DenyAll
+            ? hostGrant.NetworkPolicy
+            : scope.NetworkPolicy;
+
+        return hostGrant with
+        {
+            AllowedReadRoots = allowedReadRoots,
+            AllowedWriteRoots = allowedWriteRoots,
+            AllowOverwrite = hostGrant.AllowOverwrite || scope.AllowOverwrite,
+            AllowMove = hostGrant.AllowMove || scope.AllowMove,
+            AllowDelete = hostGrant.AllowDelete || scope.AllowDelete,
+            AllowedExecutables = allowedExecutables,
+            AllowPowerShell = hostGrant.AllowPowerShell || scope.AllowPowerShell,
+            NetworkPolicy = networkPolicy,
+            AllowedToolIds = hostGrant.AllowedToolIds is { Length: > 0 }
+                ? hostGrant.AllowedToolIds
+                : [descriptor.ToolId],
+            AllowedCallIds = pinToCall
+                ? [invocation.CallId]
+                : hostGrant.AllowedCallIds,
+            MaximumRisk = hostGrant.MaximumRisk ?? descriptor.Risk,
+            AllowedEnvironmentVariables = allowedEnvironmentVariables.Length > 0
+                ? allowedEnvironmentVariables
+                : hostGrant.AllowedEnvironmentVariables,
+            AgentId = hostGrant.AgentId ?? invocation.AgentId,
+            AllowedSkillScriptKeys = scriptKeys,
+            SkillCatalogVersion = skillCatalogVersion
+        };
+    }
+
+    private ToolGrant CreateGrantFromScope(
+        ToolInvocation invocation,
+        ToolDescriptor descriptor,
+        ToolRequestedScope scope,
+        string approvalRequestId,
+        bool pinToCall)
+    {
+        var grantId = $"scope-{Guid.NewGuid():N}";
+        var workspaceRoot = string.IsNullOrWhiteSpace(_workspaceRoot)
+            ? Path.GetFullPath(Directory.GetCurrentDirectory())
+            : Path.GetFullPath(_workspaceRoot);
+
+        string[]? scriptKeys = null;
+        string? skillCatalogVersion = null;
+        if (string.Equals(descriptor.ToolId, SkillScriptAuthorization.ToolId, StringComparison.Ordinal)
+            && SkillScriptAuthorization.TryReadScope(
+                invocation.ArgumentsJson,
+                out var skillName,
+                out var scriptHash,
+                out var interpreter,
+                out skillCatalogVersion))
+        {
+            scriptKeys = [SkillScriptAuthorization.CreateKey(skillName, scriptHash, interpreter)];
+        }
+
+        return new ToolGrant(
+            grantId,
+            invocation.RunId,
+            workspaceRoot,
+            scope.AllowedReadRoots.Length > 0 ? scope.AllowedReadRoots : [workspaceRoot],
+            scope.AllowedWriteRoots,
+            scope.AllowOverwrite,
+            scope.AllowMove,
+            scope.AllowDelete,
+            scope.AllowedExecutables,
+            scope.AllowPowerShell,
+            scope.NetworkPolicy,
+            DateTimeOffset.UtcNow.AddHours(4),
+            AllowDelegation: false,
+            DelegatedAgentIds: [],
+            AllowedToolIds: [descriptor.ToolId],
+            AllowedCallIds: pinToCall ? [invocation.CallId] : null,
+            MaximumRisk: descriptor.Risk,
+            AllowedEnvironmentVariables: scope.AllowedEnvironmentVariables,
+            AgentId: invocation.AgentId,
+            ParentGrantId: null,
+            RootGrantId: grantId,
+            DelegationChain: [],
+            ApprovalRequestId: approvalRequestId,
+            AllowedSkillScriptKeys: scriptKeys,
+            SkillCatalogVersion: skillCatalogVersion);
     }
 
     private static string ComputeHash(string value) =>

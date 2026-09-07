@@ -127,6 +127,10 @@ public sealed class MeetingParticipantConverter : JsonConverter<MeetingParticipa
 
         WriteStringArray(writer, "allowedToolIds", agent.AllowedToolIds);
         WriteStringArray(writer, "skillIds", agent.SkillIds);
+        if (!string.IsNullOrWhiteSpace(agent.SkillDiscoveryMode))
+        {
+            writer.WriteString("skillDiscoveryMode", agent.SkillDiscoveryMode);
+        }
     }
 
     private static AgentRef ReadAgentRef(JsonElement el)
@@ -152,6 +156,9 @@ public sealed class MeetingParticipantConverter : JsonConverter<MeetingParticipa
             : null;
         var allowedToolIds = ReadStringArray(el, "allowedToolIds");
         var skillIds = ReadStringArray(el, "skillIds");
+        var skillDiscoveryMode = el.TryGetProperty("skillDiscoveryMode", out var sdm)
+            ? sdm.GetString()
+            : null;
 
         return new AgentRef(
             agentId,
@@ -160,7 +167,8 @@ public sealed class MeetingParticipantConverter : JsonConverter<MeetingParticipa
             providerId,
             modelId,
             allowedToolIds,
-            skillIds);
+            skillIds,
+            skillDiscoveryMode);
     }
 
     private static void WriteStringArray(

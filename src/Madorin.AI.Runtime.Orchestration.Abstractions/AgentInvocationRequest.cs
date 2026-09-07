@@ -25,4 +25,6 @@ public sealed record AgentInvocationRequest(
     string[]? SkillAllowlistIds = null,
     IReadOnlyDictionary<string, string>? SkillCatalogPathsByName = null,
     IReadOnlyDictionary<string, string>? SkillCatalogDescriptionsByName = null,
-    IReadOnlyList<SkillScopeSourceRoot>? SkillScopeSourceRoots = null);
+    IReadOnlyList<SkillScopeSourceRoot>? SkillScopeSourceRoots = null,
+    /// <summary>Host skill discovery mode (<c>progressive</c>/<c>direct</c>); ignored when not host mode.</summary>
+    string? SkillDiscoveryMode = null);

@@ -36,25 +36,8 @@ public sealed class HostModeLoadableSkillsSource : AgentSkillsSource
         {
             // MAF only registers load_skill / read_skill_resource / run_skill_script when the
             // skills context is non-empty. Keep a tiny guide skill so empty Loadable still exposes
-            // the progressive-discovery tool surface (probe A / live outbound tools).
-            return Task.FromResult<IList<AgentSkill>>(
-            [
-                new AgentInlineSkill(
-                    "host-skills-guide",
-                    "Progressive skill discovery is enabled. Call skill.search first, then load_skill.",
-                    """
-                    Host-mode skills start empty.
-                    1. Call skill.search to discover allowlisted skills.
-                    2. After search hits are activated by Runtime, call load_skill(name).
-                    3. Use read_skill_resource / run_skill_script only for loaded skills.
-                    Do not invent skill names or absolute paths.
-                    """,
-                    license: null,
-                    compatibility: null,
-                    allowedTools: null,
-                    metadata: null,
-                    serializerOptions: null)
-            ]);
+            // the skill tool surface (probe A / live outbound tools).
+            return Task.FromResult<IList<AgentSkill>>([CreateEmptyLoadableGuideSkill()]);
         }
 
         var skills = new List<AgentSkill>(paths.Length);
@@ -70,6 +53,44 @@ public sealed class HostModeLoadableSkillsSource : AgentSkillsSource
         }
 
         return Task.FromResult<IList<AgentSkill>>(skills);
+    }
+
+    private AgentInlineSkill CreateEmptyLoadableGuideSkill()
+    {
+        if (SkillDiscoveryModes.IsDirect(_context.SkillDiscoveryMode))
+        {
+            return new AgentInlineSkill(
+                "host-skills-guide",
+                "Direct skill discovery is enabled, but no allowlisted skills are currently loadable.",
+                """
+                Host-mode direct discovery has an empty Loadable set.
+                1. Ensure AgentRef.skillIds lists enabled skill names (empty list means all off).
+                2. Skills must exist in the Runtime catalog with a resolvable path.
+                3. Call load_skill(name) only for allowlisted names; skill.search is not required.
+                Do not invent skill names or absolute paths.
+                """,
+                license: null,
+                compatibility: null,
+                allowedTools: null,
+                metadata: null,
+                serializerOptions: null);
+        }
+
+        return new AgentInlineSkill(
+            "host-skills-guide",
+            "Progressive skill discovery is enabled. Call skill.search first, then load_skill.",
+            """
+            Host-mode skills start empty.
+            1. Call skill.search to discover allowlisted skills.
+            2. After search hits are activated by Runtime, call load_skill(name).
+            3. Use read_skill_resource / run_skill_script only for loaded skills.
+            Do not invent skill names or absolute paths.
+            """,
+            license: null,
+            compatibility: null,
+            allowedTools: null,
+            metadata: null,
+            serializerOptions: null);
     }
 
     private bool TryCreateSkill(string materializedPath, out AgentInlineSkill? skill)

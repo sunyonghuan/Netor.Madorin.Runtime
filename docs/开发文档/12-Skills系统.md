@@ -161,9 +161,10 @@ var options = new RuntimeClientOptions
 | 概念 | 含义 |
 | --- | --- |
 | **Allowlist** | `AgentRef.SkillIds`：`null`=未声明（兼容全开，慎用）；`[]`=全关；非空=仅这些 Name 可进入 Loadable |
-| **ActivationSet** | Run 级激活表（`SkillActivationStore`），由 tool-result 钩子累积 |
-| **Loadable** | `(Initial ∪ Activation) ∩ Allowlist`；V1 的 Initial 默认为空 |
-| **Advertise** | 仅 Loadable 的短描述，**禁止**把全 Allowlist 的 MaterializedPaths 一次性交给 Provider |
+| **SkillDiscoveryMode** | `AgentRef.skillDiscoveryMode`：`progressive`（缺省）\|`direct`；仅宿主模式生效 |
+| **ActivationSet** | Run 级激活表（`SkillActivationStore`），由 tool-result 钩子累积（**仅 progressive**） |
+| **Loadable** | progressive：`(Initial ∪ Activation) ∩ Allowlist`（V1 Initial=∅）；**direct：= Allowlist**（不占激活名额 24） |
+| **Advertise** | 仅 Loadable 短描述；**禁止**全 Allowlist 的 MaterializedPaths / 长正文灌 Provider；direct 允许短描述名表=Allowlist |
 
 同轮路径（反死锁）：
 
@@ -211,12 +212,15 @@ Skills 系统在 `RuntimeCapabilities` 中声明：
     "sourceKinds": ["Directory"],
     "resourcesSupported": true,
     "scriptsSupported": true,
-    "hotRefreshSupported": true
+    "hotRefreshSupported": true,
+    "discoveryDirect": true
   }
 }
 ```
 
 当前版本只支持 `Directory` 来源。`Mcp` 来源在 `SkillSourceKind` 枚举中已定义但尚未实现，使用时会产生 `SkillSourceKindNotSupported` 错误。
+
+`discoveryDirect`（`SkillsCapabilities.DiscoveryDirect`）为 `true` 时，宿主可下发 `AgentRef.skillDiscoveryMode=direct` 并关闭「技能按需发现」。缺省 / `false` 时宿主必须保持 progressive。
 
 ## 11. 诊断
 
@@ -236,9 +240,26 @@ Skills 系统在 `RuntimeCapabilities` 中声明：
 
 ---
 
-## 附录 · 宿主发现策略 Direct（2026-03-26）
+## 附录 · 宿主模式 Skills 发现（2026-03-26 代码对照）
 
-宿主任务关闭「技能按需发现」时，材料下发 SkillDiscoveryMode=direct（缺省 progressive）。  
-Runtime 宿主模式将 **Loadable 初值 = Allowlist 全名**（短描述 Advertise），**不**把全量 SKILL 正文灌进 Provider。  
-详规：方案设计/10-宿主模式Skills发现策略Direct.md；基线渐进见 方案设计/09。  
-能力声明须暴露 direct，供宿主门闩（防摘 meta 后假死）。
+### A. Progressive（**已实现**）
+
+- 宿主集成（`IsHostMode`）下 Provider 常驻；Advertise = Loadable（激活集），V1 初始为空。  
+- `skill.search` tool-result → `SkillSearchActivationHook`（≤8）→ `SkillActivationStore`（Run 内 ≤24）。  
+- Source：`HostModeLoadableSkillsSource`；空 Loadable 时内联 `host-skills-guide` 保 `load_skill` 注册。  
+- 描述上限 1024：`BoundDescription`。  
+- 详规：`方案设计/09-宿主模式Skills渐进发现与激活.md`。
+
+### B. Direct（**已实现**）
+
+| 项 | 行为 |
+|----|------|
+| 材料 `AgentRef.skillDiscoveryMode` | `progressive`\|`direct`；缺省/未知=progressive |
+| `skills.discoveryDirect` | initialize 声明 `true`（与 Direct 同变更集） |
+| Loadable | = Allowlist 短描述名表；**不**占 `DefaultMaxLoadableSkills=24` |
+| search 钩子 | direct 下 no-op |
+| load | ∈ Allowlist + 路径可解析；**不**要求先 search |
+| Meeting JSON | 手写 `WriteAgentRef`/`ReadAgentRef` 同步 `skillDiscoveryMode` |
+
+宿主关闭「技能按需发现」前仍应确认 `discoveryDirect===true`。  
+详规：`方案设计/10-宿主模式Skills发现策略Direct.md`。
