@@ -806,15 +806,21 @@ public sealed class RuntimeServer : IAsyncDisposable
             toolGateway,
             toolCatalogSnapshot,
             new SqliteWorkRepository(repository.Connection));
-        await recoveryService.RecoverSentToolIntentsAsync(ct).ConfigureAwait(false);
-        if (Volatile.Read(ref _startupToolRecoveryPending) != 0)
+        try
         {
-            var sentIntentsRemain = (await toolStateStore.ListRecoverableIntentsAsync(ct)
-                    .ConfigureAwait(false))
-                .Any(static intent => intent.Status is ToolIntentStatus.Sent);
-            if (!sentIntentsRemain)
+            await recoveryService.RecoverSentToolIntentsAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (Volatile.Read(ref _startupToolRecoveryPending) != 0)
             {
-                Volatile.Write(ref _startupToolRecoveryPending, 0);
+                var sentIntentsRemain = (await toolStateStore.ListRecoverableIntentsAsync(ct)
+                        .ConfigureAwait(false))
+                    .Any(static intent => intent.Status is ToolIntentStatus.Sent);
+                if (!sentIntentsRemain)
+                {
+                    Volatile.Write(ref _startupToolRecoveryPending, 0);
+                }
             }
         }
     }

@@ -49,22 +49,33 @@ public sealed class RecoveryService
         foreach (var intent in intents)
         {
             ct.ThrowIfCancellationRequested();
-            var current = intent;
-            if (intent.Status is ToolIntentStatus.Sent)
+            try
             {
-                _ = await _toolGateway.RecoverSentIntentAsync(
-                    intent,
-                    _toolCatalogSnapshot,
-                    ct).ConfigureAwait(false);
-                current = await _toolStateStore.GetIntentAsync(intent.CallId, ct)
-                    .ConfigureAwait(false)
-                    ?? intent;
-            }
+                var current = intent;
+                if (intent.Status is ToolIntentStatus.Sent)
+                {
+                    _ = await _toolGateway.RecoverSentIntentAsync(
+                        intent,
+                        _toolCatalogSnapshot,
+                        ct).ConfigureAwait(false);
+                    current = await _toolStateStore.GetIntentAsync(intent.CallId, ct)
+                        .ConfigureAwait(false)
+                        ?? intent;
+                }
 
-            if (current.Status is ToolIntentStatus.Unknown)
+                if (current.Status is ToolIntentStatus.Unknown)
+                {
+                    await MarkRequiresManualInterventionAsync(current, ct)
+                        .ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                await MarkRequiresManualInterventionAsync(current, ct)
-                    .ConfigureAwait(false);
+                throw;
+            }
+            catch
+            {
+                // 单条 Sent 收口失败不中断其余意图，避免整次 catalog.replace 失败后门闩悬空。
             }
         }
     }

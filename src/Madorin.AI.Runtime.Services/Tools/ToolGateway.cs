@@ -453,33 +453,48 @@ public sealed class ToolGateway(
         var executor = _executors.FirstOrDefault(candidate => candidate.CanExecute(intent.ToolId));
         if (executor is not IRecoverableToolExecutor recoverableExecutor)
         {
-            return RequiresManualIntervention(descriptor)
-                ? await CompleteSentAsUnknownAsync(
-                    intent,
-                    $"Tool '{intent.ToolId}' cannot query the result of sent call '{intent.CallId}'.",
-                    ct).ConfigureAwait(false)
-                : null;
-        }
-
-        var recovery = await TryRecoverSentAsync(
-            invocation,
-            descriptor,
-            recoverableExecutor,
-            ct).ConfigureAwait(false);
-        if (recovery.Result is not null)
-        {
-            return recovery.Result;
-        }
-
-        if (recovery.QueryUnavailable && RequiresManualIntervention(descriptor))
-        {
+            // 启动恢复禁止重放副作用：查不到可恢复执行器时必须收口，否则 Sent 会卡住 -32014。
             return await CompleteSentAsUnknownAsync(
                 intent,
-                $"Tool '{intent.ToolId}' could not safely determine the result of sent call '{intent.CallId}'.",
+                $"Tool '{intent.ToolId}' cannot query the result of sent call '{intent.CallId}'.",
                 ct).ConfigureAwait(false);
         }
 
-        return null;
+        try
+        {
+            var recovery = await TryRecoverSentAsync(
+                invocation,
+                descriptor,
+                recoverableExecutor,
+                ct).ConfigureAwait(false);
+            if (recovery.Result is not null)
+            {
+                return recovery.Result;
+            }
+
+            if (recovery.QueryUnavailable || recovery.ShouldResend)
+            {
+                // 启动恢复不重发。查不到终态或幂等 Unknown 都收口，避免 catalog.replace 成功后仍挡 Run。
+                return await CompleteSentAsUnknownAsync(
+                    intent,
+                    $"Tool '{intent.ToolId}' could not safely determine the result of sent call '{intent.CallId}'.",
+                    ct).ConfigureAwait(false);
+            }
+
+            // Running / Pending：调用仍在宿主侧进行，保持 Sent 并继续挡新 Run。
+            return null;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return await CompleteSentAsUnknownAsync(
+                intent,
+                $"Tool '{intent.ToolId}' recovery failed for sent call '{intent.CallId}'.",
+                ct).ConfigureAwait(false);
+        }
     }
 
     public void Dispose()
