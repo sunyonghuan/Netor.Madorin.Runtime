@@ -1955,10 +1955,11 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             .Select(static tool => tool.ToolId)
             .ToHashSet(StringComparer.Ordinal);
 
-        // Full catalog: initial snapshot tools were all exposed -> follow live growth.
+        // Full catalog: initial snapshot tools were all exposed -> follow live growth
+        // (search/browse 注入后下一轮必须带上新短名)。
         // Allowlist: initial snapshot had tools not in previousIds -> do not expand.
+        // initial 缺失时不推断为全量，避免把 allowlist 放大成 live 全目录。
         var initial = _toolCatalogSnapshot;
-        // initial 缺失时不推断为全量，避免把 allowlist 放大成 live 全目录
         var wasFullCatalog = initial is not null
             && initial.Tools.Count > 0
             && initial.Tools.All(tool => previousIds.Contains(tool.ToolId))

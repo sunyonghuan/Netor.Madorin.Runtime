@@ -35,6 +35,29 @@ Meeting 模式将多个 Agent 组织为参会者，由主持人（Host）调度�
 
 参与者在 Session 创建时配置。状态可在运行期通过事件动态调整。
 
+### 3.1 按参与者 `SkillIds` 过滤技能目录
+
+Meeting 四条 invocation 路径（Participant / Summarizer / Host / Selector）在写入 `InvocationSnapshot` 前，各自对 Catalog 调用 `FilterBySkillIds(agent.SkillIds)`：
+
+- `null`：该角色看到全量 Catalog
+- `[]`：该角色 Skills 为空
+- 非空：仅名单内技能
+
+同一会议内不同角色可绑定不同技能集。细节见 [12-Skills系统](./12-Skills系统.md) §5.1。
+
+### 3.2 宿主模式 Skills 与工具 live catalog
+
+宿主集成（`isHostModeSkills`）时：
+
+- Run 级共享 `SkillActivationStore`；各参与者 `AgentRef.skillDiscoveryMode` 随手写 JSON 往返（`progressive` / `direct`）。
+- tool-result 成功后走 `HostModeSkillsSnapshot.TryApplyToolResult`（progressive 激活；direct 钩子 no-op）。
+- 工具循环使用 **live catalog**（`liveCatalogProvider` → `ToolCatalogStore.CaptureSnapshot()`，可附带内部 skill script 描述符），而非仅 Run 起始冻结快照。
+- 每轮工具结果写回后刷新 `AvailableTools`：
+  - **全量暴露**（启动时已暴露目录全部工具）：跟随 live 增长（search/browse 注入后下一轮可见新短名）
+  - **Allowlist**（`AllowedToolIds` 非空）：只刷新已允许 ToolId 的描述符，**不**扩大集合；`initial` 快照缺失时**不**推断为全量
+
+Skills 总述见 [12-Skills系统](./12-Skills系统.md) §8；宿主接入见 [04-宿主集成指南](./04-宿主集成指南.md) §10.9–§10.10。
+
 ## 4. 选择策略
 
 `MeetingSelectorPolicy` 决定每轮调度的发言顺序：
@@ -224,3 +247,11 @@ Running / Paused ─→ Failed / Cancelled
 - 摘要生成进度
 
 断线重连后，Runtime 从 `MeetingResumeState` 恢复会议。处于 `Running` 状态的调度在重连后重新执行，已 `Completed` 的调度不重复。
+
+---
+
+## 修订记录
+
+| 日期 | 说明 |
+| --- | --- |
+| 2026-09-07 | §3.1 SkillIds 过滤；§3.2 宿主 Skills + Meeting live catalog / AvailableTools 刷新 |

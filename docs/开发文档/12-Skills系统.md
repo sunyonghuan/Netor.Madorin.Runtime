@@ -115,6 +115,30 @@ Frontmatter 之后是 Markdown 正文，作为 Skill 的主要指令内容。
 
 目录版本号基于所有物化文件内容哈希计算。任何技能内容变化（新增、修改、删除）都会产生新版本号。
 
+### 5.1 按 Agent `SkillIds` 过滤（独立与宿主共用）
+
+模式编排在构造 `InvocationSnapshot` 前，统一对 Catalog 快照调用：
+
+```csharp
+SkillCatalogSnapshot.FilterBySkillIds(string[]? skillIds)
+```
+
+| `skillIds` | 行为 |
+| --- | --- |
+| `null` | 未声明 → **不限制**，原样返回当前快照 |
+| `[]` | 显式无技能 → 新快照 Skills 为空，**保留** Version / Sources / Diagnostics |
+| 非空 | `OrdinalIgnoreCase` 命中 Name 的技能保留，其余裁掉 |
+
+接入点：
+
+| 模式 | 使用的 Allowlist |
+| --- | --- |
+| Expert | `expert.Agent.SkillIds` |
+| Work | 当前执行 `agent.SkillIds`（GM / Sub-Agent 各自） |
+| Meeting | Participant / Summarizer / Host / Selector **各自** `agent.SkillIds` |
+
+同一 Run 内不同 Agent 只看到自己名单内的技能；未配置 `SkillIds` 的 Agent 行为与过滤前一致（全量 Catalog）。独立模式由此实现「按 Agent 绑定技能」；宿主模式另有 Loadable/激活层（§8），Allowlist 语义与此对齐。
+
 ## 6. 热刷新机制
 
 - 初始化时扫描所有来源目录并建立 `FileSystemWatcher`。
@@ -183,14 +207,28 @@ load_skill(name)
 
 约束：
 
-- 宿主模式 `CreateSkillsProvider` **始终建**动态 Source Provider；空 Loadable 时暴露引导技能 `host-skills-guide`（保证 MAF 仍注册三工具），激活后 `GetSkillsAsync` 按 Activation 展开真实 Loadable。
+- 宿主模式 `CreateSkillsProvider` **始终建**动态 Source Provider；空 Loadable 时暴露引导技能 `host-skills-guide`（保证 MAF 仍注册三工具），激活后 `GetSkillsAsync` 按 Activation 展开真实 Loadable。Direct + 非空 Allowlist 时 **不**依赖 guide，Advertise 直接为 Allowlist 短描述。
 - 激活**唯一**同轮主路径是 Runtime 消化 `skill.search` tool result 的钩子；禁止在宿主回调栈内同步 Runtime activation RPC。
-- **Search 膨胀防护（Runtime 二道闸）**：单次 search result 最多激活 **8** 条 allowlisted hits（顺序保留）；Run 内 Loadable 总量上限 **24**（已激活名刷新不占新槽）。宿主侧仍应限制 hits 返回数。
+- **Search 膨胀防护（Runtime 二道闸）**：单次 search result 最多激活 **8** 条 allowlisted hits（顺序保留）；Run 内 Loadable 总量上限 **24**（已激活名刷新不占新槽）。**仅 progressive**；direct 不占 24 顶。宿主侧仍应限制 hits 返回数。
 - `skill.search` 的 tool result 原文由宿主决定；Runtime **不截断**再回传模型。模型靠完整 hits 描述做选择，靠 `load_skill` 取正文。
-- 独立模式 paths → Provider 现网路径零行为回归。
+- Direct 下 `SkillSearchActivationHook` **no-op**；`load_skill` 合法条件为 ∈ Allowlist 且路径可解析，**不**要求先 search。
+- 独立模式 paths → Provider 现网路径零行为回归；`skillDiscoveryMode` 在独立模式被忽略。
 - workspace / user-global 路径由本进程自知；宿主仅需 `skill.dir.host_global`（安装侧全局根），**无** workspace 目录元工具依赖。
+- Expert / Work / Meeting 三路径均创建 `SkillsInvocationContext`（含 mode + ActivationStore）；Meeting 手写 `AgentRef` JSON 与 source-gen 路径字段对齐。
 
-完整裁决见 [`../方案设计/09-宿主模式Skills渐进发现与激活.md`](../方案设计/09-宿主模式Skills渐进发现与激活.md)。
+### 8.2 宿主门闩与 Client 能力位
+
+| 项 | 约定 |
+| --- | --- |
+| initialize 声明 | `skills.discoveryDirect: true`（当前 serve） |
+| 宿主读取 | `IRuntimeClient.NegotiatedCapabilities?.Skills?.DiscoveryDirect` |
+| 生命周期 | 仅在已连接且 initialize 成功后非 null；fault / reconnect / dispose / connect 失败路径与 binding 一并清空为 **null** |
+| Runtime 侧 | `SkillDiscoveryModes.Normalize` 只映射字符串；**无**进程级 static 第二开关 |
+| 未声明 direct 能力时 | 宿主**禁止**关技能按需、**禁止**下发 `skillDiscoveryMode=direct`（否则 progressive 空 Loadable → 假死） |
+
+接入步骤与示例见 [04-宿主集成指南](./04-宿主集成指南.md) §10.9；能力字段见 [19-能力声明与运行时限制](./19-能力声明与运行时限制.md) §3。
+
+完整裁决见 [`../方案设计/09-宿主模式Skills渐进发现与激活.md`](../方案设计/09-宿主模式Skills渐进发现与激活.md) 与 [`../方案设计/10-宿主模式Skills发现策略Direct.md`](../方案设计/10-宿主模式Skills发现策略Direct.md)。
 
 ## 9. 脚本执行
 
@@ -222,6 +260,8 @@ Skills 系统在 `RuntimeCapabilities` 中声明：
 
 `discoveryDirect`（`SkillsCapabilities.DiscoveryDirect`）为 `true` 时，宿主可下发 `AgentRef.skillDiscoveryMode=direct` 并关闭「技能按需发现」。缺省 / `false` 时宿主必须保持 progressive。
 
+宿主应通过 Client 的 `NegotiatedCapabilities` 读取该位（见 §8.2），不要假设本地硬编码或缓存陈旧 initialize 结果。
+
 ## 11. 诊断
 
 刷新产生的诊断通过 `SkillCatalogSummary.Diagnostics` 返回：
@@ -240,14 +280,15 @@ Skills 系统在 `RuntimeCapabilities` 中声明：
 
 ---
 
-## 附录 · 宿主模式 Skills 发现（2026-03-26 代码对照）
+## 附录 · 宿主模式 Skills 发现（2026-09-07 代码对照）
 
 ### A. Progressive（**已实现**）
 
 - 宿主集成（`IsHostMode`）下 Provider 常驻；Advertise = Loadable（激活集），V1 初始为空。  
 - `skill.search` tool-result → `SkillSearchActivationHook`（≤8）→ `SkillActivationStore`（Run 内 ≤24）。  
 - Source：`HostModeLoadableSkillsSource`；空 Loadable 时内联 `host-skills-guide` 保 `load_skill` 注册。  
-- 描述上限 1024：`BoundDescription`。  
+- 正文/资源：`load_skill` / `read_skill_resource` 优先 Catalog 物化路径，未命中则按 scope / 绑定源根惰性解析（忽略模型传入绝对路径）。  
+- 描述上限 1024：`BoundDescription`（句界截断）。  
 - 详规：`方案设计/09-宿主模式Skills渐进发现与激活.md`。
 
 ### B. Direct（**已实现**）
@@ -255,11 +296,32 @@ Skills 系统在 `RuntimeCapabilities` 中声明：
 | 项 | 行为 |
 |----|------|
 | 材料 `AgentRef.skillDiscoveryMode` | `progressive`\|`direct`；缺省/未知=progressive |
-| `skills.discoveryDirect` | initialize 声明 `true`（与 Direct 同变更集） |
+| `skills.discoveryDirect` | initialize 声明 `true` |
+| Client | `NegotiatedCapabilities` 暴露协商结果；断连路径清空 |
 | Loadable | = Allowlist 短描述名表；**不**占 `DefaultMaxLoadableSkills=24` |
 | search 钩子 | direct 下 no-op |
 | load | ∈ Allowlist + 路径可解析；**不**要求先 search |
+| guide | Allowlist 非空时不依赖 `host-skills-guide` |
 | Meeting JSON | 手写 `WriteAgentRef`/`ReadAgentRef` 同步 `skillDiscoveryMode` |
+| 门闩 | **仅**宿主读 `discoveryDirect`；Runtime 无进程级 degrade static |
 
-宿主关闭「技能按需发现」前仍应确认 `discoveryDirect===true`。  
+宿主关闭「技能按需发现」前仍应确认 `discoveryDirect === true`。  
 详规：`方案设计/10-宿主模式Skills发现策略Direct.md`。
+
+### C. 相关测试
+
+| 测试 | 覆盖 |
+| --- | --- |
+| `HostModeSkillsActivationTests` | progressive 激活 / 上限 |
+| `HostModeSkillsContentLoadTests` | 正文与资源确定性加载 |
+| `HostModeSkillsDirectTests` | direct Loadable / 钩子 no-op / 能力位 |
+| `HostModeSkillsLiveProbeTests` | 真实探针（可 skip） |
+
+---
+
+## 修订记录
+
+| 日期 | 说明 |
+| --- | --- |
+| 2026-09-07 | 对齐 Direct 落地、NegotiatedCapabilities 生命周期、Consent 无关的 Skills 常数与三模式 context；附录日期更新 |
+| 2026-09-07 | 渐进发现、search 闸门、正文加载、Direct 初版写入 §8 / 附录 |

@@ -120,6 +120,21 @@ public sealed class ToolGateway(
         var argumentsHash = Convert.ToHexString(
             SHA256.HashData(Encoding.UTF8.GetBytes(invocation.ArgumentsJson)));
         var requestedPermission = permission ?? invocation.PermissionContext;
+
+        // Authorize before creating a tool intent so NeedsPermission/Approval does not
+        // leave a pending CallId that later collides when catalog version advances
+        // (e.g. after tool_search inject) and consent re-enters ExecuteAsync.
+        var authorization = await _authorizationService.AuthorizeAsync(
+            invocation,
+            descriptor,
+            requestedPermission,
+            ct).ConfigureAwait(false);
+        if (authorization.Decision is not ToolAuthorizationDecision.Granted
+            || authorization.EffectivePermission is null)
+        {
+            return ToAuthorizationResult(invocation, descriptor, authorization);
+        }
+
         var existingResult = await TryBeginExecutionAsync(
             invocation,
             descriptor,
@@ -152,17 +167,6 @@ public sealed class ToolGateway(
             {
                 return existingResult;
             }
-        }
-
-        var authorization = await _authorizationService.AuthorizeAsync(
-            invocation,
-            descriptor,
-            requestedPermission,
-            ct).ConfigureAwait(false);
-        if (authorization.Decision is not ToolAuthorizationDecision.Granted
-            || authorization.EffectivePermission is null)
-        {
-            return ToAuthorizationResult(invocation, descriptor, authorization);
         }
 
         var effectivePermission = authorization.EffectivePermission;

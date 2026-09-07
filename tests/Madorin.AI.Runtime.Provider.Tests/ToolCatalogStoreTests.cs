@@ -97,9 +97,11 @@ public sealed class ToolCatalogStoreTests
         Assert.IsTrue(validator.ValidateArguments(
             descriptor,
             ParseElement("""{"query":"madorin"}""")).IsValid);
-        Assert.IsFalse(validator.ValidateArguments(
+        var invalidArguments = validator.ValidateArguments(
             descriptor,
-            ParseElement("""{"unexpected":true}""")).IsValid);
+            ParseElement("""{"unexpected":true}"""));
+        Assert.IsFalse(invalidArguments.IsValid);
+        Assert.Contains("Expected object fields: query", invalidArguments.Error ?? string.Empty);
         Assert.IsTrue(validator.ValidateResult(
             descriptor,
             ParseElement("""{"count":1}""")).IsValid);

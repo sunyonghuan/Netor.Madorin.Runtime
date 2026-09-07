@@ -804,7 +804,8 @@ public sealed class ExpertModeOrchestrator(
             catalogSnapshot,
             _toolPermissionHandler,
             _approvalHandler,
-            _toolStateStore);
+            _toolStateStore,
+            liveCatalogProvider: () => CaptureCatalogSnapshot() ?? catalogSnapshot);
         return await coordinator.ResolveAndExecuteAsync(
             invocation,
             pendingResult,

@@ -12,7 +12,8 @@ public sealed class ToolConsentCoordinator
     private static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds(2);
 
     private readonly IToolAuthorizationService _authorizationService;
-    private readonly ToolCatalogSnapshot _catalogSnapshot;
+    private readonly ToolCatalogSnapshot _fallbackCatalogSnapshot;
+    private readonly Func<ToolCatalogSnapshot>? _liveCatalogProvider;
     private readonly IToolConsentHandler? _consentHandler;
     private readonly IToolConsentScopeResolver? _scopeResolver;
     private readonly IToolStateStore? _toolStateStore;
@@ -28,7 +29,8 @@ public sealed class ToolConsentCoordinator
             toolPermissionHandler = null,
         Func<ApprovalRequest, CancellationToken, Task<ApprovalResponse>>?
             approvalHandler = null,
-        IToolStateStore? toolStateStore = null)
+        IToolStateStore? toolStateStore = null,
+        Func<ToolCatalogSnapshot>? liveCatalogProvider = null)
         : this(
             toolGateway,
             authorizationService,
@@ -38,7 +40,8 @@ public sealed class ToolConsentCoordinator
                 : new ReverseRpcToolConsentHandler(toolPermissionHandler, approvalHandler),
             scopeResolver: null,
             workspaceRoot: string.Empty,
-            toolStateStore)
+            toolStateStore,
+            liveCatalogProvider)
     {
     }
 
@@ -50,12 +53,15 @@ public sealed class ToolConsentCoordinator
         IToolConsentHandler? consentHandler,
         IToolConsentScopeResolver? scopeResolver,
         string workspaceRoot,
-        IToolStateStore? toolStateStore = null)
+        IToolStateStore? toolStateStore = null,
+        Func<ToolCatalogSnapshot>? liveCatalogProvider = null)
     {
         _toolGateway = toolGateway ?? throw new ArgumentNullException(nameof(toolGateway));
         _authorizationService = authorizationService
             ?? throw new ArgumentNullException(nameof(authorizationService));
-        _catalogSnapshot = catalogSnapshot ?? throw new ArgumentNullException(nameof(catalogSnapshot));
+        _fallbackCatalogSnapshot = catalogSnapshot
+            ?? throw new ArgumentNullException(nameof(catalogSnapshot));
+        _liveCatalogProvider = liveCatalogProvider;
         _consentHandler = consentHandler;
         _scopeResolver = scopeResolver;
         _workspaceRoot = string.IsNullOrWhiteSpace(workspaceRoot)
@@ -63,6 +69,12 @@ public sealed class ToolConsentCoordinator
             : Path.GetFullPath(workspaceRoot);
         _toolStateStore = toolStateStore;
     }
+
+    /// <summary>
+    /// Live catalog after search/browse inject when provided; otherwise the construction-time snapshot.
+    /// </summary>
+    private ToolCatalogSnapshot CaptureCatalogSnapshot() =>
+        _liveCatalogProvider?.Invoke() ?? _fallbackCatalogSnapshot;
 
     public bool CanRequestApproval => _consentHandler?.CanRequestApproval == true;
 
@@ -151,14 +163,15 @@ public sealed class ToolConsentCoordinator
                 nameof(pendingResult));
         }
 
-        if (!_catalogSnapshot.TryGetTool(invocation.ToolId, out var descriptor)
+        var catalogSnapshot = CaptureCatalogSnapshot();
+        if (!catalogSnapshot.TryGetTool(invocation.ToolId, out var descriptor)
             || descriptor is null)
         {
             return await FailAndCompleteAsync(
                 invocation,
                 ToolIntentStatus.Failed,
                 RuntimeErrorCodes.ToolExecutorUnavailable,
-                "Tool consent cannot be resolved because the tool is absent from the fixed catalog snapshot.",
+                "Tool consent cannot be resolved because the tool is absent from the live catalog snapshot.",
                 ct).ConfigureAwait(false);
         }
 
@@ -388,7 +401,7 @@ public sealed class ToolConsentCoordinator
                 permissionReason,
                 correlationId,
                 invocation.RunId,
-                _catalogSnapshot.EffectiveVersion,
+                catalogSnapshot.EffectiveVersion,
                 descriptor.Capabilities?.ToArray(),
                 invocation.SessionId,
                 invocation.InvocationId,
@@ -537,7 +550,7 @@ public sealed class ToolConsentCoordinator
         return await _toolGateway.ExecuteAsync(
             invocation,
             permission: null,
-            _catalogSnapshot,
+            CaptureCatalogSnapshot(),
             ct).ConfigureAwait(false);
     }
 

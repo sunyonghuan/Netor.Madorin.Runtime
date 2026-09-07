@@ -42,6 +42,7 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
     private readonly Func<MeetingHitlRequest, CancellationToken, Task<MeetingHitlResponse>>? _hitlHandler;
     private readonly ToolGateway? _toolGateway;
     private readonly ToolCatalogSnapshot? _toolCatalogSnapshot;
+    private readonly Func<ToolCatalogSnapshot>? _liveCatalogProvider;
     private readonly Func<CancellationToken, Task<SkillCatalogSnapshot?>>? _skillCatalogSnapshotProvider;
     private readonly MeetingHitlResponse? _resumedHitlResponse;
     private readonly MeetingInvocationRecord? _resumedInvocation;
@@ -90,7 +91,8 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
         Func<CancellationToken, Task<SkillCatalogSnapshot?>>? skillCatalogSnapshotProvider = null,
         Func<RuntimeSkillScriptInvocation, CancellationToken, Task<RuntimeSkillScriptResult>>? scriptInvoker = null,
         bool isHostModeSkills = false,
-        SkillActivationStore? skillActivationStore = null)
+        SkillActivationStore? skillActivationStore = null,
+        Func<ToolCatalogSnapshot>? liveCatalogProvider = null)
     {
         ArgumentNullException.ThrowIfNull(providerFactory);
         _providerFactory = providerFactory;
@@ -98,13 +100,15 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
         _store = store;
         _isHostModeSkills = isHostModeSkills;
         _skillActivationStore = skillActivationStore;
+        _liveCatalogProvider = liveCatalogProvider;
         _invocationExecutor = new MeetingInvocationExecutor(
             new ProviderAgentInvocationExecutor(providerFactory, scriptInvoker),
             store,
             toolGateway,
             toolCatalogSnapshot,
             runtimeLimits,
-            toolConsentCoordinator);
+            toolConsentCoordinator,
+            liveCatalogProvider);
         ArgumentNullException.ThrowIfNull(sessionRepo);
         _sessionRepo = sessionRepo;
         ArgumentNullException.ThrowIfNull(meetingRepo);
@@ -2228,7 +2232,8 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             return null;
         }
 
-        if (_toolGateway is null || _toolCatalogSnapshot is null)
+        var catalog = CaptureCatalogSnapshot();
+        if (_toolGateway is null || catalog is null)
         {
             throw new InvalidOperationException(
                 $"Meeting participant agent '{agent.AgentId}' declares tools, but the Runtime has no tool gateway or catalog snapshot.");
@@ -2245,7 +2250,7 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                     nameof(agent));
             }
 
-            if (!_toolCatalogSnapshot.TryGetTool(toolId, out _))
+            if (!catalog.TryGetTool(toolId, out _))
             {
                 throw new ArgumentException(
                     $"Meeting participant agent '{agent.AgentId}' declares unknown tool ID '{toolId}'.",
@@ -2261,9 +2266,19 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                 nameof(agent));
         }
 
-        return _toolCatalogSnapshot.Tools
+        return catalog.Tools
             .Where(tool => requestedToolIds.Contains(tool.ToolId))
             .ToArray();
+    }
+
+    private ToolCatalogSnapshot? CaptureCatalogSnapshot()
+    {
+        if (_liveCatalogProvider is not null)
+        {
+            return _liveCatalogProvider();
+        }
+
+        return _toolCatalogSnapshot;
     }
 
     private Task<RuntimeEventEnvelope> CreateAcceptedEnvelopeAsync(

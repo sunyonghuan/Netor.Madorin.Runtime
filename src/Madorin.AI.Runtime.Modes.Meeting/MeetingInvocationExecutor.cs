@@ -20,7 +20,8 @@ internal sealed class MeetingInvocationExecutor(
     ToolGateway? toolGateway,
     ToolCatalogSnapshot? toolCatalogSnapshot,
     RuntimeLimits? runtimeLimits,
-    ToolConsentCoordinator? toolConsentCoordinator)
+    ToolConsentCoordinator? toolConsentCoordinator,
+    Func<ToolCatalogSnapshot>? liveCatalogProvider = null)
 {
     private readonly IAgentInvocationExecutor _providerExecutor = providerExecutor
         ?? throw new ArgumentNullException(nameof(providerExecutor));
@@ -28,6 +29,7 @@ internal sealed class MeetingInvocationExecutor(
         ?? throw new ArgumentNullException(nameof(store));
     private readonly ToolGateway? _toolGateway = toolGateway;
     private readonly ToolCatalogSnapshot? _toolCatalogSnapshot = toolCatalogSnapshot;
+    private readonly Func<ToolCatalogSnapshot>? _liveCatalogProvider = liveCatalogProvider;
     private readonly ToolConsentCoordinator? _toolConsentCoordinator = toolConsentCoordinator;
     private readonly RuntimeLimits _runtimeLimits = runtimeLimits ?? new RuntimeLimits(
         MaxToolResultBytesPerInvocation: 4 * 1024 * 1024);
@@ -103,8 +105,9 @@ internal sealed class MeetingInvocationExecutor(
                     providerEvents);
             }
 
+            var liveCatalog = CaptureCatalogSnapshot();
             if (_toolGateway is null
-                || _toolCatalogSnapshot is null
+                || liveCatalog is null
                 || currentRequest.AvailableTools is null)
             {
                 return Failed(
@@ -149,14 +152,15 @@ internal sealed class MeetingInvocationExecutor(
                     request.RunId,
                     request.SessionId,
                     request.InvocationId,
-                    ToolCatalogVersion: _toolCatalogSnapshot.EffectiveVersion);
+                    ToolCatalogVersion: liveCatalog.EffectiveVersion);
                 ToolGatewayResult gatewayResult;
                 try
                 {
+                    var callCatalog = CaptureCatalogSnapshot() ?? liveCatalog;
                     gatewayResult = await _toolGateway.ExecuteAsync(
                         invocation,
                         permission: null,
-                        _toolCatalogSnapshot,
+                        callCatalog,
                         ct).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -219,16 +223,65 @@ internal sealed class MeetingInvocationExecutor(
                     [toolResult]));
             }
 
+            // search 注入后刷新本轮 AvailableTools（全量 agent 跟随 live；allowlist 只刷新描述符）
             currentRequest = currentRequest with
             {
                 Messages = [.. continuationMessages],
+                AvailableTools = RefreshExposedTools(currentRequest.AvailableTools),
                 IsIdempotent = false,
                 HasIrreversibleToolSideEffects = true
             };
         }
     }
 
-    private async Task<ProviderRoundResult> ExecuteProviderRoundAsync(
+    private ToolCatalogSnapshot? CaptureCatalogSnapshot()
+    {
+        if (_liveCatalogProvider is not null)
+        {
+            return _liveCatalogProvider();
+        }
+
+        return _toolCatalogSnapshot;
+    }
+
+    /// <summary>
+    /// Full-catalog participants follow live growth after search injection;
+    /// allowlist participants only refresh descriptors for already-allowed ToolIds.
+    /// </summary>
+    private ToolDescriptor[]? RefreshExposedTools(ToolDescriptor[]? previouslyExposed)
+    {
+        var catalog = CaptureCatalogSnapshot();
+        if (_toolGateway is null || catalog is null)
+        {
+            return previouslyExposed;
+        }
+
+        if (previouslyExposed is null)
+        {
+            return [.. catalog.Tools];
+        }
+
+        var previousIds = previouslyExposed
+            .Select(static tool => tool.ToolId)
+            .ToHashSet(StringComparer.Ordinal);
+
+        var initial = _toolCatalogSnapshot;
+        var wasFullCatalog = initial is not null
+            && initial.Tools.Count > 0
+            && initial.Tools.All(tool => previousIds.Contains(tool.ToolId))
+            && previouslyExposed.Length >= initial.Tools.Count;
+
+        if (wasFullCatalog)
+        {
+            return [.. catalog.Tools];
+        }
+
+        return catalog.Tools
+            .Where(tool => previousIds.Contains(tool.ToolId))
+            .ToArray();
+    }
+
+        private async Task<ProviderRoundResult> ExecuteProviderRoundAsync(
         AgentInvocationRequest request,
         int maxRetries,
         CancellationToken ct)

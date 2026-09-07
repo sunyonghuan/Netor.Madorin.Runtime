@@ -22,6 +22,22 @@ Work 模式的执行流程：
 
 Runtime 负责 DAG 调度、并发控制和故障恢复；Manager Agent 只负责计划生成和结果综合。
 
+### 2.1 按 Agent `SkillIds` 过滤技能目录
+
+GM 与各 Sub-Agent 在写入 `InvocationSnapshot` 前，对 Catalog 调用 `FilterBySkillIds(agent.SkillIds)`（`null` / `[]` / 非空语义同 [12-Skills系统](./12-Skills系统.md) §5.1）。同一 Plan 内不同 Agent 可绑定不同技能集。
+
+### 2.2 宿主模式 Skills 与工具 live catalog
+
+宿主集成时：
+
+- Run 级共享 `SkillActivationStore`；`AgentRef.skillDiscoveryMode` 经 Work 路径写入 `SkillsInvocationContext`。
+- 每轮 `CreateSkillsContext`；tool-result 成功后 `TryApplyToolResult`（progressive 激活；direct no-op）。
+- 工具循环使用 **live catalog**（`liveCatalogProvider`），search/browse 注入后：
+  - **全量暴露**：下一轮 `AvailableTools` 跟随 live 增长
+  - **Allowlist**：只刷新已允许 ToolId；**initial 快照缺失时不推断为全量**（避免把 allowlist 放大成 live 全目录）
+
+详见 [12-Skills系统](./12-Skills系统.md) §8、[04-宿主集成指南](./04-宿主集成指南.md) §10.9–§10.10。
+
 ## 3. WorkflowPolicy
 
 `WorkflowPolicy` 控制 Work 模式的资源限制和行为参数。
@@ -171,3 +187,11 @@ Work 模式的计划和步骤通过以下数据结构表达：
 - 等待中的 HITL 请求
 
 断线重连后，Runtime 从 `WorkResumeState` 恢复执行。处于 `Running` 状态的 Step 在重连后重新执行（因为无法确认远端是否已完成），已 `Completed` 的 Step 不重复。
+
+---
+
+## 修订记录
+
+| 日期 | 说明 |
+| --- | --- |
+| 2026-09-07 | §2.1 SkillIds 过滤；§2.2 宿主 Skills + live catalog（allowlist 不因 initial 缺失放大） |

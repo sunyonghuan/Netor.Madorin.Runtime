@@ -50,11 +50,14 @@ public sealed class JsonSchemaToolValidator : IToolSchemaValidator
             var evaluation = GetSchema(schemaJson).Evaluate(
                 instance,
                 new EvaluationOptions { OutputFormat = OutputFormat.List });
-            return evaluation.IsValid
-                ? ToolSchemaValidationResult.Valid
-                : new ToolSchemaValidationResult(
-                    false,
-                    $"Tool {payloadName} does not satisfy its JSON Schema.");
+            if (evaluation.IsValid)
+            {
+                return ToolSchemaValidationResult.Valid;
+            }
+
+            return new ToolSchemaValidationResult(
+                false,
+                BuildArgumentsError(payloadName, schemaJson));
         }
         catch (JsonException ex)
         {
@@ -64,6 +67,85 @@ public sealed class JsonSchemaToolValidator : IToolSchemaValidator
         {
             return new ToolSchemaValidationResult(false, ex.Message);
         }
+    }
+
+    private static string BuildArgumentsError(string payloadName, string schemaJson)
+    {
+        var hint = TryDescribeExpectedObjectShape(schemaJson);
+        return string.IsNullOrWhiteSpace(hint)
+            ? $"Tool {payloadName} does not satisfy its JSON Schema."
+            : $"Tool {payloadName} does not satisfy its JSON Schema. Expected object fields: {hint}.";
+    }
+
+    /// <summary>
+    /// Best-effort short hint from a JSON Schema object: required names, else property names.
+    /// </summary>
+    internal static string? TryDescribeExpectedObjectShape(string schemaJson)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(schemaJson);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            if (root.TryGetProperty("required", out var required)
+                && required.ValueKind == JsonValueKind.Array
+                && required.GetArrayLength() > 0)
+            {
+                return JoinNames(required, max: 8);
+            }
+
+            if (root.TryGetProperty("properties", out var properties)
+                && properties.ValueKind == JsonValueKind.Object)
+            {
+                var names = new List<string>();
+                foreach (var property in properties.EnumerateObject())
+                {
+                    names.Add(property.Name);
+                    if (names.Count >= 8)
+                    {
+                        break;
+                    }
+                }
+
+                return names.Count == 0 ? null : string.Join(", ", names);
+            }
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+
+        return null;
+    }
+
+    private static string JoinNames(JsonElement array, int max)
+    {
+        var names = new List<string>(Math.Min(max, array.GetArrayLength()));
+        foreach (var item in array.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+
+            var name = item.GetString();
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                continue;
+            }
+
+            names.Add(name);
+            if (names.Count >= max)
+            {
+                break;
+            }
+        }
+
+        return names.Count == 0 ? string.Empty : string.Join(", ", names);
     }
 
     private JsonSchema GetSchema(string schemaJson)

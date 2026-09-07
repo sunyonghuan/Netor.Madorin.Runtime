@@ -168,6 +168,13 @@ internal sealed class RuntimeExecutionCore(
             gatewayCatalogSnapshot,
             workRepo);
         await recoveryService.RecoverSentToolIntentsAsync(ct).ConfigureAwait(false);
+        // Live catalog must stay aligned with search/browse inject; consent re-entry
+        // must not freeze the Run-start snapshot or CallId identity will conflict.
+        Func<ToolCatalogSnapshot> liveCatalogProvider = () => skillCatalog is null
+            ? toolCatalogStore.CaptureSnapshot()
+            : toolCatalogStore.CaptureSnapshot()
+                .WithInternalTools([SkillScriptToolDefinition.Descriptor]);
+
         // Host reverse-RPC 与 Standalone 共用 scope 解析：人审只回答是否同意，
         // AllowedExecutables/路径等由 Runtime 按本次 arguments 收窄（避免 Host Grant 空白名单）。
         var toolConsentCoordinator = new ToolConsentCoordinator(
@@ -177,7 +184,8 @@ internal sealed class RuntimeExecutionCore(
             consentHandler,
             new BuiltinToolConsentScopeResolver(),
             _workspaceRoot,
-            toolStateStore);
+            toolStateStore,
+            liveCatalogProvider);
 
         Func<RuntimeSkillScriptInvocation, CancellationToken, Task<RuntimeSkillScriptResult>>? scriptInvoker =
             skillCatalog is null
@@ -224,10 +232,7 @@ internal sealed class RuntimeExecutionCore(
                 toolConsentCoordinator,
                 skillCatalogSnapshotProvider,
                 scriptInvoker,
-                liveCatalogProvider: () => skillCatalog is null
-                    ? toolCatalogStore.CaptureSnapshot()
-                    : toolCatalogStore.CaptureSnapshot()
-                        .WithInternalTools([SkillScriptToolDefinition.Descriptor]),
+                liveCatalogProvider: liveCatalogProvider,
                 isHostModeSkills: isHostModeSkills,
                 skillActivationStore: skillActivationStore),
 
@@ -270,7 +275,8 @@ internal sealed class RuntimeExecutionCore(
                 resumedFailure: resumedMeetingFailure,
                 scriptInvoker: scriptInvoker,
                 isHostModeSkills: isHostModeSkills,
-                skillActivationStore: skillActivationStore),
+                skillActivationStore: skillActivationStore,
+                liveCatalogProvider: liveCatalogProvider),
             RuntimeMode.Work => new WorkModeOrchestrator(
                 providerFactory: requestedProviderId =>
                 {
@@ -307,10 +313,7 @@ internal sealed class RuntimeExecutionCore(
                 connection: repositoryConnection,
                 credentialRefreshHandler: credentialRefreshHandler,
                 scriptInvoker: scriptInvoker,
-                liveCatalogProvider: () => skillCatalog is null
-                    ? toolCatalogStore.CaptureSnapshot()
-                    : toolCatalogStore.CaptureSnapshot()
-                        .WithInternalTools([SkillScriptToolDefinition.Descriptor]),
+                liveCatalogProvider: liveCatalogProvider,
                 isHostModeSkills: isHostModeSkills,
                 skillActivationStore: skillActivationStore),
 

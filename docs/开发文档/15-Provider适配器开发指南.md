@@ -103,3 +103,51 @@ Provider 的 API Key 来源有两种：
 当 Provider 返回认证失败（HTTP 401 / 403）时，Runtime 发出 `credentials.refresh.request` 事件。宿主收到该事件后通过 `UpdateCredentialsAsync` 提供新凭据，Runtime 自动重试失败的请求。`UpdateCredentialsAsync` 定义在可选接口 `IRuntimeProviderCredentialUpdater`，并非核心适配器成员；适配器需额外实现该可选接口才支持凭据热更新，否则认证失败不会触发运行时重试。
 
 独立 CLI 模式下不提供运行时凭据刷新，认证失败直接终止当前 Run。
+
+## 8. Provider 工具名策略（`ProviderToolNamePolicy`）
+
+模型侧 function name 字符集通常不允许 `.` 等符号。所有适配器在出站声明工具、历史回放、入站解析 ToolId 时必须走 `Providers.Abstractions.ProviderToolNamePolicy`，禁止各 Provider 私自替换规则。
+
+### 8.1 出站命名 `GetName`（三级回退）
+
+| 优先级 | 条件 | 结果示例 |
+| --- | --- | --- |
+| 1 | `DisplayName` 已是 Provider 安全名（字母数字 `_` `-`，长度 ≤64） | 原样使用 |
+| 2 | `DisplayName` 为**调用名风格**（含 `.` `/` `:` `@` 等轻度非法，**无**空格/中文） | `SanitizeForProvider`：`tool.search` → `tool_search` |
+| 3 | 仍不合法（描述性名称如 `Read file`、中文等 **不**压成短名） | `EncodeToolId(ToolId)` 稳定编码 |
+
+- `MaximumNameLength = 64`。
+- **禁止**把描述性 DisplayName 压成 `Read_file`，避免模型看到无意义短名。
+- 同一请求内 `ValidateUniqueNames`：若两个描述符映射到同一 Provider 名则拒绝请求。
+
+### 8.2 历史名 `GetHistoryName`
+
+优先按 `toolId` 在当前 tools 列表中找描述符并 `GetName`；否则对 `storedName` 再走安全名 / 调用名风格净化 / `EncodeToolId`。
+
+### 8.3 入站回解析 `ResolveToolId`
+
+按顺序匹配，保证「发出去是 `skill_search`、回来能对上 `host.skill.search`」：
+
+1. `GetName(tool) == providerName`
+2. 兼容旧行为：`DisplayName` / `ToolId` 精确相等
+3. `SanitizeForProvider(DisplayName) == providerName`
+4. 仍无命中则原样返回 `providerName`（交上层处理）
+
+### 8.4 公开 API
+
+| 方法 | 用途 |
+| --- | --- |
+| `GetName` / `GetHistoryName` | 出站与历史 |
+| `ResolveToolId` | 入站 |
+| `SanitizeForProvider` | 可单测的净化实现 |
+| `ValidateUniqueNames` | 发请求前去重校验 |
+
+单测：`ProviderToolNamePolicyTests`。宿主工具如 `skill.search` 经净化后常为 `skill_search`；Skills 激活钩子同时识别 `host.skill.search` / `skill.search` / `skill_search` 及编码 ToolId。
+
+---
+
+## 修订记录
+
+| 日期 | 说明 |
+| --- | --- |
+| 2026-09-07 | 新增 §8 ProviderToolNamePolicy（调用名风格短名化、描述性名称不误压、对称回解析） |

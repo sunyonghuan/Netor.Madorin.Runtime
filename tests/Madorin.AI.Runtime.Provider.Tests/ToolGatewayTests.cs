@@ -660,12 +660,11 @@ public sealed class ToolGatewayTests
         Assert.AreEqual(ToolGatewayResultKind.NeedsPermission, result.Kind);
         Assert.AreEqual(RuntimeErrorCodes.ToolPermissionRequired, result.Error?.Code);
         Assert.AreEqual(0, executor.ExecutionCount);
+        // Authorize runs before TryBegin: NeedsPermission must not create a CallId intent.
         var intent = await repository.GetIntentAsync(
             invocation.CallId,
             TestContext.CancellationToken);
-        Assert.IsNotNull(intent);
-        Assert.AreEqual(ToolIntentStatus.Pending, intent.Status);
-        Assert.IsNull(intent.SentAt);
+        Assert.IsNull(intent);
     }
 
     [TestMethod]
