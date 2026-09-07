@@ -10,6 +10,14 @@ namespace Madorin.AI.Runtime.Providers.Abstractions;
 /// </summary>
 public sealed class HostModeLoadableSkillsSource : AgentSkillsSource
 {
+    /// <summary>
+    /// Upper bound for Advertise / discovery descriptions (MAF frontmatter-safe).
+    /// Search hit descriptions are preferred intact; only oversize text is trimmed at a boundary.
+    /// </summary>
+    public const int MaxAdvertiseDescriptionLength = 1024;
+
+    private static readonly string[] ResourceDirectories = ["references", "assets"];
+
     private readonly SkillsInvocationContext _context;
 
     public HostModeLoadableSkillsSource(
@@ -53,59 +61,77 @@ public sealed class HostModeLoadableSkillsSource : AgentSkillsSource
         foreach (var path in paths)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!Directory.Exists(path))
+            if (!TryCreateSkill(path, out var skill) || skill is null)
             {
                 continue;
             }
 
-            var skillMd = Path.Combine(path, "SKILL.md");
-            if (!File.Exists(skillMd))
-            {
-                continue;
-            }
-
-            string content;
-            try
-            {
-                content = File.ReadAllText(skillMd);
-            }
-            catch (IOException)
-            {
-                continue;
-            }
-            catch (UnauthorizedAccessException)
-            {
-                continue;
-            }
-
-            if (!TryReadFrontmatterName(content, out var name) || string.IsNullOrWhiteSpace(name))
-            {
-                name = Path.GetFileName(
-                    path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-            }
-
-            if (string.IsNullOrWhiteSpace(name))
-            {
-                continue;
-            }
-
-            var description = ResolveShortDescription(name);
-            var body = ExtractBody(content);
-            skills.Add(new AgentInlineSkill(
-                name,
-                description,
-                body,
-                license: null,
-                compatibility: null,
-                allowedTools: null,
-                metadata: null,
-                serializerOptions: null));
+            skills.Add(skill);
         }
 
         return Task.FromResult<IList<AgentSkill>>(skills);
     }
 
-    private string ResolveShortDescription(string name)
+    private bool TryCreateSkill(string materializedPath, out AgentInlineSkill? skill)
+    {
+        skill = null;
+        if (!Directory.Exists(materializedPath))
+        {
+            return false;
+        }
+
+        var skillMd = Path.Combine(materializedPath, "SKILL.md");
+        if (!File.Exists(skillMd))
+        {
+            return false;
+        }
+
+        string content;
+        try
+        {
+            content = File.ReadAllText(skillMd);
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+
+        if (!TryReadFrontmatterName(content, out var name) || string.IsNullOrWhiteSpace(name))
+        {
+            name = Path.GetFileName(
+                materializedPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        }
+
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return false;
+        }
+
+        var description = ResolveAdvertiseDescription(name);
+        var body = ExtractBody(content);
+        skill = new AgentInlineSkill(
+            name,
+            description,
+            body,
+            license: null,
+            compatibility: null,
+            allowedTools: null,
+            metadata: null,
+            serializerOptions: null);
+
+        foreach (var (resourceName, resourceValue) in EnumerateResources(materializedPath))
+        {
+            skill.AddResource(resourceName, resourceValue, description: null);
+        }
+
+        return true;
+    }
+
+    private string ResolveAdvertiseDescription(string name)
     {
         if (_context.ActivationStore is not null)
         {
@@ -114,7 +140,8 @@ public sealed class HostModeLoadableSkillsSource : AgentSkillsSource
                 if (string.Equals(entry.Name, name, StringComparison.OrdinalIgnoreCase)
                     && !string.IsNullOrWhiteSpace(entry.ShortDescription))
                 {
-                    return TruncateDescription(entry.ShortDescription);
+                    // Search hits should keep full discovery text (within MAF-safe bound).
+                    return BoundDescription(entry.ShortDescription);
                 }
             }
         }
@@ -123,22 +150,100 @@ public sealed class HostModeLoadableSkillsSource : AgentSkillsSource
             && _context.CatalogDescriptionsByName.TryGetValue(name, out var catalogDescription)
             && !string.IsNullOrWhiteSpace(catalogDescription))
         {
-            return TruncateDescription(catalogDescription);
+            return BoundDescription(catalogDescription);
         }
 
         return name;
     }
 
-    private static string TruncateDescription(string description)
+    /// <summary>
+    /// Keeps full descriptions when possible. Only oversize text is cut at a sentence/paragraph
+    /// boundary so capability clauses are not sliced mid-phrase.
+    /// </summary>
+    public static string BoundDescription(
+        string description,
+        int maxLength = MaxAdvertiseDescriptionLength)
     {
-        const int maxLength = 160;
+        ArgumentException.ThrowIfNullOrWhiteSpace(description);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxLength);
+
         var trimmed = description.Trim();
         if (trimmed.Length <= maxLength)
         {
             return trimmed;
         }
 
-        return trimmed[..maxLength].TrimEnd() + "…";
+        var window = trimmed.AsSpan(0, maxLength);
+        var cut = LastBoundaryIndex(window);
+        if (cut < Math.Min(80, maxLength / 2))
+        {
+            cut = maxLength;
+        }
+
+        return string.Concat(window[..cut].TrimEnd(), "…");
+    }
+
+    private static int LastBoundaryIndex(ReadOnlySpan<char> window)
+    {
+        for (var i = window.Length - 1; i >= 0; i--)
+        {
+            var c = window[i];
+            if (c is '.' or '!' or '?' or '。' or '！' or '？' or '\n' or ';')
+            {
+                return i + 1;
+            }
+        }
+
+        for (var i = window.Length - 1; i >= 0; i--)
+        {
+            if (char.IsWhiteSpace(window[i]))
+            {
+                return i;
+            }
+        }
+
+        return window.Length;
+    }
+
+    private static IEnumerable<(string Name, string Value)> EnumerateResources(string skillPath)
+    {
+        foreach (var directoryName in ResourceDirectories)
+        {
+            var directory = Path.Combine(skillPath, directoryName);
+            if (!Directory.Exists(directory))
+            {
+                continue;
+            }
+
+            foreach (var file in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
+            {
+                string text;
+                try
+                {
+                    text = File.ReadAllText(file);
+                }
+                catch (IOException)
+                {
+                    continue;
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    continue;
+                }
+
+                var relative = Path.GetRelativePath(skillPath, file).Replace('\\', '/');
+                yield return (relative, text);
+
+                // Also expose bare file name for callers that omit the directory prefix
+                // (MAF docs: "style-guide" not "style-guide.md" / "references/FAQ.md").
+                var fileName = Path.GetFileNameWithoutExtension(file);
+                if (!string.IsNullOrWhiteSpace(fileName)
+                    && !string.Equals(fileName, relative, StringComparison.OrdinalIgnoreCase))
+                {
+                    yield return (fileName, text);
+                }
+            }
+        }
     }
 
     private static bool TryReadFrontmatterName(string skillMd, out string name)

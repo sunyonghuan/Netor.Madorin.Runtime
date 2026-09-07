@@ -176,13 +176,16 @@ skill.search（宿主工具，Reverse RPC）
 load_skill(name)
   → name ∈ Loadable
   → Content：Catalog MaterializedPath 优先；未命中则按激活 scope / 绑定源根惰性解析（忽略模型传入绝对路径）
-  → Advertise 仅短 description（激活 hit 或截断后的 catalog 描述）
+  → load_skill 返回完整 body；read_skill_resource 返回 references/assets 资源全文
+  → Advertise description：优先 search hit 完整描述（≤1024，超长按句界截断，避免关键半句切断）
 ```
 
 约束：
 
 - 宿主模式 `CreateSkillsProvider` **始终建**动态 Source Provider；空 Loadable 时暴露引导技能 `host-skills-guide`（保证 MAF 仍注册三工具），激活后 `GetSkillsAsync` 按 Activation 展开真实 Loadable。
 - 激活**唯一**同轮主路径是 Runtime 消化 `skill.search` tool result 的钩子；禁止在宿主回调栈内同步 Runtime activation RPC。
+- **Search 膨胀防护（Runtime 二道闸）**：单次 search result 最多激活 **8** 条 allowlisted hits（顺序保留）；Run 内 Loadable 总量上限 **24**（已激活名刷新不占新槽）。宿主侧仍应限制 hits 返回数。
+- `skill.search` 的 tool result 原文由宿主决定；Runtime **不截断**再回传模型。模型靠完整 hits 描述做选择，靠 `load_skill` 取正文。
 - 独立模式 paths → Provider 现网路径零行为回归。
 - workspace / user-global 路径由本进程自知；宿主仅需 `skill.dir.host_global`（安装侧全局根），**无** workspace 目录元工具依赖。
 

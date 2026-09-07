@@ -39,6 +39,10 @@ public sealed class HostModeSkillsActivationTests
             # Demo Skill Body
             secret-body-marker
             """);
+        Directory.CreateDirectory(Path.Combine(_skillPath, "references"));
+        File.WriteAllText(
+            Path.Combine(_skillPath, "references", "style-guide.md"),
+            "resource-marker-alpha\nUse this style guide after load_skill.");
     }
 
     [TestCleanup]
@@ -206,6 +210,58 @@ public sealed class HostModeSkillsActivationTests
             allowlistSkillIds: []);
         Assert.AreEqual(0, applied);
         Assert.IsEmpty(store.GetLoadableNames([]));
+    }
+
+    [TestMethod]
+    public void SkillSearchHook_CapsHitsPerResult_DoesNotActivateFullAllowlist()
+    {
+        var store = new SkillActivationStore();
+        var allowlist = Enumerable.Range(1, 20).Select(static i => $"skill-{i:D2}").ToArray();
+        var hits = string.Join(
+            ',',
+            allowlist.Select(static name =>
+                $"{{\"name\":\"{name}\",\"description\":\"full capability text for {name}\"}}"));
+        var applied = SkillSearchActivationHook.TryApplySearchResult(
+            store,
+            "host.skill.search",
+            "skill_search",
+            $"{{\"hits\":[{hits}]}}",
+            allowlist,
+            maxHitsPerResult: SkillSearchActivationHook.DefaultMaxHitsPerSearchResult);
+        Assert.AreEqual(SkillSearchActivationHook.DefaultMaxHitsPerSearchResult, applied);
+        Assert.HasCount(
+            SkillSearchActivationHook.DefaultMaxHitsPerSearchResult,
+            store.GetLoadableNames(allowlist));
+        Assert.IsTrue(store.IsLoadable("skill-01", allowlist));
+        Assert.IsFalse(store.IsLoadable("skill-09", allowlist));
+    }
+
+    [TestMethod]
+    public void SkillActivationStore_MaxLoadableCeiling_BlocksFurtherNewNames()
+    {
+        var store = new SkillActivationStore(maxLoadableSkills: 2);
+        Assert.IsTrue(store.TryActivate("a", "workspace", ["a", "b", "c"], "desc-a"));
+        Assert.IsTrue(store.TryActivate("b", "workspace", ["a", "b", "c"], "desc-b"));
+        Assert.IsFalse(store.TryActivate("c", "workspace", ["a", "b", "c"], "desc-c"));
+        Assert.IsTrue(store.TryActivate("a", "workspace", ["a", "b", "c"], "desc-a-refreshed"));
+        Assert.AreEqual("desc-a-refreshed", store.Snapshot().Single(static e => e.Name == "a").ShortDescription);
+        Assert.HasCount(2, store.GetLoadableNames(["a", "b", "c"]));
+    }
+
+    [TestMethod]
+    public void BoundDescription_KeepsFullText_AndCutsOnSentenceBoundary()
+    {
+        var full = "Reviews pull requests for style. Checks error handling and tests. Also validates security.";
+        Assert.AreEqual(full, HostModeLoadableSkillsSource.BoundDescription(full, maxLength: 500));
+
+        var longText =
+            "Capability A does foo and bar. Capability B handles batch exports and retries. "
+            + "Capability C should not appear when the budget is tight enough to cut earlier.";
+        var bounded = HostModeLoadableSkillsSource.BoundDescription(longText, maxLength: 70);
+        Assert.EndsWith("…", bounded);
+        Assert.DoesNotContain("Capability C", bounded, StringComparison.Ordinal);
+        Assert.Contains("Capability A", bounded, StringComparison.Ordinal);
+        Assert.DoesNotContain("Capability A does foo and ba…", bounded, StringComparison.Ordinal);
     }
 
     private SkillsInvocationContext CreateHostContext(

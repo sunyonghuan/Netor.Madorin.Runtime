@@ -13,6 +13,13 @@ public static partial class SkillSearchActivationHook
     public const string DisplayName = "skill.search";
     public const string ProviderSafeName = "skill_search";
 
+    /// <summary>
+    /// Soft cap on how many search hits become activations in one tool result.
+    /// Prevents a broad keyword from expanding Loadable to the full allowlist in one shot.
+    /// Host should also limit hit count; Runtime enforces a second line of defense.
+    /// </summary>
+    public const int DefaultMaxHitsPerSearchResult = 8;
+
     /// <summary>Returns whether the tool identity refers to host skill.search.</summary>
     public static bool IsSkillSearchTool(string? toolId, string? toolName = null)
     {
@@ -26,6 +33,9 @@ public static partial class SkillSearchActivationHook
 
     /// <summary>
     /// Parses search hits from tool output JSON and activates names within the allowlist.
+    /// At most <paramref name="maxHitsPerResult"/> distinct allowlisted hits are applied
+    /// (order preserved). Existing activations still refresh description/scope when re-hit
+    /// within the cap window.
     /// </summary>
     /// <returns>Number of names newly accepted or refreshed in the activation store.</returns>
     public static int TryApplySearchResult(
@@ -33,7 +43,8 @@ public static partial class SkillSearchActivationHook
         string? toolId,
         string? toolName,
         string? outputJson,
-        string[]? allowlistSkillIds)
+        string[]? allowlistSkillIds,
+        int maxHitsPerResult = DefaultMaxHitsPerSearchResult)
     {
         ArgumentNullException.ThrowIfNull(store);
         if (!IsSkillSearchTool(toolId, toolName))
@@ -42,6 +53,11 @@ public static partial class SkillSearchActivationHook
         }
 
         if (string.IsNullOrWhiteSpace(outputJson))
+        {
+            return 0;
+        }
+
+        if (maxHitsPerResult <= 0)
         {
             return 0;
         }
@@ -56,6 +72,7 @@ public static partial class SkillSearchActivationHook
             }
 
             var applied = 0;
+            var considered = 0;
             foreach (var hit in hits.Value.EnumerateArray())
             {
                 if (!TryReadHit(hit, out var name, out var scope, out var description))
@@ -63,6 +80,18 @@ public static partial class SkillSearchActivationHook
                     continue;
                 }
 
+                // Only count allowlisted candidates toward the per-search budget.
+                if (!SkillActivationStore.IsAllowed(name, allowlistSkillIds))
+                {
+                    continue;
+                }
+
+                if (considered >= maxHitsPerResult)
+                {
+                    break;
+                }
+
+                considered++;
                 if (store.TryActivate(name, scope, allowlistSkillIds, description))
                 {
                     applied++;

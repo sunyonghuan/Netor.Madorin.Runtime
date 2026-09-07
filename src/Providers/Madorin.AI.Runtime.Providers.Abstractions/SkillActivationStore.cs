@@ -8,8 +8,29 @@ namespace Madorin.AI.Runtime.Providers.Abstractions;
 /// </summary>
 public sealed class SkillActivationStore
 {
+    /// <summary>
+    /// Hard ceiling on distinct activated skills in one Run.
+    /// Refreshing an already-activated name does not consume a new slot.
+    /// </summary>
+    public const int DefaultMaxLoadableSkills = 24;
+
     private readonly ConcurrentDictionary<string, SkillActivationEntry> _activations =
         new(StringComparer.OrdinalIgnoreCase);
+
+    private readonly object _gate = new();
+    private readonly int _maxLoadableSkills;
+
+    public SkillActivationStore(int maxLoadableSkills = DefaultMaxLoadableSkills)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxLoadableSkills);
+        _maxLoadableSkills = maxLoadableSkills;
+    }
+
+    /// <summary>Gets the configured Run-level activation ceiling.</summary>
+    public int MaxLoadableSkills => _maxLoadableSkills;
+
+    /// <summary>Gets the current number of activated skill names.</summary>
+    public int Count => _activations.Count;
 
     /// <summary>Upserts an activation when the name is within the current allowlist.</summary>
     /// <returns><see langword="true"/> when the name was accepted into the activation set.</returns>
@@ -26,15 +47,28 @@ public sealed class SkillActivationStore
             return false;
         }
 
-        _activations.AddOrUpdate(
-            normalized,
-            _ => new SkillActivationEntry(normalized, NormalizeScope(scope), NormalizeDescription(shortDescription)),
-            (_, existing) => existing with
+        var entryScope = NormalizeScope(scope);
+        var entryDescription = NormalizeDescription(shortDescription);
+        lock (_gate)
+        {
+            if (_activations.TryGetValue(normalized, out var existing))
             {
-                Scope = NormalizeScope(scope) ?? existing.Scope,
-                ShortDescription = NormalizeDescription(shortDescription) ?? existing.ShortDescription
-            });
-        return true;
+                _activations[normalized] = existing with
+                {
+                    Scope = entryScope ?? existing.Scope,
+                    ShortDescription = entryDescription ?? existing.ShortDescription
+                };
+                return true;
+            }
+
+            if (_activations.Count >= _maxLoadableSkills)
+            {
+                return false;
+            }
+
+            _activations[normalized] = new SkillActivationEntry(normalized, entryScope, entryDescription);
+            return true;
+        }
     }
 
     /// <summary>Returns whether <paramref name="name"/> is currently loadable under the allowlist.</summary>

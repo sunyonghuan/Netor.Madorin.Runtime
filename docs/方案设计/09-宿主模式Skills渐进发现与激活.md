@@ -78,13 +78,15 @@ Advertise     = Loadable 短描述
 
 ```text
 skill.search（宿主工具，Reverse RPC）
-  → 宿主只返回 hits JSON
+  → 宿主只返回 hits JSON（建议含完整 description；宿主侧限制 hits 条数）
   → Runtime 收 result【钩子】Activation ∪= hit.Name（∈ Allowlist，scope 写入内部）
-  → 更新 Loadable
-  → 交模型
+  → 单次最多 8 条 allowlisted hits；Run 内 Loadable 总量 ≤ 24
+  → 更新 Loadable；Advertise 优先 hit 完整描述（≤1024，超长句界截断）
+  → 交模型（tool result 原文不二次截断）
 load_skill(name)
   → name ∈ Loadable
   → Content：Catalog MaterializedPath 优先；否则按激活 scope / 绑定源根（workspace > user-global > 显式）惰性解析目录中的 SKILL.md（不信任模型绝对路径）
+  → 返回完整 body；read_skill_resource 读 references/assets
 ```
 
 禁止：宿主回调内同步 Runtime activation RPC。  
