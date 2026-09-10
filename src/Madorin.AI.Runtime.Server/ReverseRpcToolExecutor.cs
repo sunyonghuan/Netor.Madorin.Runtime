@@ -13,6 +13,7 @@ internal sealed class ReverseRpcToolExecutor(
     IToolResultBlobStore? blobStore = null) : IRecoverableToolExecutor
 {
     private static readonly TimeSpan CancellationNotificationTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan ResultPollInterval = TimeSpan.FromMilliseconds(50);
     private readonly IDuplexRpcPeer _peer = peer ?? throw new ArgumentNullException(nameof(peer));
     private readonly IToolResultBlobStore? _blobStore = blobStore;
 
@@ -74,6 +75,12 @@ internal sealed class ReverseRpcToolExecutor(
             response,
             RuntimeJsonContext.Default.ToolCallResponse);
         ValidateResponseIdentity(result.CorrelationId, correlationId, result.CallId, invocation.CallId);
+        if (result.Status is ToolCallStatus.Pending or ToolCallStatus.Running)
+        {
+            result = await WaitForTerminalResultAsync(invocation, result, ct)
+                .ConfigureAwait(false);
+        }
+
         return await ToToolResultAsync(
             invocation,
             result.Status,
@@ -82,6 +89,47 @@ internal sealed class ReverseRpcToolExecutor(
             result.ResultBlob,
             result.ErrorMessage,
             ct).ConfigureAwait(false);
+    }
+
+    private async Task<ToolCallResponse> WaitForTerminalResultAsync(
+        ToolInvocation invocation,
+        ToolCallResponse initial,
+        CancellationToken ct)
+    {
+        while (true)
+        {
+            await Task.Delay(ResultPollInterval, ct).ConfigureAwait(false);
+            var recovery = await QueryResultAsync(invocation, ct).ConfigureAwait(false);
+            if (recovery.Status is ToolCallStatus.Pending or ToolCallStatus.Running)
+            {
+                continue;
+            }
+
+            if (recovery.Result is null)
+            {
+                throw new ToolResultUnavailableException(
+                    recovery.ErrorMessage
+                    ?? $"Host tool call '{invocation.CallId}' returned no terminal result.");
+            }
+
+            return new ToolCallResponse(
+                initial.CorrelationId,
+                initial.CallId,
+                recovery.Status,
+                recovery.Result.OutputJson is { } outputJson
+                    ? ParseJsonElement(outputJson)
+                    : null,
+                recovery.Result.ResultHash,
+                recovery.Result.ResultBlob,
+                recovery.ErrorCode,
+                recovery.ErrorMessage);
+        }
+    }
+
+    private static JsonElement ParseJsonElement(string outputJson)
+    {
+        using var document = JsonDocument.Parse(outputJson);
+        return document.RootElement.Clone();
     }
 
     public async Task<ToolRecoveryResult> QueryResultAsync(
