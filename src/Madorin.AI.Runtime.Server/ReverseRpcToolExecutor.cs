@@ -98,10 +98,29 @@ internal sealed class ReverseRpcToolExecutor(
     {
         while (true)
         {
-            await Task.Delay(ResultPollInterval, ct).ConfigureAwait(false);
-            var recovery = await QueryResultAsync(invocation, ct).ConfigureAwait(false);
+            ToolRecoveryResult recovery;
+            try
+            {
+                recovery = await QueryResultAsync(invocation, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                await TryCancelAsync(initial.CorrelationId, invocation.CallId).ConfigureAwait(false);
+                throw;
+            }
+
             if (recovery.Status is ToolCallStatus.Pending or ToolCallStatus.Running)
             {
+                try
+                {
+                    await Task.Delay(ResultPollInterval, ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    await TryCancelAsync(initial.CorrelationId, invocation.CallId).ConfigureAwait(false);
+                    throw;
+                }
+
                 continue;
             }
 

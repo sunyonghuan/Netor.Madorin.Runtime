@@ -314,6 +314,22 @@ public sealed class ToolConsentCoordinator
 
             if (response.Decision is not ToolAuthorizationDecision.Granted)
             {
+                if (response.Decision is ToolAuthorizationDecision.Cancelled)
+                {
+                    await SaveFinalDecisionAsync(
+                        approvalState,
+                        "cancelled",
+                        response.Grant?.GrantId,
+                        response.Reason,
+                        ct).ConfigureAwait(false);
+                    return await FailAndCompleteAsync(
+                        invocation,
+                        ToolIntentStatus.Cancelled,
+                        RuntimeErrorCodes.ToolExecutionCancelled,
+                        response.Reason ?? "The tool call was cancelled.",
+                        ct).ConfigureAwait(false);
+                }
+
                 var decision = response.Decision is ToolAuthorizationDecision.Denied
                     ? "denied"
                     : "invalid-response";
@@ -459,6 +475,22 @@ public sealed class ToolConsentCoordinator
 
             if (response.Decision is not ToolAuthorizationDecision.Granted)
             {
+                if (response.Decision is ToolAuthorizationDecision.Cancelled)
+                {
+                    await SaveFinalDecisionAsync(
+                        permissionState,
+                        "cancelled",
+                        response.Grant?.GrantId,
+                        response.Reason,
+                        ct).ConfigureAwait(false);
+                    return await FailAndCompleteAsync(
+                        invocation,
+                        ToolIntentStatus.Cancelled,
+                        RuntimeErrorCodes.ToolExecutionCancelled,
+                        response.Reason ?? "The tool permission was cancelled.",
+                        ct).ConfigureAwait(false);
+                }
+
                 var decision = response.Decision is ToolAuthorizationDecision.Denied
                     ? "denied"
                     : "invalid-response";
@@ -748,6 +780,7 @@ public sealed class ToolConsentCoordinator
         ToolAuthorizationDecision.Granted => "granted",
         ToolAuthorizationDecision.Denied => "denied",
         ToolAuthorizationDecision.NeedsApproval => "needs-approval",
+        ToolAuthorizationDecision.Cancelled => "cancelled",
         _ => throw new ArgumentOutOfRangeException(nameof(decision))
     };
 

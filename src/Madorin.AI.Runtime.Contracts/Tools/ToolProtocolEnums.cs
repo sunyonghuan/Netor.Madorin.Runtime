@@ -25,7 +25,8 @@ public enum ToolAuthorizationDecision
 {
     Granted,
     Denied,
-    NeedsApproval
+    NeedsApproval,
+    Cancelled
 }
 
 /// <summary>Represents the durable execution state reported by a host tool executor.</summary>
