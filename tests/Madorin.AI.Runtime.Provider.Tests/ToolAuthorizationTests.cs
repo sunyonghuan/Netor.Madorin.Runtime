@@ -604,6 +604,43 @@ public sealed class ToolAuthorizationTests
         Assert.AreEqual(ToolRiskLevel.Process, granted.EffectivePermission.MaximumRisk);
     }
 
+    [TestMethod]
+    public async Task AuthorizeAsync_HostMetaTool_IsGrantedWithoutExplicitGrant()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync(TestContext.CancellationToken);
+        await SqliteSchema.EnsureCreatedAsync(connection, TestContext.CancellationToken);
+        using var store = new SqliteToolIntentRepository(connection);
+        var service = new ToolAuthorizationService(
+            store,
+            RuntimeToolPolicy.CreateRestricted(_workspace));
+        var invocation = new ToolInvocation(
+            "call-search",
+            "host.host..tool.search..1.0.0",
+            "agent-root",
+            ParentAgentId: null,
+            """{"query":"time"}""",
+            "run-1",
+            "session-1",
+            "invocation-search");
+        var descriptor = new ToolDescriptor(
+            invocation.ToolId,
+            "host",
+            "tool_search",
+            "Search tools.",
+            "{\"type\":\"object\"}",
+            "{\"type\":\"object\"}",
+            Risk: ToolRiskLevel.Low);
+
+        var granted = await service.AuthorizeAsync(
+            invocation,
+            descriptor,
+            ct: TestContext.CancellationToken);
+
+        Assert.AreEqual(ToolAuthorizationDecision.Granted, granted.Decision);
+        Assert.IsNotNull(granted.EffectivePermission);
+    }
+
     private ToolGrant CreateGrant(
         string grantId,
         string agentId,

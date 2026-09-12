@@ -47,8 +47,12 @@ internal sealed class RuntimeHostCallbackDispatcher : IDisposable
         var entered = false;
         try
         {
-            await _concurrency.WaitAsync(timeoutSource.Token).ConfigureAwait(false);
-            entered = true;
+            if (RequiresConcurrencySlot(request.Method))
+            {
+                await _concurrency.WaitAsync(timeoutSource.Token).ConfigureAwait(false);
+                entered = true;
+            }
+
             return await DispatchAsync(request, timeoutSource.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -92,6 +96,14 @@ internal sealed class RuntimeHostCallbackDispatcher : IDisposable
             _concurrency.Dispose();
         }
     }
+
+    private static bool RequiresConcurrencySlot(string method) => method switch
+    {
+        MessageTypes.ToolPermissionRequest => false,
+        MessageTypes.ApprovalRequest => false,
+        MessageTypes.ToolCallCancel => false,
+        _ => true
+    };
 
     private bool HasCallback(string method) => method switch
     {

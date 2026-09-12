@@ -205,6 +205,52 @@ public sealed class RuntimeClientHighLevelStage7Tests
         Assert.IsTrue(responses.All(static response => response.Error is null));
     }
 
+    [TestMethod]
+    public async Task HostCallbackDispatcher_PermissionDoesNotConsumeConcurrencySlot()
+    {
+        var permissionHold = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var toolCallStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var callbacks = new RuntimeHostCallbacks
+        {
+            MaxConcurrency = 1,
+            CallbackTimeout = TimeSpan.FromSeconds(5),
+            ToolPermissionRequestedAsync = async (request, ct) =>
+            {
+                await permissionHold.Task.WaitAsync(ct);
+                return new ToolPermissionResponse(
+                    request.CorrelationId ?? request.ApprovalRequestId,
+                    request.CallId,
+                    ToolAuthorizationDecision.Granted);
+            },
+            ToolCallRequestedAsync = (request, _) =>
+            {
+                toolCallStarted.TrySetResult();
+                return ValueTask.FromResult(
+                    new ToolCallResponse(
+                        request.CorrelationId,
+                        request.CallId,
+                        ToolCallStatus.Succeeded));
+            }
+        };
+        using var dispatcher = new RuntimeHostCallbackDispatcher(callbacks);
+
+        var permissionTask = dispatcher.HandleAsync(
+            CreateRequest(
+                1,
+                MessageTypes.ToolPermissionRequest,
+                CreatePermissionRequest("permission-hold"),
+                RuntimeJsonContext.Default.ToolPermissionRequest),
+            TestContext.CancellationToken).AsTask();
+        var callTask = DispatchToolCallAsync(dispatcher, 2, "tool-during-permission").AsTask();
+
+        await toolCallStarted.Task.WaitAsync(TestContext.CancellationToken);
+        permissionHold.TrySetResult();
+        var responses = await Task.WhenAll(permissionTask, callTask);
+        Assert.IsTrue(responses.All(static response => response.Error is null));
+    }
+
     private static async ValueTask<ToolCallResponse> DelayUntilCancelledAsync(
         CancellationToken cancellationToken)
     {

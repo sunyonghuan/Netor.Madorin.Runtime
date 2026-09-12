@@ -534,7 +534,8 @@ public sealed class ToolAuthorizationService(
 
     private static bool IsDefaultAllowedTool(string toolId) =>
         string.Equals(toolId, "mcli_memory_read", StringComparison.Ordinal)
-        || toolId.StartsWith("mcli_fs_", StringComparison.Ordinal);
+        || toolId.StartsWith("mcli_fs_", StringComparison.Ordinal)
+        || toolId.StartsWith("host.host..", StringComparison.Ordinal);
 
     private static string[] NormalizeValues(string[]? values) =>
         values?
