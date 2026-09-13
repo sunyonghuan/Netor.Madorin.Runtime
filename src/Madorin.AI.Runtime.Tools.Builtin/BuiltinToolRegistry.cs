@@ -22,6 +22,7 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
     public const string FileEditToolId = "mcli_fs_edit";
     public const string ProcessRunToolId = "mcli_process";
     public const string HttpRequestToolId = "mcli_http";
+    public const string DelegateToAgentToolId = "mcli_delegate_agent";
 
     private static readonly IReadOnlyList<ToolDescriptor> Tools = Array.AsReadOnly<ToolDescriptor>(
     [
@@ -192,6 +193,17 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
             """{"type":"object","properties":{"statusCode":{"type":"integer"},"headers":{"type":"object"},"body":{"type":"string"},"mediaType":{"type":["string","null"]}},"required":["statusCode","headers","body","mediaType"],"additionalProperties":false}""",
             Capabilities: ["network.access"],
             Risk: ToolRiskLevel.Network,
+            IsIdempotent: false),
+        new(
+            DelegateToAgentToolId,
+            "mcli",
+            "Delegate to agent",
+            "Delegates a task to a specific agent from the available agent pool.",
+            """{"type":"object","properties":{"agentName":{"type":"string","description":"Name of the target agent (case-insensitive)"},"task":{"type":"string","description":"Task description to delegate"}},"required":["agentName","task"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"delegated":{"type":"boolean"},"agentId":{"type":"string"},"agentDisplayName":{"type":"string"},"message":{"type":"string"}},"required":["delegated","message"],"additionalProperties":false}""",
+            RiskLevel: "low",
+            Capabilities: ["agent.delegate"],
+            Risk: ToolRiskLevel.Low,
             IsIdempotent: false)
     ]);
 
