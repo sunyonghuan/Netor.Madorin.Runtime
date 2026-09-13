@@ -12,6 +12,8 @@ public sealed record RunStatusChangedEvent(
 
     public string? CurrentStep { get; init; }
 
+    public string? WorkPhase { get; init; }
+
     public long? CompletedUnits { get; init; }
 
     public long? TotalUnits { get; init; }

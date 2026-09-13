@@ -2344,7 +2344,8 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
         string? currentStep,
         long? completedUnits,
         long? totalUnits,
-        CancellationToken ct) =>
+        CancellationToken ct,
+        string? workPhase = null) =>
         CreateEnvelopeAsync(
             runtimeInstanceId,
             runId,
@@ -2364,6 +2365,7 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                     _ => "terminal"
                 },
                 CurrentStep = currentStep,
+                WorkPhase = workPhase,
                 CompletedUnits = completedUnits,
                 TotalUnits = totalUnits,
                 UpdatedAt = DateTimeOffset.UtcNow

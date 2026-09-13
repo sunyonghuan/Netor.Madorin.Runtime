@@ -249,7 +249,8 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                         runId,
                         runSequence++,
                         statusChanged.Status,
-                        ct).ConfigureAwait(false);
+                        ct,
+                        workPhase: "planning").ConfigureAwait(false);
                     break;
             }
         }
@@ -535,7 +536,9 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                                 runId,
                                 runSequence++,
                                 statusChanged.Status,
-                                ct).ConfigureAwait(false);
+                                ct,
+                                workPhase: "executing",
+                                currentStep: readyStep.StepId).ConfigureAwait(false);
                             break;
                     }
 
@@ -1079,7 +1082,9 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         string runId,
         long runSequence,
         RunStatus status,
-        CancellationToken ct) =>
+        CancellationToken ct,
+        string? workPhase = null,
+        string? currentStep = null) =>
         CreateEnvelopeAsync(
             runtimeInstanceId,
             runId,
@@ -1098,7 +1103,9 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                     RunStatus.WaitingForCredentials => "waiting-for-credentials",
                     RunStatus.Persisting => "persisting",
                     _ => "terminal"
-                }
+                },
+                WorkPhase = workPhase,
+                CurrentStep = currentStep
             },
             RuntimeJsonContext.Default.RunStatusChangedEvent,
             ct);
