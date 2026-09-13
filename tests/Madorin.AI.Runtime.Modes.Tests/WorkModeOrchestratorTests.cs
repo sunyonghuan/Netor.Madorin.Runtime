@@ -447,6 +447,64 @@ public sealed class WorkModeOrchestratorTests
         Assert.AreEqual(1, steps.GetArrayLength(), "Fallback plan should have 1 step");
     }
 
+    [TestMethod]
+    public async Task Work_ForwardsReasoningDelta()
+    {
+        var result = await RunAsync(repetitionCount: 1, emitReasoningDelta: true);
+        var events = Assert.ContainsSingle(result.EventBatches);
+
+        var reasoningEvents = events
+            .Where(static item => item.MessageType == MessageTypes.ReasoningDelta)
+            .ToArray();
+
+        Assert.IsNotEmpty(reasoningEvents, "Should forward reasoning.delta events");
+        var firstReasoning = reasoningEvents[0];
+        Assert.IsTrue(firstReasoning.Payload.TryGetProperty("delta", out var delta));
+        Assert.AreEqual("thinking...", delta.GetString());
+        Assert.IsTrue(firstReasoning.Payload.TryGetProperty("invocationId", out var invocationId));
+        Assert.IsFalse(string.IsNullOrEmpty(invocationId.GetString()));
+    }
+
+    [TestMethod]
+    public async Task Work_ForwardsToolCallDelta()
+    {
+        var result = await RunAsync(repetitionCount: 1, emitToolCallDelta: true);
+        var events = Assert.ContainsSingle(result.EventBatches);
+
+        var toolCallEvents = events
+            .Where(static item => item.MessageType == MessageTypes.ToolCallDelta)
+            .ToArray();
+
+        Assert.IsNotEmpty(toolCallEvents, "Should forward tool.call.delta events");
+        var firstToolCall = toolCallEvents[0];
+        Assert.IsTrue(firstToolCall.Payload.TryGetProperty("delta", out var delta));
+        Assert.AreEqual("{\"arg\":", delta.GetString());
+        Assert.IsTrue(firstToolCall.Payload.TryGetProperty("invocationId", out var invocationId));
+        Assert.IsFalse(string.IsNullOrEmpty(invocationId.GetString()));
+        Assert.IsTrue(firstToolCall.Payload.TryGetProperty("callId", out var callId));
+        Assert.AreEqual("call-1", callId.GetString());
+    }
+
+    [TestMethod]
+    public async Task Work_ForwardsUsageUpdated()
+    {
+        var result = await RunAsync(repetitionCount: 1, emitUsageUpdated: true);
+        var events = Assert.ContainsSingle(result.EventBatches);
+
+        var usageEvents = events
+            .Where(static item => item.MessageType == MessageTypes.UsageUpdated)
+            .ToArray();
+
+        Assert.IsNotEmpty(usageEvents, "Should forward usage.updated events");
+        var firstUsage = usageEvents[0];
+        Assert.IsTrue(firstUsage.Payload.TryGetProperty("inputTokens", out var inputTokens));
+        Assert.AreEqual(100, inputTokens.GetInt32());
+        Assert.IsTrue(firstUsage.Payload.TryGetProperty("outputTokens", out var outputTokens));
+        Assert.AreEqual(50, outputTokens.GetInt32());
+        Assert.IsTrue(firstUsage.Payload.TryGetProperty("invocationId", out var invocationId));
+        Assert.IsFalse(string.IsNullOrEmpty(invocationId.GetString()));
+    }
+
     private async Task<WorkRunResult> RunAsync(
         int repetitionCount,
         WorkStepFailurePolicy failurePolicy = WorkStepFailurePolicy.Stop,
@@ -460,7 +518,10 @@ public sealed class WorkModeOrchestratorTests
         WorkContextPolicy? contextPolicy = null,
         bool requireWorkerCredentialRefresh = false,
         bool credentialRefreshSucceeds = true,
-        bool refreshSkillsBetweenInvocations = false)
+        bool refreshSkillsBetweenInvocations = false,
+        bool emitReasoningDelta = false,
+        bool emitToolCallDelta = false,
+        bool emitUsageUpdated = false)
     {
         var ct = _testContext.CancellationToken;
         var dataDirectory = Path.Combine(
@@ -484,7 +545,10 @@ public sealed class WorkModeOrchestratorTests
                 failWorker,
                 workerFailuresBeforeSuccess,
                 managerOutput,
-                requireWorkerCredentialRefresh);
+                requireWorkerCredentialRefresh,
+                emitReasoningDelta,
+                emitToolCallDelta,
+                emitUsageUpdated);
             var memoryFiles = new MemoryFileService(
                 Path.Join(dataDirectory, "home"),
                 Path.Join(dataDirectory, "workspace"));
@@ -775,19 +839,28 @@ public sealed class WorkModeOrchestratorTests
         private readonly int _workerFailuresBeforeSuccess;
         private readonly string? _managerOutput;
         private readonly bool _requireWorkerCredentialRefresh;
+        private readonly bool _emitReasoningDelta;
+        private readonly bool _emitToolCallDelta;
+        private readonly bool _emitUsageUpdated;
         private int _workerFailureCount;
 
         public FakeProviderAdapter(
             bool failWorker = false,
             int workerFailuresBeforeSuccess = 0,
             string? managerOutput = null,
-            bool requireWorkerCredentialRefresh = false)
+            bool requireWorkerCredentialRefresh = false,
+            bool emitReasoningDelta = false,
+            bool emitToolCallDelta = false,
+            bool emitUsageUpdated = false)
         {
             _workerFailuresBeforeSuccess = failWorker
                 ? int.MaxValue
                 : workerFailuresBeforeSuccess;
             _managerOutput = managerOutput;
             _requireWorkerCredentialRefresh = requireWorkerCredentialRefresh;
+            _emitReasoningDelta = emitReasoningDelta;
+            _emitToolCallDelta = emitToolCallDelta;
+            _emitUsageUpdated = emitUsageUpdated;
         }
 
         public string ProviderId => "fake";
@@ -847,12 +920,37 @@ public sealed class WorkModeOrchestratorTests
                 yield break;
             }
 
+            if (_emitReasoningDelta)
+            {
+                yield return new ReasoningDeltaProviderEvent(
+                    request.InvocationId,
+                    "thinking...");
+            }
+
+            if (_emitToolCallDelta)
+            {
+                yield return new ToolCallDeltaProviderEvent(
+                    request.InvocationId,
+                    "call-1",
+                    "test_tool",
+                    "{\"arg\":");
+            }
+
             yield return new TextDeltaProviderEvent(
                 request.InvocationId,
                 string.Equals(request.AgentId, "manager", StringComparison.Ordinal)
                     && _managerOutput is not null
                     ? _managerOutput
                     : $"result:{request.AgentId}");
+
+            if (_emitUsageUpdated)
+            {
+                yield return new UsageUpdatedProviderEvent(
+                    request.InvocationId,
+                    InputTokens: 100,
+                    OutputTokens: 50);
+            }
+
             yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
         }
 

@@ -222,6 +222,22 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                         runId, runtimeInstanceId, textDelta.InvocationId, textDelta.Delta,
                         runSequence++, ct).ConfigureAwait(false);
                     break;
+                case ReasoningDeltaProviderEvent reasoningDelta:
+                    yield return await CreateReasoningDeltaEnvelopeAsync(
+                        runId, runtimeInstanceId, reasoningDelta.InvocationId, reasoningDelta.Delta,
+                        runSequence++, ct).ConfigureAwait(false);
+                    break;
+                case ToolCallDeltaProviderEvent toolCallDelta:
+                    yield return await CreateToolCallDeltaEnvelopeAsync(
+                        runId, runtimeInstanceId, toolCallDelta.InvocationId, toolCallDelta.CallId,
+                        toolCallDelta.Name, toolCallDelta.ArgumentsDelta,
+                        runSequence++, ct).ConfigureAwait(false);
+                    break;
+                case UsageUpdatedProviderEvent usage:
+                    yield return await CreateUsageUpdatedEnvelopeAsync(
+                        runId, runtimeInstanceId, usage.InvocationId, usage.InputTokens, usage.OutputTokens,
+                        runSequence++, ct).ConfigureAwait(false);
+                    break;
                 case InvocationFailedProviderEvent failed:
                     await _workRepo.UpdateSessionStatusAsync(
                         sessionId, WorkSessionStatus.Failed, ct).ConfigureAwait(false);
@@ -470,6 +486,22 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                             resultBuilder.Append(textDelta.Delta);
                             yield return await CreateTextDeltaEnvelopeAsync(
                                 runId, runtimeInstanceId, textDelta.InvocationId, textDelta.Delta,
+                                runSequence++, ct).ConfigureAwait(false);
+                            break;
+                        case ReasoningDeltaProviderEvent reasoningDelta:
+                            yield return await CreateReasoningDeltaEnvelopeAsync(
+                                runId, runtimeInstanceId, reasoningDelta.InvocationId, reasoningDelta.Delta,
+                                runSequence++, ct).ConfigureAwait(false);
+                            break;
+                        case ToolCallDeltaProviderEvent toolCallDelta:
+                            yield return await CreateToolCallDeltaEnvelopeAsync(
+                                runId, runtimeInstanceId, toolCallDelta.InvocationId, toolCallDelta.CallId,
+                                toolCallDelta.Name, toolCallDelta.ArgumentsDelta,
+                                runSequence++, ct).ConfigureAwait(false);
+                            break;
+                        case UsageUpdatedProviderEvent usage:
+                            yield return await CreateUsageUpdatedEnvelopeAsync(
+                                runId, runtimeInstanceId, usage.InvocationId, usage.InputTokens, usage.OutputTokens,
                                 runSequence++, ct).ConfigureAwait(false);
                             break;
                         case InvocationFailedProviderEvent failed:
@@ -1157,6 +1189,27 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             runtimeInstanceId, runId, runSequence, MessageTypes.TextDelta,
             new TextDeltaEvent(invocationId, delta), RuntimeJsonContext.Default.TextDeltaEvent, ct);
 
+    private Task<RuntimeEventEnvelope> CreateReasoningDeltaEnvelopeAsync(
+        string runId, string runtimeInstanceId, string invocationId, string delta,
+        long runSequence, CancellationToken ct) =>
+        CreateEnvelopeAsync(
+            runtimeInstanceId, runId, runSequence, MessageTypes.ReasoningDelta,
+            new ReasoningDeltaEvent(invocationId, delta), RuntimeJsonContext.Default.ReasoningDeltaEvent, ct);
+
+    private Task<RuntimeEventEnvelope> CreateToolCallDeltaEnvelopeAsync(
+        string runId, string runtimeInstanceId, string invocationId, string callId, string name, string delta,
+        long runSequence, CancellationToken ct) =>
+        CreateEnvelopeAsync(
+            runtimeInstanceId, runId, runSequence, MessageTypes.ToolCallDelta,
+            new ToolCallDeltaEvent(invocationId, callId, name, delta), RuntimeJsonContext.Default.ToolCallDeltaEvent, ct);
+
+    private Task<RuntimeEventEnvelope> CreateUsageUpdatedEnvelopeAsync(
+        string runId, string runtimeInstanceId, string invocationId, int? inputTokens, int? outputTokens,
+        long runSequence, CancellationToken ct) =>
+        CreateEnvelopeAsync(
+            runtimeInstanceId, runId, runSequence, MessageTypes.UsageUpdated,
+            new UsageUpdatedEvent(invocationId, inputTokens, outputTokens), RuntimeJsonContext.Default.UsageUpdatedEvent, ct);
+
     private async Task<RuntimeEventEnvelope> CreateEnvelopeAsync<T>(
         string runtimeInstanceId, string runId, long runSequence, string messageType,
         T value, JsonTypeInfo<T> typeInfo, CancellationToken ct)
@@ -1230,17 +1283,20 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                         case ReasoningDeltaProviderEvent reasoningDelta:
                             hasObservedProviderOutput = true;
                             AccumulateAssistantContent(assistantContent, reasoningDelta);
+                            yield return reasoningDelta;
                             break;
-                        case ToolCallDeltaProviderEvent:
+                        case ToolCallDeltaProviderEvent toolCallDelta:
                             hasObservedProviderOutput = true;
+                            yield return toolCallDelta;
                             break;
                         case ToolCallCompleteProviderEvent toolCall:
                             hasObservedProviderOutput = true;
                             AccumulateAssistantContent(assistantContent, toolCall);
                             yield return toolCall;
                             break;
-                        case UsageUpdatedProviderEvent:
+                        case UsageUpdatedProviderEvent usage:
                             hasObservedProviderOutput = true;
+                            yield return usage;
                             break;
                         case InvocationCompletedProviderEvent:
                             completed = true;
