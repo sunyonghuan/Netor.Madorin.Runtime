@@ -3666,9 +3666,17 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
         var participantListBuilder = new StringBuilder();
         participantListBuilder.AppendLine();
         participantListBuilder.AppendLine();
-        participantListBuilder.AppendLine("## Available Participants for Delegation");
+        participantListBuilder.AppendLine("## Participant Selection in Meeting Mode");
         participantListBuilder.AppendLine();
-        participantListBuilder.AppendLine("You can delegate tasks to the following participants using the `delegate_to_agent` tool:");
+        participantListBuilder.AppendLine("When responding, you must output a JSON object with the following structure:");
+        participantListBuilder.AppendLine("```json");
+        participantListBuilder.AppendLine("{");
+        participantListBuilder.AppendLine("  \"participantId\": \"<participant-id>\",");
+        participantListBuilder.AppendLine("  \"conclude\": false");
+        participantListBuilder.AppendLine("}");
+        participantListBuilder.AppendLine("```");
+        participantListBuilder.AppendLine();
+        participantListBuilder.AppendLine("Available participants (use their participantId in your response):");
         participantListBuilder.AppendLine();
 
         foreach (var participant in participants)
@@ -3677,12 +3685,14 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             {
                 participantListBuilder.AppendLine(
                     CultureInfo.InvariantCulture,
-                    $"- **{participant.DisplayName}** ({participant.Agent.AgentId})");
+                    $"- **{participant.DisplayName}** (participantId: `{participant.ParticipantId}`, agent: {participant.Agent.AgentId})");
             }
         }
 
         participantListBuilder.AppendLine();
-        participantListBuilder.AppendLine("Use the tool when the user mentions \"@ParticipantName\" or \"let {Participant} do...\".");
+        participantListBuilder.AppendLine("When the user mentions \"@ParticipantName\" or \"let {Participant} speak\", select that participant's participantId.");
+        participantListBuilder.AppendLine("Set `conclude: true` to end the meeting, or `conclude: false` to continue with the selected participant.");
+        participantListBuilder.AppendLine("The orchestrator will automatically invoke the selected participant for the next round.");
 
         return baseInstructions + participantListBuilder.ToString();
     }
