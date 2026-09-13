@@ -2106,9 +2106,11 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         var agentListBuilder = new StringBuilder();
         agentListBuilder.AppendLine();
         agentListBuilder.AppendLine();
-        agentListBuilder.AppendLine("## Available Agents for Delegation");
+        agentListBuilder.AppendLine("## Agent Delegation in Work Mode");
         agentListBuilder.AppendLine();
-        agentListBuilder.AppendLine("You can delegate tasks to the following agents using the `delegate_to_agent` tool:");
+        agentListBuilder.AppendLine("When creating the WorkPlanDraft, assign each step to the most appropriate agent by setting the `targetAgentId` field in each WorkPlanStepDraft.");
+        agentListBuilder.AppendLine();
+        agentListBuilder.AppendLine("Available agents:");
         agentListBuilder.AppendLine();
 
         foreach (var agent in availableAgents)
@@ -2117,7 +2119,8 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         }
 
         agentListBuilder.AppendLine();
-        agentListBuilder.AppendLine("Use the tool when the user mentions \"@AgentName\" or \"let {Agent} do...\".");
+        agentListBuilder.AppendLine("When the user mentions \"@AgentName\" or \"let {Agent} do...\", assign that step's targetAgentId to the specified agent.");
+        agentListBuilder.AppendLine("The orchestrator will automatically invoke the correct agent for each step during execution.");
 
         return baseInstructions + agentListBuilder.ToString();
     }
