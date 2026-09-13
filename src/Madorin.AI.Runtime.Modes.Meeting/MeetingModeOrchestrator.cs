@@ -1805,9 +1805,17 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             ? AgentContextComposer.WithoutMemory(agent.SystemPrompt)
             : await _agentContextComposer.ComposeAsync(agent.SystemPrompt, ct)
                 .ConfigureAwait(false);
+
+        var systemInstructions = context.Instructions;
+        if (request.Selection.ModeOptions is MeetingModeOptions meetingOpts
+            && meetingOpts.Participants.Length > 1)
+        {
+            systemInstructions = AppendAvailableParticipantsList(systemInstructions, meetingOpts.Participants);
+        }
+
         var systemMessage = new RuntimeProviderMessage(
             RuntimeProviderRoles.System,
-            [new TextContentBlock(context.Instructions)]);
+            [new TextContentBlock(systemInstructions)]);
         var projection = await BuildProjectedMessagesAsync(
             sessionId,
             invocationId,
@@ -3310,9 +3318,16 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
         var context = _agentContextComposer is null
             ? AgentContextComposer.WithoutMemory(agent.SystemPrompt)
             : await _agentContextComposer.ComposeAsync(agent.SystemPrompt, ct).ConfigureAwait(false);
+
+        var systemInstructions = context.Instructions;
+        if (options.Participants.Length > 1)
+        {
+            systemInstructions = AppendAvailableParticipantsList(systemInstructions, options.Participants);
+        }
+
         var systemMessage = new RuntimeProviderMessage(
             RuntimeProviderRoles.System,
-            [new TextContentBlock(context.Instructions)]);
+            [new TextContentBlock(systemInstructions)]);
         var projection = await BuildProjectedMessagesAsync(
             sessionId,
             invocationId,
@@ -3641,4 +3656,35 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
     private sealed record ReconciledCanonicalText(
         ConversationRecordV1 Record,
         string Text);
+
+    private static string AppendAvailableParticipantsList(string baseInstructions, MeetingParticipant[] participants)
+    {
+        if (participants.Length <= 1)
+        {
+            return baseInstructions;
+        }
+
+        var participantListBuilder = new StringBuilder();
+        participantListBuilder.AppendLine();
+        participantListBuilder.AppendLine();
+        participantListBuilder.AppendLine("## Available Participants for Delegation");
+        participantListBuilder.AppendLine();
+        participantListBuilder.AppendLine("You can delegate tasks to the following participants using the `delegate_to_agent` tool:");
+        participantListBuilder.AppendLine();
+
+        foreach (var participant in participants)
+        {
+            if (participant.Status == ParticipantStatus.Active)
+            {
+                participantListBuilder.AppendLine(
+                    CultureInfo.InvariantCulture,
+                    $"- **{participant.DisplayName}** ({participant.Agent.AgentId})");
+            }
+        }
+
+        participantListBuilder.AppendLine();
+        participantListBuilder.AppendLine("Use the tool when the user mentions \"@ParticipantName\" or \"let {Participant} do...\".");
+
+        return baseInstructions + participantListBuilder.ToString();
+    }
 }
