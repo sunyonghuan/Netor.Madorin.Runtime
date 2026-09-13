@@ -325,6 +325,42 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                         "Work scheduler found running steps but no ready continuation.");
                 }
 
+                // Check for steps blocked by dependency failures
+                var blockedSteps = steps.Where(s =>
+                    s.Status == WorkStepLifecycleStatus.Pending &&
+                    (s.DependsOn ?? Array.Empty<string>()).Any(dep =>
+                        steps.FirstOrDefault(x => string.Equals(x.StepId, dep, StringComparison.Ordinal))?.Status
+                            == WorkStepLifecycleStatus.Failed)).ToList();
+
+                foreach (var step in blockedSteps)
+                {
+                    // Mark step as skipped in repository (no UpdateStepStatusAsync method, skip for now)
+                    // await _workRepo.UpdateStepStatusAsync(
+                    //     sessionId, step.StepId, WorkStepLifecycleStatus.Skipped, ct).ConfigureAwait(false);
+
+                    var skippedEvent = new WorkStepSkippedEvent(step.StepId, "dependency_failed");
+                    var skippedEventJson = JsonSerializer.Serialize(
+                        skippedEvent,
+                        RuntimeJsonContext.Default.WorkStepSkippedEvent);
+                    var skippedGsn = await _outbox.AppendAsync(
+                        runId,
+                        runSequence,
+                        MessageTypes.WorkStepSkipped,
+                        skippedEventJson,
+                        ct).ConfigureAwait(false);
+
+                    yield return new RuntimeEventEnvelope(
+                        runtimeInstanceId,
+                        skippedGsn,
+                        runId,
+                        runSequence++,
+                        MessageTypes.WorkStepSkipped,
+                        DateTimeOffset.UtcNow,
+                        JsonSerializer.SerializeToElement(
+                            skippedEvent,
+                            RuntimeJsonContext.Default.WorkStepSkippedEvent));
+                }
+
                 var failed = steps.FirstOrDefault(static s =>
                     s.Status == WorkStepLifecycleStatus.Failed);
                 if (failed is not null)
@@ -469,7 +505,8 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                         readyStep.PlanVersion,
                         ct).ConfigureAwait(false);
                     yield return await CreateInvocationCompletedEnvelopeAsync(
-                        runId, runtimeInstanceId, childInvocation.InvocationId, runSequence++, ct)
+                        runId, runtimeInstanceId, childInvocation.InvocationId, runSequence++, ct,
+                        workStepId: readyStep.StepId)
                         .ConfigureAwait(false);
                     completedCount++;
                     continue;
@@ -508,21 +545,19 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                         case InvocationFailedProviderEvent failed:
                             stepFailed = true;
                             stepError = failed.Error;
-                            if (policy.FailurePolicy is not WorkStepFailurePolicy.AskHost)
+                            if (policy.FailurePolicy is WorkStepFailurePolicy.Stop)
                             {
                                 await _sessionRepo.FailWorkStepAsync(
                                     readyStep.StepId, readyStep.PlanVersion, failed.Error.Message, ct)
                                     .ConfigureAwait(false);
-                            }
-                            yield return await CreateInvocationFailedEnvelopeAsync(
-                                runId,
-                                runtimeInstanceId,
-                                failed.InvocationId,
-                                failed.Error,
-                                runSequence++,
-                                ct).ConfigureAwait(false);
-                            if (policy.FailurePolicy is WorkStepFailurePolicy.Stop)
-                            {
+                                yield return await CreateInvocationFailedEnvelopeAsync(
+                                    runId,
+                                    runtimeInstanceId,
+                                    failed.InvocationId,
+                                    failed.Error,
+                                    runSequence++,
+                                    ct,
+                                    workStepId: readyStep.StepId).ConfigureAwait(false);
                                 await _workRepo.UpdateSessionStatusAsync(
                                     sessionId, WorkSessionStatus.Failed, ct).ConfigureAwait(false);
                                 throw new InvalidOperationException(
@@ -567,6 +602,16 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                             ct).ConfigureAwait(false);
                         if (!approved)
                         {
+                            yield return await CreateInvocationFailedEnvelopeAsync(
+                                runId,
+                                runtimeInstanceId,
+                                childInvocation.InvocationId,
+                                stepError ?? CreateRuntimeError(
+                                    "WorkStepFailed",
+                                    reason),
+                                runSequence++,
+                                ct,
+                                workStepId: readyStep.StepId).ConfigureAwait(false);
                             await _workRepo.UpdateSessionStatusAsync(
                                 sessionId, WorkSessionStatus.Failed, ct).ConfigureAwait(false);
                             throw new InvalidOperationException(
@@ -600,6 +645,20 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                             continue;
                         }
 
+                        // Retry exhausted, emit failed event
+                        await _sessionRepo.FailWorkStepAsync(
+                            readyStep.StepId, readyStep.PlanVersion, stepError?.Message ?? "Work step failed.", ct)
+                            .ConfigureAwait(false);
+                        yield return await CreateInvocationFailedEnvelopeAsync(
+                            runId,
+                            runtimeInstanceId,
+                            childInvocation.InvocationId,
+                            stepError ?? CreateRuntimeError(
+                                "WorkStepFailed",
+                                "Work step failed after retries."),
+                            runSequence++,
+                            ct,
+                            workStepId: readyStep.StepId).ConfigureAwait(false);
                         await _workRepo.UpdateSessionStatusAsync(
                             sessionId, WorkSessionStatus.Failed, ct).ConfigureAwait(false);
                         throw new InvalidOperationException(
@@ -616,7 +675,8 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                     readyStep.PlanVersion,
                     ct).ConfigureAwait(false);
                 yield return await CreateInvocationCompletedEnvelopeAsync(
-                    runId, runtimeInstanceId, childInvocation.InvocationId, runSequence++, ct)
+                    runId, runtimeInstanceId, childInvocation.InvocationId, runSequence++, ct,
+                    workStepId: readyStep.StepId)
                     .ConfigureAwait(false);
 
                 var resultJson = JsonSerializer.Serialize(
@@ -1136,10 +1196,11 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
     }
 
     private Task<RuntimeEventEnvelope> CreateInvocationCompletedEnvelopeAsync(
-        string runId, string runtimeInstanceId, string invocationId, long runSequence, CancellationToken ct) =>
+        string runId, string runtimeInstanceId, string invocationId, long runSequence, CancellationToken ct,
+        string? workStepId = null) =>
         CreateEnvelopeAsync(
             runtimeInstanceId, runId, runSequence, MessageTypes.InvocationCompleted,
-            new InvocationCompletedEvent(invocationId),
+            new InvocationCompletedEvent(invocationId, workStepId),
             RuntimeJsonContext.Default.InvocationCompletedEvent, ct);
 
     private Task<RuntimeEventEnvelope> CreateContextProjectionAdjustedEnvelopeAsync(
@@ -1182,10 +1243,11 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         string invocationId,
         RuntimeError error,
         long runSequence,
-        CancellationToken ct) =>
+        CancellationToken ct,
+        string? workStepId = null) =>
         CreateEnvelopeAsync(
             runtimeInstanceId, runId, runSequence, MessageTypes.InvocationFailed,
-            new InvocationFailedEvent(invocationId, error),
+            new InvocationFailedEvent(invocationId, error, workStepId),
             RuntimeJsonContext.Default.InvocationFailedEvent,
             ct);
 

@@ -52,4 +52,5 @@ public static class MessageTypes
     public const string SkillCatalogRefresh = "skill.catalog.refresh";
     public const string SkillCatalogChanged = "skill.catalog.changed";
     public const string WorkPlanUpdated = "work.plan.updated";
+    public const string WorkStepSkipped = "work.step.skipped";
 }

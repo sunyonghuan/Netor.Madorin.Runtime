@@ -183,6 +183,7 @@ namespace Madorin.AI.Runtime.Contracts.Serialization;
 [JsonSerializable(typeof(WorkBackgroundJobStatus))]
 [JsonSerializable(typeof(WorkPlanDraft))]
 [JsonSerializable(typeof(WorkPlanUpdatedEvent))]
+[JsonSerializable(typeof(WorkStepSkippedEvent))]
 [JsonSerializable(typeof(WorkPlanStepSnapshot))]
 [JsonSerializable(typeof(WorkPlanStepSnapshot[]))]
 [JsonSerializable(typeof(WorkStepStatus))]

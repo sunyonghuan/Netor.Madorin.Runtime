@@ -6,6 +6,11 @@ public sealed record WorkPlanUpdatedEvent(
     string Goal,
     WorkPlanStepSnapshot[] Steps);
 
+/// <summary>Work step skipped event.</summary>
+public sealed record WorkStepSkippedEvent(
+    string StepId,
+    string Reason);
+
 /// <summary>Step snapshot in plan updated event.</summary>
 public sealed record WorkPlanStepSnapshot(
     string StepId,
