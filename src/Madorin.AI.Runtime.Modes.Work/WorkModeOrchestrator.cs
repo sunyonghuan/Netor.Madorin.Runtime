@@ -1692,11 +1692,11 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             : await _agentContextComposer.ComposeAsync(agent.SystemPrompt, ct).ConfigureAwait(false);
         var availableTools = ResolveAvailableTools(agent, providerId);
 
-        // Append available agents list for GM if in Work mode
+        // Append available agents list for GM if in Work mode with delegatable agents
         var systemInstructions = context.Instructions;
         if (request.Selection.ModeOptions is WorkModeOptions workOpts
             && agent.AgentId == workOpts.GeneralManager.AgentId
-            && workOpts.AvailableAgents.Length > 1)
+            && workOpts.AvailableAgents.Any(a => !string.Equals(a.AgentId, agent.AgentId, StringComparison.Ordinal)))
         {
             systemInstructions = AppendAvailableAgentsList(systemInstructions, workOpts.AvailableAgents);
         }

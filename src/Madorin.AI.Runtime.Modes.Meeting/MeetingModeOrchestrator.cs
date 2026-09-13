@@ -1805,17 +1805,9 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             ? AgentContextComposer.WithoutMemory(agent.SystemPrompt)
             : await _agentContextComposer.ComposeAsync(agent.SystemPrompt, ct)
                 .ConfigureAwait(false);
-
-        var systemInstructions = context.Instructions;
-        if (request.Selection.ModeOptions is MeetingModeOptions meetingOpts
-            && meetingOpts.Participants.Length > 1)
-        {
-            systemInstructions = AppendAvailableParticipantsList(systemInstructions, meetingOpts.Participants);
-        }
-
         var systemMessage = new RuntimeProviderMessage(
             RuntimeProviderRoles.System,
-            [new TextContentBlock(systemInstructions)]);
+            [new TextContentBlock(context.Instructions)]);
         var projection = await BuildProjectedMessagesAsync(
             sessionId,
             invocationId,
@@ -3236,9 +3228,16 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             ? AgentContextComposer.WithoutMemory(agent.SystemPrompt)
             : await _agentContextComposer.ComposeAsync(agent.SystemPrompt, ct)
                 .ConfigureAwait(false);
+
+        var systemInstructions = context.Instructions;
+        if (options.Participants.Length > 1)
+        {
+            systemInstructions = AppendAvailableParticipantsList(systemInstructions, options.Participants);
+        }
+
         var systemMessage = new RuntimeProviderMessage(
             RuntimeProviderRoles.System,
-            [new TextContentBlock(context.Instructions)]);
+            [new TextContentBlock(systemInstructions)]);
         var projection = await BuildProjectedMessagesAsync(
             sessionId,
             invocationId,
