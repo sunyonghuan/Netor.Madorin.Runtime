@@ -2,10 +2,10 @@
 
 /// <summary>
 /// Workflow limits and failure behavior for Work mode.
-/// Defaults match the V1 implementation guide (depth 3/hard 10, steps 50/hard 500).
+/// Defaults use lenient loop detection (depth 5/hard 10, steps 50/hard 500).
 /// </summary>
 public sealed record WorkflowPolicy(
-    int MaxAgentDepth = 3,
+    int MaxAgentDepth = 5,
     int HardMaxAgentDepth = 10,
     int MaxStepsPerRun = 50,
     int HardMaxStepsPerRun = 500,
@@ -15,8 +15,8 @@ public sealed record WorkflowPolicy(
     WorkStepFailurePolicy FailurePolicy = WorkStepFailurePolicy.Stop,
     int MaxRetriesPerStep = 2,
     int RetryBackoffMilliseconds = 1000,
-    WorkLoopDetection LoopDetection = WorkLoopDetection.Strict,
-    bool RequireHumanConfirmationOnLoop = true)
+    WorkLoopDetection LoopDetection = WorkLoopDetection.Lenient,
+    bool RequireHumanConfirmationOnLoop = false)
 {
     public static WorkflowPolicy Default { get; } = new();
 
