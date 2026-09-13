@@ -804,18 +804,14 @@ public sealed class ToolGateway(
                 ct).ConfigureAwait(false);
         }
 
-        var eventName = status is ToolIntentStatus.Succeeded
-            ? "tool.call.succeeded"
-            : status is ToolIntentStatus.Cancelled
-                ? "tool.call.cancelled"
-                : "tool.call.failed";
+        var eventName = "tool.call.completed";
         var runSequence = await _outbox.GetNextRunSequenceAsync(invocation.RunId, ct)
             .ConfigureAwait(false);
         await _outbox.AppendAsync(
             invocation.RunId,
             runSequence,
             eventName,
-            CreateEventPayload(result),
+            CreateEventPayload(result, status),
             ct).ConfigureAwait(false);
 
         if (!isVisible)
@@ -855,9 +851,7 @@ public sealed class ToolGateway(
         bool tolerateMissingIntent = false)
     {
         var resultHash = GetResultHash(result);
-        var eventName = status is ToolIntentStatus.Cancelled
-            ? "tool.call.cancelled"
-            : "tool.call.failed";
+        var eventName = "tool.call.completed";
 
         await _persistenceGate.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -905,7 +899,7 @@ public sealed class ToolGateway(
                 invocation.RunId,
                 runSequence,
                 eventName,
-                CreateEventPayload(result),
+                CreateEventPayload(result, status),
                 ct).ConfigureAwait(false);
         }
         finally
@@ -930,13 +924,8 @@ public sealed class ToolGateway(
     {
         var resultHash = GetResultHash(result);
         var isVisible = await IsResultVisibleAsync(permission, ct).ConfigureAwait(false);
-        var eventName = status switch
-        {
-            ToolIntentStatus.Succeeded => "tool.call.succeeded",
-            ToolIntentStatus.Cancelled => "tool.call.cancelled",
-            _ => "tool.call.failed"
-        };
-        var payload = CreateEventPayload(result);
+        var eventName = "tool.call.completed";
+        var payload = CreateEventPayload(result, status);
 
         await _persistenceGate.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -1332,7 +1321,7 @@ public sealed class ToolGateway(
     private static string ComputeHash(string value) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
 
-    private static string CreateEventPayload(ToolResult result)
+    private static string CreateEventPayload(ToolResult result, ToolIntentStatus status)
     {
         var buffer = new ArrayBufferWriter<byte>();
         using (var writer = new Utf8JsonWriter(buffer))
@@ -1341,6 +1330,12 @@ public sealed class ToolGateway(
             writer.WriteString("callId", result.CallId);
             writer.WriteString("toolId", result.ToolId);
             writer.WriteBoolean("success", result.Success);
+            writer.WriteString("status", status switch
+            {
+                ToolIntentStatus.Succeeded => "Succeeded",
+                ToolIntentStatus.Cancelled => "Cancelled",
+                _ => "Failed"
+            });
             writer.WritePropertyName("output");
             if (result.OutputJson is null)
             {
