@@ -171,19 +171,96 @@ public sealed class ExpertModeOrchestrator(
                     $"Sub-agent '@{delegatedAgentName}' not found in AvailableAgents. Available: [{availableAgentIds}]");
             }
 
-            // TODO: Implement InvokeSubAgentAsync to handle sub-agent execution with tool calling
-            // For now, append user input and continue with normal flow
-            // This will be implemented in the next step
-        }
+            // Append original user input first
+            await AppendContentAsync(
+                sessionId,
+                invocationId,
+                expert.Agent.AgentId,
+                "user",
+                request.InitialInput,
+                startedAt,
+                ct).ConfigureAwait(false);
 
-        await AppendContentAsync(
-            sessionId,
-            invocationId,
-            expert.Agent.AgentId,
-            "user",
-            request.InitialInput,
-            startedAt,
-            ct).ConfigureAwait(false);
+            // Invoke sub-agent with the delegated task
+            long subAgentRunSequence = 1;
+            var (subAgentContent, success) = await InvokeSubAgentAsync(
+                delegatedAgentName!,
+                targetAgent,
+                delegatedTask!,
+                runId,
+                sessionId,
+                invocationId,
+                expert.Agent.AgentId,
+                ct).ConfigureAwait(false);
+
+            if (!success)
+            {
+                // Sub-agent invocation failed
+                var errorContent = new ContentBlock[]
+                {
+                    new TextContentBlock($"Failed to invoke sub-agent '@{delegatedAgentName}'.")
+                };
+                await AppendContentAsync(
+                    sessionId,
+                    invocationId,
+                    delegatedAgentName!,
+                    "assistant",
+                    errorContent,
+                    DateTimeOffset.UtcNow,
+                    ct).ConfigureAwait(false);
+
+                var failurePayload = JsonSerializer.SerializeToElement(
+                    new InvocationFailedEvent(
+                        invocationId,
+                        CreateRuntimeError("SubAgentFailed", $"Sub-agent '@{delegatedAgentName}' failed to complete the task.")),
+                    RuntimeJsonContext.Default.InvocationFailedEvent);
+                yield return await CreateEnvelopeAsync(
+                    runtimeInstanceId,
+                    runId,
+                    subAgentRunSequence++,
+                    MessageTypes.InvocationFailed,
+                    failurePayload,
+                    ct).ConfigureAwait(false);
+                yield break;
+            }
+
+            // Sub-agent succeeded, append its output to conversation
+            await AppendContentAsync(
+                sessionId,
+                invocationId,
+                delegatedAgentName!,
+                "assistant",
+                subAgentContent,
+                DateTimeOffset.UtcNow,
+                ct).ConfigureAwait(false);
+
+            // Emit completion event for sub-agent
+            var subAgentCompletedPayload = JsonSerializer.SerializeToElement(
+                new InvocationCompletedEvent(invocationId),
+                RuntimeJsonContext.Default.InvocationCompletedEvent);
+            yield return await CreateEnvelopeAsync(
+                runtimeInstanceId,
+                runId,
+                subAgentRunSequence++,
+                MessageTypes.InvocationCompleted,
+                subAgentCompletedPayload,
+                ct).ConfigureAwait(false);
+
+            // Continue with main agent flow (main agent can see sub-agent's result)
+            // Fall through to normal execution
+        }
+        else
+        {
+            // No delegation, append user input normally
+            await AppendContentAsync(
+                sessionId,
+                invocationId,
+                expert.Agent.AgentId,
+                "user",
+                request.InitialInput,
+                startedAt,
+                ct).ConfigureAwait(false);
+        }
         var snapshotJson = JsonSerializer.Serialize(
             snapshot,
             RuntimeJsonContext.Default.InvocationSnapshot);
@@ -1428,6 +1505,178 @@ public sealed class ExpertModeOrchestrator(
         agentListBuilder.AppendLine("The orchestrator will automatically invoke the specified sub-agent and include its result in the conversation.");
 
         return baseInstructions + agentListBuilder.ToString();
+    }
+
+    /// <summary>
+    /// Invokes a sub-agent with the delegated task, supporting full tool calling capabilities.
+    /// </summary>
+    private async Task<(ContentBlock[] content, bool success)> InvokeSubAgentAsync(
+        string subAgentName,
+        AgentRef subAgent,
+        string task,
+        string runId,
+        string sessionId,
+        string parentInvocationId,
+        string parentAgentId,
+        CancellationToken ct)
+    {
+        var subInvocationId = Guid.NewGuid().ToString("N");
+        var subAgentProviderId = subAgent.ProviderId ?? _provider.ProviderId;
+        var subAgentModelId = subAgent.ModelId
+            ?? (_provider.Models.Count > 0 ? _provider.Models[0].Id : "default");
+
+        // Compose sub-agent's system prompt with memory if available
+        var subAgentContext = _agentContextComposer is null
+            ? AgentContextComposer.WithoutMemory(subAgent.SystemPrompt)
+            : await _agentContextComposer.ComposeAsync(subAgent.SystemPrompt, ct).ConfigureAwait(false);
+
+        // Create initial messages for sub-agent: system + user task
+        var systemMessage = new RuntimeProviderMessage(
+            RuntimeProviderRoles.System,
+            [new TextContentBlock(subAgentContext.Instructions)]);
+
+        var userTaskMessage = new RuntimeProviderMessage(
+            RuntimeProviderRoles.User,
+            [new TextContentBlock(task)]);
+
+        var subAgentMessages = new List<RuntimeProviderMessage> { systemMessage, userTaskMessage };
+
+        // Capture tool catalog for sub-agent
+        var catalogSnapshot = CaptureCatalogSnapshot();
+        ToolDescriptor[]? tools = _toolGateway is not null && catalogSnapshot is not null
+            ? [.. catalogSnapshot.Tools]
+            : null;
+
+        var assistantContent = new List<ContentBlock>();
+        var maxToolRounds = _runtimeLimits.MaxToolRounds ?? 10;
+        var maxToolCallsPerRound = _runtimeLimits.MaxToolCallsPerRound ?? 64;
+
+        // Sub-agent tool calling loop
+        for (var toolRound = 0; toolRound < maxToolRounds; toolRound++)
+        {
+            assistantContent.Clear();
+
+            // Create provider request for sub-agent
+            var subAgentRequest = new RuntimeProviderRequest(
+                subInvocationId,
+                subAgentName,
+                subAgentProviderId,
+                subAgentModelId,
+                [.. subAgentMessages],
+                Tools: tools,
+                CancellationToken: ct,
+                Skills: null);
+
+            // Call provider
+            var completed = false;
+            RuntimeError? failure = null;
+
+            await foreach (var providerEvent in ProviderInvocationBoundary.CompleteStreamingAsync(
+                _provider,
+                subAgentRequest,
+                ct).ConfigureAwait(false))
+            {
+                switch (providerEvent)
+                {
+                    case InvocationCompletedProviderEvent:
+                        completed = true;
+                        break;
+                    case InvocationFailedProviderEvent failed:
+                        failure = failed.Error;
+                        break;
+                    default:
+                        AccumulateAssistantContent(assistantContent, providerEvent);
+                        break;
+                }
+
+                if (completed || failure is not null)
+                {
+                    break;
+                }
+            }
+
+            if (failure is not null)
+            {
+                return ([], false);
+            }
+
+            // Check for tool calls
+            var toolCalls = assistantContent.OfType<ToolCallContentBlock>().ToArray();
+            if (toolCalls.Length == 0)
+            {
+                return (assistantContent.ToArray(), true);
+            }
+
+            if (toolCalls.Length > maxToolCallsPerRound)
+            {
+                return ([], false);
+            }
+
+            // Add assistant message to conversation
+            subAgentMessages.Add(new RuntimeProviderMessage(
+                RuntimeProviderRoles.Assistant,
+                [.. assistantContent]));
+
+            // Execute tool calls with ParentAgentId
+            foreach (var toolCall in toolCalls)
+            {
+                var liveCatalog = CaptureCatalogSnapshot() ?? catalogSnapshot;
+                if (liveCatalog is null || _toolGateway is null)
+                {
+                    return ([], false);
+                }
+
+                var invocation = new ToolInvocation(
+                    toolCall.CallId,
+                    toolCall.ToolId,
+                    subAgentName,
+                    parentAgentId,
+                    toolCall.Arguments.GetRawText(),
+                    runId,
+                    sessionId,
+                    subInvocationId,
+                    ToolCatalogVersion: liveCatalog.EffectiveVersion);
+
+                ToolGatewayResult gatewayResult;
+                try
+                {
+                    gatewayResult = await _toolGateway.ExecuteAsync(
+                        invocation,
+                        permission: null,
+                        liveCatalog,
+                        ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    return ([], false);
+                }
+
+                // Handle permission/approval if needed
+                if (gatewayResult.Kind is ToolGatewayResultKind.NeedsPermission
+                    or ToolGatewayResultKind.NeedsApproval)
+                {
+                    if (_toolConsentCoordinator is not null)
+                    {
+                        gatewayResult = await _toolConsentCoordinator.ResolveAndExecuteAsync(
+                            invocation,
+                            gatewayResult,
+                            ct).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        return ([], false);
+                    }
+                }
+
+                var toolResult = CreateToolResultContent(toolCall, gatewayResult);
+                subAgentMessages.Add(new RuntimeProviderMessage(
+                    RuntimeProviderRoles.Tool,
+                    [toolResult]));
+            }
+        }
+
+        // Exceeded max tool rounds
+        return ([], false);
     }
 
     private sealed class MemorySnapshotLease(
