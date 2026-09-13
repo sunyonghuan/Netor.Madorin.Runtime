@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -1690,9 +1691,19 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             ? AgentContextComposer.WithoutMemory(agent.SystemPrompt)
             : await _agentContextComposer.ComposeAsync(agent.SystemPrompt, ct).ConfigureAwait(false);
         var availableTools = ResolveAvailableTools(agent, providerId);
+
+        // Append available agents list for GM if in Work mode
+        var systemInstructions = context.Instructions;
+        if (request.Selection.ModeOptions is WorkModeOptions workOpts
+            && agent.AgentId == workOpts.GeneralManager.AgentId
+            && workOpts.AvailableAgents.Length > 1)
+        {
+            systemInstructions = AppendAvailableAgentsList(systemInstructions, workOpts.AvailableAgents);
+        }
+
         var systemMessage = new RuntimeProviderMessage(
             RuntimeProviderRoles.System,
-            [new TextContentBlock(context.Instructions)]);
+            [new TextContentBlock(systemInstructions)]);
         RuntimeProviderMessage[] projectedMessages;
         ContextProjectionSnapshot? projectionSnapshot = null;
         if (string.Equals(projectionVersion, PlanProjectionVersion, StringComparison.Ordinal)
@@ -2080,5 +2091,34 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             snapshot.ParentInvocationId,
             snapshot.WorkStepId,
             snapshot.WorkPlanVersion);
+    }
+
+    /// <summary>
+    /// Appends available agents list to system instructions for GM agent delegation.
+    /// </summary>
+    private static string AppendAvailableAgentsList(string baseInstructions, AgentRef[] availableAgents)
+    {
+        if (availableAgents.Length <= 1)
+        {
+            return baseInstructions;
+        }
+
+        var agentListBuilder = new StringBuilder();
+        agentListBuilder.AppendLine();
+        agentListBuilder.AppendLine();
+        agentListBuilder.AppendLine("## Available Agents for Delegation");
+        agentListBuilder.AppendLine();
+        agentListBuilder.AppendLine("You can delegate tasks to the following agents using the `delegate_to_agent` tool:");
+        agentListBuilder.AppendLine();
+
+        foreach (var agent in availableAgents)
+        {
+            agentListBuilder.AppendLine(CultureInfo.InvariantCulture, $"- **{agent.AgentId}**");
+        }
+
+        agentListBuilder.AppendLine();
+        agentListBuilder.AppendLine("Use the tool when the user mentions \"@AgentName\" or \"let {Agent} do...\".");
+
+        return baseInstructions + agentListBuilder.ToString();
     }
 }
