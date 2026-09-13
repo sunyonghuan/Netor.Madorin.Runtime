@@ -1,4 +1,5 @@
 ﻿using System.Text.Json.Serialization;
+using Madorin.AI.Runtime.Contracts.Work;
 using Madorin.AI.Runtime.Entities;
 
 namespace Madorin.AI.Runtime.Contracts.Serialization;
@@ -178,6 +179,10 @@ namespace Madorin.AI.Runtime.Contracts.Serialization;
 [JsonSerializable(typeof(WorkStepLifecycleStatus))]
 [JsonSerializable(typeof(WorkBackgroundJobStatus))]
 [JsonSerializable(typeof(WorkPlanDraft))]
+[JsonSerializable(typeof(WorkPlanUpdatedEvent))]
+[JsonSerializable(typeof(WorkPlanStepSnapshot))]
+[JsonSerializable(typeof(WorkPlanStepSnapshot[]))]
+[JsonSerializable(typeof(WorkStepStatus))]
 [JsonSerializable(typeof(WorkPlanRevisionSnapshot))]
 [JsonSerializable(typeof(WorkPlanRevisionSnapshot[]))]
 [JsonSerializable(typeof(WorkPlanStepDraft))]

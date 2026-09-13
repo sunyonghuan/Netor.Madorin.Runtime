@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Contracts.Serialization;
+using Madorin.AI.Runtime.Contracts.Work;
 using Madorin.AI.Runtime.Entities;
 using Madorin.AI.Runtime.Orchestration.Abstractions;
 using Madorin.AI.Runtime.Persistence.Abstractions;
@@ -261,6 +262,25 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             canonicalMessages.PlanMessageId,
             canonicalMessages.StepMessageIds,
             ct).ConfigureAwait(false);
+
+        // ✅ 新增：发送 work.plan.updated 事件
+        var workPlanEvent = MapToWorkPlanUpdatedEvent(plan);
+        var eventJson = JsonSerializer.Serialize(
+            workPlanEvent,
+            RuntimeJsonContext.Default.WorkPlanUpdatedEvent);
+        var gsn = await _outbox.AppendAsync(
+            runId,
+            runSequence,
+            MessageTypes.WorkPlanUpdated,
+            eventJson,
+            ct).ConfigureAwait(false);
+
+        yield return CreateWorkPlanUpdatedEnvelope(
+            runtimeInstanceId,
+            gsn,
+            runId,
+            runSequence++,
+            workPlanEvent);
 
         var agentById = options.AvailableAgents.ToDictionary(
             static a => a.AgentId, StringComparer.Ordinal);
@@ -2124,5 +2144,45 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         agentListBuilder.AppendLine("The orchestrator will automatically invoke the correct agent for each step during execution.");
 
         return baseInstructions + agentListBuilder.ToString();
+    }
+
+    private static WorkPlanUpdatedEvent MapToWorkPlanUpdatedEvent(WorkPlanDraft plan)
+    {
+        var steps = plan.Steps.Select(s => new WorkPlanStepSnapshot(
+            s.StepId,
+            s.Title ?? s.Goal,
+            s.Goal,
+            s.TargetAgentId,
+            s.ParentStepId,
+            s.Depth,
+            s.DependsOn ?? Array.Empty<string>(),
+            Contracts.Work.WorkStepStatus.Pending
+        )).ToArray();
+
+        return new WorkPlanUpdatedEvent(
+            int.Parse(plan.PlanVersion, CultureInfo.InvariantCulture),
+            plan.Goal,
+            steps);
+    }
+
+    private static RuntimeEventEnvelope CreateWorkPlanUpdatedEnvelope(
+        string runtimeInstanceId,
+        long gsn,
+        string runId,
+        long runSequence,
+        WorkPlanUpdatedEvent evt)
+    {
+        var payloadJson = JsonSerializer.SerializeToElement(
+            evt,
+            RuntimeJsonContext.Default.WorkPlanUpdatedEvent);
+
+        return new RuntimeEventEnvelope(
+            runtimeInstanceId,
+            gsn,
+            runId,
+            runSequence,
+            MessageTypes.WorkPlanUpdated,
+            DateTimeOffset.UtcNow,
+            payloadJson);
     }
 }

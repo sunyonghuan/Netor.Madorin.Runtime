@@ -2,6 +2,7 @@
 using System.Text.Json;
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Contracts.Serialization;
+using Madorin.AI.Runtime.Contracts.Work;
 using Madorin.AI.Runtime.Entities;
 using Madorin.AI.Runtime.Modes.Work;
 using Madorin.AI.Runtime.Persistence.Files;
@@ -348,6 +349,102 @@ public sealed class WorkModeOrchestratorTests
         CollectionAssert.AreEqual(projection.RetainedItems, adjustment.RetainedItems);
         CollectionAssert.Contains(projection.RetainedItems, "plan:1");
         CollectionAssert.Contains(projection.RetainedItems, "step:step-long");
+    }
+
+    [TestMethod]
+    public async Task WorkPlanUpdated_EmitsCorrectEnvelope()
+    {
+        var result = await RunAsync(repetitionCount: 1);
+        var events = Assert.ContainsSingle(result.EventBatches);
+
+        var planEvent = events.FirstOrDefault(e => e.MessageType == MessageTypes.WorkPlanUpdated);
+        Assert.IsNotNull(planEvent, "work.plan.updated event should be emitted");
+
+        // 验证信封七字段
+        Assert.IsGreaterThan(0L, planEvent.Gsn, "GSN should be positive");
+        Assert.AreEqual("run-1", planEvent.RunId);
+        Assert.IsGreaterThan(0L, planEvent.RunSequence, "RunSequence should be positive");
+        Assert.IsNotNull(planEvent.RuntimeInstanceId);
+        Assert.AreEqual(MessageTypes.WorkPlanUpdated, planEvent.MessageType);
+        Assert.IsGreaterThan(DateTimeOffset.MinValue, planEvent.Timestamp, "Timestamp should be set");
+
+        // 验证 payload 结构
+        var payload = planEvent.Payload;
+        Assert.IsTrue(payload.TryGetProperty("workPlanVersion", out var version));
+        Assert.AreEqual(JsonValueKind.Number, version.ValueKind);
+        Assert.IsTrue(payload.TryGetProperty("goal", out var goal));
+        Assert.AreEqual(JsonValueKind.String, goal.ValueKind);
+        Assert.IsTrue(payload.TryGetProperty("steps", out var steps));
+        Assert.IsGreaterThan(0, steps.GetArrayLength(), "Steps array should not be empty");
+
+        // 验证步骤字段
+        var firstStep = steps[0];
+        Assert.IsTrue(firstStep.TryGetProperty("stepId", out _));
+        Assert.IsTrue(firstStep.TryGetProperty("title", out _));
+        Assert.IsTrue(firstStep.TryGetProperty("goal", out _));
+        Assert.IsTrue(firstStep.TryGetProperty("targetAgentId", out _));
+        // parentStepId 为 null 时会被省略（JsonIgnoreCondition.WhenWritingNull）
+        Assert.IsTrue(firstStep.TryGetProperty("depth", out _));
+        Assert.IsTrue(firstStep.TryGetProperty("dependsOn", out _));
+        Assert.IsTrue(firstStep.TryGetProperty("status", out _));
+    }
+
+    [TestMethod]
+    public async Task WorkPlanUpdated_WritesToOutbox()
+    {
+        var result = await RunAsync(repetitionCount: 1);
+        var events = Assert.ContainsSingle(result.EventBatches);
+
+        var planEvent = events.FirstOrDefault(e => e.MessageType == MessageTypes.WorkPlanUpdated);
+        Assert.IsNotNull(planEvent);
+
+        // 验证 GSN 递增（work.plan.updated 应该在 invocation.completed 之后）
+        var completedEvent = events.Last(e => e.MessageType == MessageTypes.InvocationCompleted
+            && e.RunSequence < planEvent.RunSequence);
+        Assert.IsGreaterThan(completedEvent.Gsn, planEvent.Gsn, "work.plan.updated GSN should be after manager invocation.completed");
+    }
+
+    [TestMethod]
+    public async Task WorkPlanUpdated_IncludesAllStepFields()
+    {
+        var result = await RunAsync(repetitionCount: 1);
+        var events = Assert.ContainsSingle(result.EventBatches);
+
+        var planEvent = events.FirstOrDefault(e => e.MessageType == MessageTypes.WorkPlanUpdated);
+        Assert.IsNotNull(planEvent);
+
+        var payload = planEvent.Payload;
+        Assert.IsTrue(payload.TryGetProperty("steps", out var steps));
+        var firstStep = steps[0];
+
+        // 验证 Title（任务书要求 Title 为空时用 Goal）
+        Assert.IsTrue(firstStep.TryGetProperty("title", out var title));
+        Assert.IsNotNull(title.GetString());
+
+        // 验证 Depth（parentStepId 为 null 时会被 JSON 序列化省略）
+        Assert.IsTrue(firstStep.TryGetProperty("depth", out var depth));
+        Assert.AreEqual(JsonValueKind.Number, depth.ValueKind);
+
+        // 验证 Status 是 Pending
+        Assert.IsTrue(firstStep.TryGetProperty("status", out var status));
+        Assert.AreEqual("Pending", status.GetString());
+    }
+
+    [TestMethod]
+    public async Task WorkPlanUpdated_FallbackPlan_EmitsEvent()
+    {
+        // 使用无效的 manager 输出触发 fallback
+        var result = await RunAsync(repetitionCount: 1, managerOutput: "invalid json");
+        var events = Assert.ContainsSingle(result.EventBatches);
+
+        var planEvent = events.FirstOrDefault(e => e.MessageType == MessageTypes.WorkPlanUpdated);
+        Assert.IsNotNull(planEvent, "work.plan.updated should be emitted even for fallback plan");
+
+        var payload = planEvent.Payload;
+        Assert.IsTrue(payload.TryGetProperty("workPlanVersion", out var version));
+        Assert.AreEqual(1, version.GetInt32());
+        Assert.IsTrue(payload.TryGetProperty("steps", out var steps));
+        Assert.AreEqual(1, steps.GetArrayLength(), "Fallback plan should have 1 step");
     }
 
     private async Task<WorkRunResult> RunAsync(
