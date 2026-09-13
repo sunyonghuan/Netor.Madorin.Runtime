@@ -307,8 +307,9 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             {
                 if (!agentById.TryGetValue(readyStep.TargetAgentId, out var agent))
                 {
+                    var availableAgents = string.Join(", ", agentById.Keys);
                     throw new InvalidOperationException(
-                        $"Step '{readyStep.StepId}' targets unknown agent '{readyStep.TargetAgentId}'.");
+                        $"Step '{readyStep.StepId}' targets unknown agent '{readyStep.TargetAgentId}'. Available agents: [{availableAgents}]");
                 }
 
                 var stepInputHash = string.Equals(
