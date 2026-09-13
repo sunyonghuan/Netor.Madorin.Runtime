@@ -505,6 +505,82 @@ public sealed class WorkModeOrchestratorTests
         Assert.IsFalse(string.IsNullOrEmpty(invocationId.GetString()));
     }
 
+    [TestMethod]
+    public async Task InvocationStarted_Work_IncludesSemanticFields()
+    {
+        var result = await RunAsync(repetitionCount: 1);
+        var events = Assert.ContainsSingle(result.EventBatches);
+
+        var stepInvocations = events
+            .Where(static item => item.MessageType == MessageTypes.InvocationStarted)
+            .Select(static item => item.Payload.Deserialize(
+                RuntimeJsonContext.Default.InvocationStartedEvent)
+                ?? throw new InvalidDataException("The invocation.started payload was empty."))
+            .Where(static started => !string.IsNullOrEmpty(started.Snapshot.WorkStepId))
+            .ToArray();
+
+        Assert.IsNotEmpty(stepInvocations, "Should have at least one step invocation");
+        var stepInvocation = stepInvocations[0];
+        var snap = stepInvocation.Snapshot;
+
+        Assert.IsNotNull(snap.Title, "Title should be populated for work step");
+        Assert.AreEqual(0, snap.Depth, "Depth should be 0 for top-level step");
+        Assert.AreEqual("worker", snap.DisplayName, "DisplayName should match agentId");
+        Assert.IsNull(snap.Role, "Role should be null for work mode");
+        Assert.IsNull(snap.ParticipantId, "ParticipantId should be null for work mode");
+        Assert.IsNull(snap.RoundIndex, "RoundIndex should be null for work mode");
+    }
+
+    [TestMethod]
+    public async Task InvocationStarted_GM_DoesNotIncludeStepFields()
+    {
+        var result = await RunAsync(repetitionCount: 1);
+        var events = Assert.ContainsSingle(result.EventBatches);
+
+        var gmInvocations = events
+            .Where(static item => item.MessageType == MessageTypes.InvocationStarted)
+            .Select(static item => item.Payload.Deserialize(
+                RuntimeJsonContext.Default.InvocationStartedEvent)
+                ?? throw new InvalidDataException("The invocation.started payload was empty."))
+            .Where(static started => string.IsNullOrEmpty(started.Snapshot.WorkStepId))
+            .ToArray();
+
+        Assert.IsNotEmpty(gmInvocations, "Should have GM invocation");
+        var gmInvocation = gmInvocations[0];
+        var snap = gmInvocation.Snapshot;
+
+        Assert.IsNull(snap.Title, "Title should be null for GM invocation");
+        Assert.IsNull(snap.ParentStepId, "ParentStepId should be null for GM invocation");
+        Assert.AreEqual(0, snap.Depth, "Depth should be 0 for GM invocation");
+    }
+
+    [TestMethod]
+    public async Task InvocationStarted_PayloadStructure_SnapshotNotFlattened()
+    {
+        var result = await RunAsync(repetitionCount: 1);
+        var events = Assert.ContainsSingle(result.EventBatches);
+
+        var invocationStartedEvents = events
+            .Where(static item => item.MessageType == MessageTypes.InvocationStarted)
+            .ToArray();
+
+        Assert.IsNotEmpty(invocationStartedEvents, "Should have invocation.started events");
+
+        foreach (var envelope in invocationStartedEvents)
+        {
+            var payload = envelope.Payload;
+            Assert.IsTrue(payload.TryGetProperty("invocationId", out _), "Payload should have invocationId at root");
+            Assert.IsTrue(payload.TryGetProperty("snapshot", out var snapshotElement), "Payload should have snapshot object");
+            Assert.AreEqual(JsonValueKind.Object, snapshotElement.ValueKind, "snapshot should be an object");
+
+            Assert.IsTrue(snapshotElement.TryGetProperty("invocationId", out _), "snapshot should contain invocationId");
+            Assert.IsTrue(snapshotElement.TryGetProperty("agentId", out _), "snapshot should contain agentId");
+
+            Assert.IsFalse(payload.TryGetProperty("title", out _), "title should NOT be at payload root");
+            Assert.IsFalse(payload.TryGetProperty("displayName", out _), "displayName should NOT be at payload root");
+        }
+    }
+
     private async Task<WorkRunResult> RunAsync(
         int repetitionCount,
         WorkStepFailurePolicy failurePolicy = WorkStepFailurePolicy.Stop,

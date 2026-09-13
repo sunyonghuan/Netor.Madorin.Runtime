@@ -1865,6 +1865,14 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         var hostMaps = _isHostModeSkills
             ? HostModeSkillsSnapshot.BuildMaps(skillCatalogSnapshot)
             : null;
+
+        // Query plan to get step semantic fields for work mode
+        WorkPlanStepDraft? stepDraft = null;
+        if (workStepId is not null && !string.IsNullOrEmpty(workPlanVersion) && workPlan is not null)
+        {
+            stepDraft = workPlan.Steps.FirstOrDefault(s => string.Equals(s.StepId, workStepId, StringComparison.Ordinal));
+        }
+
         var snapshot = new InvocationSnapshot(
             invocationId,
             agent.AgentId,
@@ -1879,6 +1887,13 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             parentInvocationId,
             workStepId,
             workPlanVersion,
+            Title: stepDraft?.Title ?? stepDraft?.Goal,
+            ParentStepId: stepDraft?.ParentStepId,
+            Depth: stepDraft?.Depth ?? 0,
+            DisplayName: agent.AgentId,
+            Role: null,
+            ParticipantId: null,
+            RoundIndex: null,
             projectionSnapshot,
             SkillCatalogVersion: skillCatalogSnapshot?.Version ?? fullSkillCatalog?.Version,
             SkillNames: skillCatalogSnapshot?.Skills.Select(static skill => skill.Name).ToArray(),
