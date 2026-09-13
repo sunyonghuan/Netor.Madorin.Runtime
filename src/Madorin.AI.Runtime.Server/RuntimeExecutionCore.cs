@@ -135,8 +135,7 @@ internal sealed class RuntimeExecutionCore(
             new BuiltinFsToolExecutor(_memoryFiles.WorkspaceMutationLock),
             new BuiltinProcessToolExecutor(),
             new BuiltinHttpToolExecutor(),
-            new BuiltinMemoryToolExecutor(_memoryFiles),
-            new BuiltinDelegateAgentToolExecutor()
+            new BuiltinMemoryToolExecutor(_memoryFiles)
         };
         if (skillCatalog is not null)
         {
