@@ -107,9 +107,17 @@ public sealed class ExpertModeOrchestrator(
 
         var invocationId = Guid.NewGuid().ToString("N");
         var startedAt = DateTimeOffset.UtcNow;
+
+        // Inject available sub-agents list into system prompt when provided
+        var baseSystemPrompt = expert.Agent.SystemPrompt;
+        var enhancedSystemPrompt = AppendAvailableSubAgentsList(
+            baseSystemPrompt,
+            expert.Agent,
+            expert.AvailableAgents);
+
         var agentContext = _agentContextComposer is null
-            ? AgentContextComposer.WithoutMemory(expert.Agent.SystemPrompt)
-            : await _agentContextComposer.ComposeAsync(expert.Agent.SystemPrompt, ct)
+            ? AgentContextComposer.WithoutMemory(enhancedSystemPrompt)
+            : await _agentContextComposer.ComposeAsync(enhancedSystemPrompt, ct)
                 .ConfigureAwait(false);
         using var memorySnapshotLease = CaptureMemorySnapshot(invocationId, agentContext);
         var fullSkillCatalog = await CaptureSkillCatalogSnapshotAsync(ct).ConfigureAwait(false);
@@ -142,6 +150,30 @@ public sealed class ExpertModeOrchestrator(
             snapshot = HostModeSkillsSnapshot.ProjectAdvertiseEmpty(
                 snapshot,
                 skillCatalogSnapshot ?? fullSkillCatalog);
+        }
+
+        // Check for @agentName delegation syntax in user input
+        // Extract text content from ContentBlock[] for delegation parsing
+        var userInputText = string.Concat(
+            request.InitialInput.OfType<TextContentBlock>().Select(block => block.Text));
+        var (isDelegation, delegatedAgentName, delegatedTask) = TryParseDelegationSyntax(userInputText);
+
+        if (isDelegation && expert.AvailableAgents is { Length: > 0 })
+        {
+            // Find target sub-agent
+            var targetAgent = Array.Find(expert.AvailableAgents, a =>
+                string.Equals(a.AgentId, delegatedAgentName, StringComparison.OrdinalIgnoreCase));
+
+            if (targetAgent is null)
+            {
+                var availableAgentIds = string.Join(", ", expert.AvailableAgents.Select(a => a.AgentId));
+                throw new InvalidOperationException(
+                    $"Sub-agent '@{delegatedAgentName}' not found in AvailableAgents. Available: [{availableAgentIds}]");
+            }
+
+            // TODO: Implement InvokeSubAgentAsync to handle sub-agent execution with tool calling
+            // For now, append user input and continue with normal flow
+            // This will be implemented in the next step
         }
 
         await AppendContentAsync(
@@ -1316,6 +1348,86 @@ public sealed class ExpertModeOrchestrator(
 
         var snapshot = CaptureCatalogSnapshot();
         return snapshot is null ? null : [.. snapshot.Tools];
+    }
+
+    /// <summary>
+    /// Parses user input to detect @agentName delegation syntax.
+    /// Example: "@developer read file.txt" -> (true, "developer", "read file.txt")
+    /// </summary>
+    private static (bool isDelegation, string? agentName, string? task) TryParseDelegationSyntax(string input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return (false, null, null);
+        }
+
+        var trimmedInput = input.Trim();
+        if (!trimmedInput.StartsWith('@'))
+        {
+            return (false, null, null);
+        }
+
+        // Match pattern: @agentName <rest of input>
+        // AgentName can contain letters, digits, underscores, hyphens
+        var match = System.Text.RegularExpressions.Regex.Match(
+            trimmedInput,
+            @"^@([\w\-]+)\s+(.+)$",
+            System.Text.RegularExpressions.RegexOptions.Singleline);
+
+        if (match.Success)
+        {
+            var agentName = match.Groups[1].Value;
+            var task = match.Groups[2].Value;
+            return (true, agentName, task);
+        }
+
+        return (false, null, null);
+    }
+
+    /// <summary>
+    /// Appends available sub-agents list to the system prompt when AvailableAgents is provided.
+    /// Similar to Work mode's AppendAvailableAgentsList and Meeting mode's AppendAvailableParticipantsList.
+    /// </summary>
+    private static string AppendAvailableSubAgentsList(
+        string baseInstructions,
+        AgentRef primaryAgent,
+        AgentRef[]? availableAgents)
+    {
+        if (availableAgents is not { Length: > 1 })
+        {
+            return baseInstructions;
+        }
+
+        var agentListBuilder = new StringBuilder();
+        agentListBuilder.AppendLine();
+        agentListBuilder.AppendLine();
+        agentListBuilder.AppendLine("## Sub-Agent Delegation in Expert Mode");
+        agentListBuilder.AppendLine();
+        agentListBuilder.AppendLine("When you need to delegate a task to a specialized agent, use the following syntax:");
+        agentListBuilder.AppendLine();
+        agentListBuilder.AppendLine("```");
+        agentListBuilder.AppendLine("@agentName <task description>");
+        agentListBuilder.AppendLine("```");
+        agentListBuilder.AppendLine();
+        agentListBuilder.AppendLine("Available sub-agents:");
+        agentListBuilder.AppendLine();
+
+        foreach (var agent in availableAgents)
+        {
+            // Exclude the primary agent itself
+            if (!string.Equals(agent.AgentId, primaryAgent.AgentId, StringComparison.Ordinal))
+            {
+                var description = agent.SystemPrompt?.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                    .FirstOrDefault() ?? string.Empty;
+                agentListBuilder.AppendLine(System.Globalization.CultureInfo.InvariantCulture,
+                    $"- **@{agent.AgentId}** - {description}");
+            }
+        }
+
+        agentListBuilder.AppendLine();
+        agentListBuilder.AppendLine("The orchestrator will automatically invoke the specified sub-agent and include its result in the conversation.");
+
+        return baseInstructions + agentListBuilder.ToString();
     }
 
     private sealed class MemorySnapshotLease(

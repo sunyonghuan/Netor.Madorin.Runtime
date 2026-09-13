@@ -8,7 +8,27 @@ namespace Madorin.AI.Runtime.Contracts;
 [JsonDerivedType(typeof(WorkModeOptions), "work")]
 public abstract record ModeOptions;
 
-public sealed record ExpertModeOptions(AgentRef Agent) : ModeOptions;
+/// <summary>
+/// Expert mode configuration with a primary agent and optional sub-agents for delegation.
+/// </summary>
+public sealed record ExpertModeOptions : ModeOptions
+{
+    /// <summary>The primary expert agent.</summary>
+    public AgentRef Agent { get; init; }
+
+    /// <summary>
+    /// Optional pool of sub-agents available for @agentName delegation.
+    /// When null or empty, delegation is disabled and Expert mode runs as a single agent.
+    /// </summary>
+    public AgentRef[]? AvailableAgents { get; init; }
+
+    [JsonConstructor]
+    public ExpertModeOptions(AgentRef agent, AgentRef[]? availableAgents = null)
+    {
+        Agent = agent;
+        AvailableAgents = availableAgents;
+    }
+}
 
 /// <summary>Controls how the next speaker is chosen each round.</summary>
 public sealed record MeetingSelectorPolicyOptions(
