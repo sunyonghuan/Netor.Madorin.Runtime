@@ -150,6 +150,16 @@ internal sealed class FakeRuntimeClient : IRuntimeClient
         CancellationToken cancellationToken = default) => ValueTask.FromResult(
             ResumeResult ?? throw new NotSupportedException());
 
+    public MeetingHitlResponse? LastMeetingHitlResponse { get; private set; }
+
+    public ValueTask<bool> SubmitMeetingHitlResponseAsync(
+        MeetingHitlResponse response,
+        CancellationToken cancellationToken = default)
+    {
+        LastMeetingHitlResponse = response;
+        return ValueTask.FromResult(true);
+    }
+
     public ValueTask<SessionMessagesListResult> ListSessionMessagesAsync(
         SessionMessagesListParameters parameters,
         CancellationToken cancellationToken = default) =>

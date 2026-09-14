@@ -324,7 +324,7 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                 runId,
                 RoundIndex: runFirstRoundIndex,
                 HostInvocationId: hostInvocationId,
-                Prompt: $"Meeting HITL approval required before round {runFirstRoundIndex}.",
+                Prompt: "meeting.hitl.question.round:" + runFirstRoundIndex.ToString(CultureInfo.InvariantCulture),
                 Context: request.InitialInput,
                 CreatedAt: hitlNow,
                 ExpiresAt: hitlExpiresAt);

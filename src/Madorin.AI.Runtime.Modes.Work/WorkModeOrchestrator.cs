@@ -262,7 +262,17 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         var plan = TryParsePlan(managerText.ToString())
             ?? WorkPlanValidator.CreateFallbackPlan(
                 goal, options, planVersion: "1", stepId: fallbackStepId);
-        plan = WorkPlanValidator.ValidateOrThrow(plan, options);
+        try
+        {
+            plan = WorkPlanValidator.ValidateOrThrow(plan, options);
+        }
+        catch (ArgumentException)
+        {
+            // GM 结构化计划经常带未知 agentId / 非法父子；回退单步，保证 work.plan.updated 一定发出。
+            plan = WorkPlanValidator.CreateFallbackPlan(
+                goal, options, planVersion: "1", stepId: fallbackStepId);
+            plan = WorkPlanValidator.ValidateOrThrow(plan, options);
+        }
         var canonicalMessages = await AppendPlanRevisionAsync(
             sessionId,
             managerInvocation.InvocationId,
@@ -2286,6 +2296,15 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         return baseInstructions + agentListBuilder.ToString();
     }
 
+    /// <summary>
+    /// 将 WorkPlanDraft 映射为 work.plan.updated 事件载荷。
+    ///
+    /// 状态映射策略说明：
+    /// - v3 规范：work.plan.updated 仅在计划生成时发送一次
+    /// - 此时所有步骤状态均为 Pending（尚未开始执行）
+    /// - 后续步骤状态变更通过 invocation.started/completed/failed 传递
+    /// - 如未来支持动态计划更新，需从数据库查询实际状态而非硬编码
+    /// </summary>
     private static WorkPlanUpdatedEvent MapToWorkPlanUpdatedEvent(WorkPlanDraft plan)
     {
         var steps = plan.Steps.Select(s => new WorkPlanStepSnapshot(

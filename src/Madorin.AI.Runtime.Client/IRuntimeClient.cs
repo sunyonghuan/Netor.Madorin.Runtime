@@ -76,6 +76,11 @@ public interface IRuntimeClient : IAsyncDisposable
         string sessionId,
         CancellationToken cancellationToken = default);
 
+    /// <summary>Sends <c>meeting.hitl.response</c> for a pending meeting HITL request.</summary>
+    public ValueTask<bool> SubmitMeetingHitlResponseAsync(
+        MeetingHitlResponse response,
+        CancellationToken cancellationToken = default);
+
     public ValueTask<SessionMessagesListResult> ListSessionMessagesAsync(
         SessionMessagesListParameters parameters,
         CancellationToken cancellationToken = default);
