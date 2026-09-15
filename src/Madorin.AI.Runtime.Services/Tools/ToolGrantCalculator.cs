@@ -324,16 +324,19 @@ public static class ToolGrantCalculator
 
     private static bool IsWithin(string root, string path)
     {
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
         var relative = Path.GetRelativePath(Path.GetFullPath(root), Path.GetFullPath(path));
-        return string.Equals(relative, ".", StringComparison.Ordinal)
+        return string.Equals(relative, ".", comparison)
             || (!Path.IsPathRooted(relative)
-                && !string.Equals(relative, "..", StringComparison.Ordinal)
+                && !string.Equals(relative, "..", comparison)
                 && !relative.StartsWith(
                     $"..{Path.DirectorySeparatorChar}",
-                    StringComparison.Ordinal)
+                    comparison)
                 && !relative.StartsWith(
                     $"..{Path.AltDirectorySeparatorChar}",
-                    StringComparison.Ordinal));
+                    comparison));
     }
 
     private static StringComparer PathComparer => OperatingSystem.IsWindows()

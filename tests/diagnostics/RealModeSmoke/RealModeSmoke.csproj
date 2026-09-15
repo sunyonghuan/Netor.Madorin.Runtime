@@ -5,7 +5,7 @@
     <IsAotCompatible>false</IsAotCompatible>
     <EnableNETAnalyzers>false</EnableNETAnalyzers>
     <NuGetAudit>false</NuGetAudit>
-    <CliOutput>../../src/Madorin.AI.Runtime.Cli/bin/Debug/net10.0</CliOutput>
+    <CliOutput>../../../src/Madorin.AI.Runtime.Cli/bin/Debug/net10.0</CliOutput>
   </PropertyGroup>
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />

@@ -1,6 +1,6 @@
 <Solution>
-  <Folder Name="/samples/">
-    <Project Path="samples/Madorin.AI.Runtime.SampleHost/Madorin.AI.Runtime.SampleHost.csproj" />
+  <Folder Name="/tests/samples/">
+    <Project Path="tests/samples/Madorin.AI.Runtime.SampleHost/Madorin.AI.Runtime.SampleHost.csproj" />
   </Folder>
   <Folder Name="/tools/">
     <Project Path="tools/Madorin.AI.Runtime.MConsole/Madorin.AI.Runtime.MConsole.csproj" />
