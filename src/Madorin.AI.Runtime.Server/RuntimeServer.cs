@@ -2479,10 +2479,21 @@ public sealed class RuntimeServer : IAsyncDisposable
                         "A TurnOverride with the current Agent prompt is required to resume this Session.");
                 }
 
-                var promptValidation = ValidateResumedExpertPrompt(snapshot, expertOptions);
-                if (promptValidation is not null)
+                if (string.IsNullOrWhiteSpace(expertOptions.Agent.SystemPrompt))
                 {
-                    return Error(request.Id, -32006, promptValidation);
+                    return Error(
+                        request.Id,
+                        -32006,
+                        "An empty Agent prompt cannot be used to resume an Expert Session.");
+                }
+
+                if (existingRun.TurnOverride is null)
+                {
+                    var promptValidation = ValidateResumedExpertPrompt(snapshot, expertOptions);
+                    if (promptValidation is not null)
+                    {
+                        return Error(request.Id, -32006, promptValidation);
+                    }
                 }
                 break;
 

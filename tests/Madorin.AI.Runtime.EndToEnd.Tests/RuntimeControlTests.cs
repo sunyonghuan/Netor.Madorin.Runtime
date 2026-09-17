@@ -1015,7 +1015,7 @@ public sealed class RuntimeControlTests
                 RuntimeMode.Expert,
                 new DefaultSelection("override-provider", "override-model"),
                 new ExpertModeOptions(
-                    new AgentRef("agent-1", "v1", "Wait until cancelled.")));
+                    new AgentRef("agent-2", "v2", "Wait until cancelled.")));
 
             var secondRunId = await client.StartExistingSessionRunAsync(
                 new ExistingSessionRunRequest(

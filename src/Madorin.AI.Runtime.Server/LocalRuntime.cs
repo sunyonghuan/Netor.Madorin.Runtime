@@ -1058,7 +1058,17 @@ public sealed class LocalRuntime : IAsyncDisposable
 
             if (effectiveSelection.ModeOptions is ExpertModeOptions expertOptions)
             {
-                ValidateResumedExpertPrompt(snapshot, expertOptions);
+                if (string.IsNullOrWhiteSpace(expertOptions.Agent.SystemPrompt)
+                    && request.TurnOverride is not null)
+                {
+                    throw new InvalidOperationException(
+                        "An empty Agent prompt cannot be used to resume an Expert Session.");
+                }
+
+                if (request.TurnOverride is null)
+                {
+                    ValidateResumedExpertPrompt(snapshot, expertOptions);
+                }
             }
 
             var provider = ResolveProvider(effectiveSelection);

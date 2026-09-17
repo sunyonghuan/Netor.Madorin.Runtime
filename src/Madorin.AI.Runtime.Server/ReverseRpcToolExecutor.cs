@@ -319,6 +319,23 @@ internal sealed class ReverseRpcToolExecutor(
         var actualResultHash = outputJson is not null
             ? ComputeHash(outputJson)
             : resultBlob?.Sha256;
+
+        // Inline JSON is re-serialized across the RPC boundary. A host-computed hash
+        // over its pre-serialization JsonElement is not stable, so Runtime must compute
+        // the authoritative hash from the received inline content. Blob results are
+        // content-addressed and still validate against their declared SHA-256.
+        if (resultBlob is null)
+        {
+            return new ToolResult(
+                invocation.CallId,
+                invocation.ToolId,
+                success,
+                outputJson ?? "{}",
+                success ? null : errorMessage ?? $"Host tool call ended with status '{status}'.",
+                resultBlob,
+                actualResultHash);
+        }
+
         if (resultHash is not null
             && !string.Equals(resultHash, actualResultHash, StringComparison.OrdinalIgnoreCase))
         {
@@ -329,7 +346,7 @@ internal sealed class ReverseRpcToolExecutor(
             invocation.CallId,
             invocation.ToolId,
             success,
-            outputJson ?? (resultBlob is null ? "{}" : null),
+            outputJson,
             success ? null : errorMessage ?? $"Host tool call ended with status '{status}'.",
             resultBlob,
             actualResultHash);

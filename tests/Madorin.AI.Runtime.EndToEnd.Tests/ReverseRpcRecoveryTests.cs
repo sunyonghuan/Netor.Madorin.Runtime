@@ -92,6 +92,62 @@ public sealed class ReverseRpcRecoveryTests
         }
     }
 
+    [TestMethod]
+    [DoNotParallelize]
+    public async Task InlineHostResult_IgnoresMismatchedHostSuppliedHash()
+    {
+        var root = Path.Join(
+            Path.GetTempPath(),
+            "madorin-inline-hash",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var databasePath = Path.Join(root, "state.db");
+            var host = new RecoveringHost(
+                forcedInlineResultHash: "0000000000000000000000000000000000000000000000000000000000000000");
+            var invocation = new ToolInvocation(
+                "call-inline-hash",
+                ToolId,
+                "agent-1",
+                ParentAgentId: null,
+                """{"orderId":42}""",
+                "run-inline-hash",
+                "session-inline-hash",
+                InvocationId: "invocation-inline-hash");
+            var permission = new ToolPermissionContext(
+                "grant-inline-hash",
+                invocation.RunId,
+                root,
+                [root],
+                [root],
+                AllowedToolIds: [invocation.ToolId],
+                AllowedCallIds: [invocation.CallId],
+                MaximumRisk: ToolRiskLevel.Low);
+
+            var result = await ExecuteAsync(
+                databasePath,
+                root,
+                new RecoveringPeer(host, loseToolCallResponse: false),
+                invocation,
+                permission,
+                TestContext.CancellationToken);
+
+            Assert.AreEqual(ToolGatewayResultKind.Success, result.Result.Kind);
+            Assert.AreEqual(ToolIntentStatus.Succeeded, result.Intent.Status);
+            Assert.AreEqual(
+                """{"created":true,"orderId":42}""",
+                result.Result.Result?.OutputJson);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
     private static async Task<GatewayExecution> ExecuteAsync(
         string databasePath,
         string workspaceRoot,
@@ -147,9 +203,15 @@ public sealed class ReverseRpcRecoveryTests
     {
         private readonly ConcurrentDictionary<string, ToolCallResponse> _results =
             new(StringComparer.Ordinal);
+        private readonly string? _forcedInlineResultHash;
         private int _executionCount;
         private int _queryCount;
         private int _secondConnectionExecutionCount;
+
+        public RecoveringHost(string? forcedInlineResultHash = null)
+        {
+            _forcedInlineResultHash = forcedInlineResultHash;
+        }
 
         public int ExecutionCount => Volatile.Read(ref _executionCount);
 
@@ -170,7 +232,8 @@ public sealed class ReverseRpcRecoveryTests
                 call.CorrelationId,
                 call.CallId,
                 ToolCallStatus.Succeeded,
-                ParseElement("""{"created":true,"orderId":42}"""));
+                ParseElement("""{"created":true,"orderId":42}"""),
+                _forcedInlineResultHash);
             _results[call.CallId] = response;
             return response;
         }

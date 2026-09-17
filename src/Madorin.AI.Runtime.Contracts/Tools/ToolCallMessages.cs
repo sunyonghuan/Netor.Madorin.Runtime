@@ -16,7 +16,11 @@ public sealed record ToolCallRequest(
     int TimeoutMilliseconds,
     string GrantId);
 
-/// <summary>Returns a terminal or non-terminal host tool state.</summary>
+/// <summary>
+/// Returns a terminal or non-terminal host tool state. For inline JSON results,
+/// <see cref="ResultHash"/> is computed by Runtime from the received JSON and should be
+/// omitted by the host. Blob results may carry the blob's content SHA-256.
+/// </summary>
 public sealed record ToolCallResponse(
     string CorrelationId,
     string CallId,
