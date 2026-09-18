@@ -19,23 +19,25 @@
     <AssemblyName>madorin-cli</AssemblyName>
     <ApplicationIcon>assets\brand.ico</ApplicationIcon>
     <RootNamespace>Madorin.AI.Runtime.Cli</RootNamespace>
-    <Version>0.1.46</Version>
+    <Version>$(MadorinCliVersion)</Version>
     <AssemblyVersion>$(Version)</AssemblyVersion>
     <FileVersion>$(Version)</FileVersion>
     <InformationalVersion>$(Version)</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
-    <AssemblyTitle>madorin-cli</AssemblyTitle>
-    <FileDescription>madorin-cli</FileDescription>
-    <Product>madorin-cli</Product>
-    <Company>©madorin 藏将科技出品</Company>
-    <Copyright>Madorin &amp; Streamx</Copyright>
-    <Description>madorin-cli 轻量级AI 连接CLI 端</Description>
+    <AssemblyTitle>$(AssemblyName)</AssemblyTitle>
+    <FileDescription>$(AssemblyName)</FileDescription>
+    <Product>$(MadorinProductName)</Product>
+    <Company>$(MadorinCompany)</Company>
+    <Copyright>$(MadorinCopyright)</Copyright>
+    <Description>$(AssemblyName) 轻量级AI 连接CLI 端</Description>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <PublishAot>true</PublishAot>
     <InvariantGlobalization>true</InvariantGlobalization>
     <UseAgentFrameworkRuntimeDirectives>true</UseAgentFrameworkRuntimeDirectives>
+    <!-- CLI no longer references Provider OpenAI; keep Skills + Extensions.AI roots only. -->
+    <AgentFrameworkRootProfile>WithoutAgentsOpenAI</AgentFrameworkRootProfile>
   </PropertyGroup>
 
 </Project>

@@ -79,15 +79,11 @@ public sealed class StandaloneReplStage7Tests
                 output.ToString(),
                 StringComparison.Ordinal);
             Assert.Contains(
+                "mcli_memory_write [approval required]",
+                output.ToString(),
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
                 "mcli_memory_append [approval required]",
-                output.ToString(),
-                StringComparison.Ordinal);
-            Assert.Contains(
-                "mcli_memory_update [approval required]",
-                output.ToString(),
-                StringComparison.Ordinal);
-            Assert.Contains(
-                "mcli_memory_delete [approval required]",
                 output.ToString(),
                 StringComparison.Ordinal);
             Assert.Contains("/resume", output.ToString(), StringComparison.Ordinal);

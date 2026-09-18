@@ -1,5 +1,3 @@
-using Madorin.AI.Runtime.Providers.AzureOpenAI;
-
 namespace Madorin.AI.Runtime.Cli.Config;
 
 /// <summary>Describes one standalone configuration validation failure.</summary>
@@ -65,7 +63,7 @@ public static class StandaloneConfigValidator
 
             if (provider.Protocol.Equals("Azure OpenAI", StringComparison.Ordinal)
                 && provider.ApiVersion is not null
-                && !AzureOpenAIProtocol.IsValidApiVersion(provider.ApiVersion))
+                && !IsValidAzureOpenAIApiVersion(provider.ApiVersion))
             {
                 Add(
                     errors,
@@ -117,24 +115,7 @@ public static class StandaloneConfigValidator
                 }
             }
 
-            if (errors.All(error => !error.Field.StartsWith(prefix, StringComparison.Ordinal)))
-            {
-                try
-                {
-                    var adapterConfig = new StandaloneConfig { Providers = [provider] };
-                    using var adapter = StandaloneProviderFactory.CreateAdapter(
-                        adapterConfig,
-                        provider.Name) as IDisposable;
-                }
-                catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or UriFormatException)
-                {
-                    Add(
-                        errors,
-                        configPath,
-                        prefix,
-                        $"Provider adapter configuration is invalid: {Redact(ex.Message, provider.ApiKey)}");
-                }
-            }
+            // 离线校验不拉起 Worker；adapter 构造只在出站 HTTP 时发生。
         }
 
         if (string.IsNullOrWhiteSpace(config.DefaultProvider)
@@ -245,10 +226,11 @@ public static class StandaloneConfigValidator
         string message) =>
         errors.Add(new StandaloneConfigValidationError(path, field, message));
 
-    private static string Redact(string message, string apiKey) =>
-        string.IsNullOrEmpty(apiKey)
-            ? message
-            : message.Replace(apiKey, "***", StringComparison.Ordinal);
+    private static bool IsValidAzureOpenAIApiVersion(string apiVersion) =>
+        !string.IsNullOrWhiteSpace(apiVersion)
+        && apiVersion.Length <= 128
+        && apiVersion.All(static character =>
+            char.IsAsciiLetterOrDigit(character) || character is '.' or '-');
 }
 
 /// <summary>Associates a parsed Agent with its source file.</summary>

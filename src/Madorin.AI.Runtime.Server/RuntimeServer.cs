@@ -9,6 +9,7 @@ using Madorin.AI.Runtime.Persistence.Abstractions;
 using Madorin.AI.Runtime.Persistence.Files;
 using Madorin.AI.Runtime.Persistence.Sqlite;
 using Madorin.AI.Runtime.Providers.Abstractions;
+using Madorin.AI.Runtime.Server.ProviderWorkers;
 using Madorin.AI.Runtime.Server.Auth;
 using Madorin.AI.Runtime.Services;
 using Madorin.AI.Runtime.Services.Memory;
@@ -39,6 +40,7 @@ public sealed class RuntimeServer : IAsyncDisposable
     private readonly RuntimeLimits _limits;
     private readonly Func<NextTurnSelection, IRuntimeProviderAdapter>? _providerResolver;
     private readonly HostProviderRegistry? _hostProviderRegistry;
+    private readonly IProviderWorkerSupervisor _workerSupervisor;
     private readonly RuntimeExecutionCore _executionCore;
     private readonly BlobStagingStore _blobStore;
     private readonly RuntimeDiagnosticLog _diagnosticLog;
@@ -86,9 +88,11 @@ public sealed class RuntimeServer : IAsyncDisposable
         _heartbeatIntervalSeconds = options.HeartbeatIntervalSeconds;
         _hostLeaseTimeout = options.HostLeaseTimeout;
         _limits = options.BlobLimits;
+        _workerSupervisor = options.WorkerSupervisor ?? new ProviderWorkerSupervisor(
+            workerLog: line => ProviderWorkerLog.Write(diagnosticLog, line));
         if (options.ProviderResolver is null)
         {
-            _hostProviderRegistry = new HostProviderRegistry();
+            _hostProviderRegistry = new HostProviderRegistry(_workerSupervisor);
             _providerResolver = _hostProviderRegistry.CreateResolver();
         }
         else
@@ -461,6 +465,7 @@ public sealed class RuntimeServer : IAsyncDisposable
         await ReconcilePendingTerminalRunsOnceAsync().ConfigureAwait(false);
         _disconnectedHostLeases.Clear();
         _sessions.Clear();
+        await _workerSupervisor.DisposeAsync().ConfigureAwait(false);
         await _blobStore.DisposeAsync().ConfigureAwait(false);
         await _instanceLock.DisposeAsync().ConfigureAwait(false);
         await _instanceNameLock.DisposeAsync().ConfigureAwait(false);

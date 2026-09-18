@@ -56,15 +56,15 @@ Use the `mcli_fs_*` tools only inside the workspace root and the effective Grant
 
 | Operation | Tool | Required permission |
 | --- | --- | --- |
-| Discover or inspect | `mcli_fs_list`, `mcli_fs_stat`, `mcli_fs_read`, `mcli_fs_search` | `filesystem.read` |
-| Create or update text | `mcli_fs_write`, `mcli_fs_append`, `mcli_fs_edit`, `mcli_fs_mkdir`, `mcli_fs_copy` | `filesystem.write`; overwrite additionally requires `overwrite` |
+| Discover or inspect | `mcli_fs_inspect`, `mcli_fs_read`, `mcli_fs_search` | `filesystem.read` |
+| Create or update text | `mcli_fs_write` (`create`/`overwrite`/`append`/`mkdir`), `mcli_fs_edit`, `mcli_fs_copy` | `filesystem.write`; overwrite/append additionally require `overwrite` |
 | Move or remove | `mcli_fs_move`, `mcli_fs_delete` | `filesystem.write` and `filesystem.destructive` |
 
 For text edits, read first, preserve the returned encoding and `expectedHash`, then submit one atomic edit. Do not use `auto` when writing. Paths that contain traversal, UNC/device forms, symbolic links, directory junctions, or `.madorin` are rejected. Binary contents can be moved or copied safely but are not exposed for Base64 read/write.
 
 ## Model Memory Tools
 
-`mcli_memory_read`, `mcli_memory_append`, `mcli_memory_update`, and `mcli_memory_delete` operate only on `global` or `project` memory, never an arbitrary file path.
+`mcli_memory_read` and `mcli_memory_write` (`operation=append|update|delete`) operate only on `global` or `project` memory, never an arbitrary file path.
 
 Read first and carry the returned `expectedHash` for every mutation. The content takes effect on the next Agent invocation, requires approval, and shares the Runtime's write lock with file modification. Re-read on a hash conflict; do not force an overwrite.
 

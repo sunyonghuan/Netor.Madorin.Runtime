@@ -1,0 +1,14 @@
+{
+  "workers": [
+    { "protocol": "OpenAI", "slug": "openai", "project": "src/Providers/Madorin.AI.Runtime.Providers.OpenAI.Worker/Madorin.AI.Runtime.Providers.OpenAI.Worker.csproj" },
+    { "protocol": "Anthropic", "slug": "anthropic", "project": "src/Providers/Madorin.AI.Runtime.Providers.Anthropic.Worker/Madorin.AI.Runtime.Providers.Anthropic.Worker.csproj" },
+    { "protocol": "OpenAI Compatible", "slug": "openai-compatible", "project": "src/Providers/Madorin.AI.Runtime.Providers.OpenAICompatible.Worker/Madorin.AI.Runtime.Providers.OpenAICompatible.Worker.csproj" },
+    { "protocol": "DeepSeek", "slug": "deepseek", "project": "src/Providers/Madorin.AI.Runtime.Providers.DeepSeek.Worker/Madorin.AI.Runtime.Providers.DeepSeek.Worker.csproj" },
+    { "protocol": "Kimi", "slug": "kimi", "project": "src/Providers/Madorin.AI.Runtime.Providers.Kimi.Worker/Madorin.AI.Runtime.Providers.Kimi.Worker.csproj" },
+    { "protocol": "Aliyun", "slug": "aliyun", "project": "src/Providers/Madorin.AI.Runtime.Providers.Aliyun.Worker/Madorin.AI.Runtime.Providers.Aliyun.Worker.csproj" },
+    { "protocol": "Azure OpenAI", "slug": "azure-openai", "project": "src/Providers/Madorin.AI.Runtime.Providers.AzureOpenAI.Worker/Madorin.AI.Runtime.Providers.AzureOpenAI.Worker.csproj" },
+    { "protocol": "Gemini", "slug": "gemini", "project": "src/Providers/Madorin.AI.Runtime.Providers.Gemini.Worker/Madorin.AI.Runtime.Providers.Gemini.Worker.csproj" },
+    { "protocol": "GLM", "slug": "glm", "project": "src/Providers/Madorin.AI.Runtime.Providers.GLM.Worker/Madorin.AI.Runtime.Providers.GLM.Worker.csproj" },
+    { "protocol": "Ollama", "slug": "ollama", "project": "src/Providers/Madorin.AI.Runtime.Providers.Ollama.Worker/Madorin.AI.Runtime.Providers.Ollama.Worker.csproj" }
+  ]
+}

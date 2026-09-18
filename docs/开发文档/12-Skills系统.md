@@ -201,7 +201,7 @@ skill.search（宿主工具，Reverse RPC）
 load_skill(name)
   → name ∈ Loadable
   → Content：Catalog MaterializedPath 优先；未命中则按激活 scope / 绑定源根惰性解析（忽略模型传入绝对路径）
-  → load_skill 返回完整 body；read_skill_resource 返回 references/assets 资源全文
+  → load_skill 返回完整 body；独立 Runtime 广告工具 `runtime.skill.read` 在未传 `resource` 时等同 load，传入 `resource` 时读取声明资源
   → Advertise description：优先 search hit 完整描述（≤1024，超长按句界截断，避免关键半句切断）
 ```
 

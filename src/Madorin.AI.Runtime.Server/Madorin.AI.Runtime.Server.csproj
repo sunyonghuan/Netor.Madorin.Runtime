@@ -10,24 +10,16 @@
     <ProjectReference Include="..\Madorin.AI.Runtime.Modes.Meeting\Madorin.AI.Runtime.Modes.Meeting.csproj" />
     <ProjectReference Include="..\Madorin.AI.Runtime.Modes.Work\Madorin.AI.Runtime.Modes.Work.csproj" />
     <ProjectReference Include="..\Madorin.AI.Runtime.Transport.NamedPipes\Madorin.AI.Runtime.Transport.NamedPipes.csproj" />
-    <ProjectReference Include="..\Providers\Madorin.AI.Runtime.Providers.Aliyun\Madorin.AI.Runtime.Providers.Aliyun.csproj" />
-    <ProjectReference Include="..\Providers\Madorin.AI.Runtime.Providers.AzureOpenAI\Madorin.AI.Runtime.Providers.AzureOpenAI.csproj" />
-    <ProjectReference Include="..\Providers\Madorin.AI.Runtime.Providers.OpenAI\Madorin.AI.Runtime.Providers.OpenAI.csproj" />
-    <ProjectReference Include="..\Providers\Madorin.AI.Runtime.Providers.Anthropic\Madorin.AI.Runtime.Providers.Anthropic.csproj" />
-    <ProjectReference Include="..\Providers\Madorin.AI.Runtime.Providers.OpenAICompatible\Madorin.AI.Runtime.Providers.OpenAICompatible.csproj" />
-    <ProjectReference Include="..\Providers\Madorin.AI.Runtime.Providers.DeepSeek\Madorin.AI.Runtime.Providers.DeepSeek.csproj" />
-    <ProjectReference Include="..\Providers\Madorin.AI.Runtime.Providers.Kimi\Madorin.AI.Runtime.Providers.Kimi.csproj" />
-    <ProjectReference Include="..\Providers\Madorin.AI.Runtime.Providers.Gemini\Madorin.AI.Runtime.Providers.Gemini.csproj" />
-    <ProjectReference Include="..\Providers\Madorin.AI.Runtime.Providers.GLM\Madorin.AI.Runtime.Providers.GLM.csproj" />
-    <ProjectReference Include="..\Providers\Madorin.AI.Runtime.Providers.Ollama\Madorin.AI.Runtime.Providers.Ollama.csproj" />
+    <ProjectReference Include="..\Providers\Madorin.AI.Runtime.Providers.Abstractions\Madorin.AI.Runtime.Providers.Abstractions.csproj" />
+    <ProjectReference Include="..\Providers\Madorin.AI.Runtime.Providers.WorkerHost\Madorin.AI.Runtime.Providers.WorkerHost.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Agents.AI" />
-    <PackageReference Include="Microsoft.Agents.AI.OpenAI" />
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="Madorin.AI.Runtime.Provider.Tests" />
     <InternalsVisibleTo Include="Madorin.AI.Runtime.EndToEnd.Tests" />
   </ItemGroup>
 
@@ -35,6 +27,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
 </Project>

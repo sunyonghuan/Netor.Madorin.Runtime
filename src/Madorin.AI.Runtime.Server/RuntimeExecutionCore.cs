@@ -91,9 +91,10 @@ internal sealed class RuntimeExecutionCore(
 
         var gatewayCatalogSnapshot = skillCatalog is null
             ? toolCatalogSnapshot
-            : toolCatalogSnapshot.WithInternalTools([SkillScriptToolDefinition.Descriptor]);
+            : toolCatalogSnapshot.WithInternalTools(SkillRuntimeTools.GatewayDescriptors);
         var skillCatalogSnapshots = new ConcurrentDictionary<string, SkillCatalogSnapshot>(
             StringComparer.Ordinal);
+        SkillCatalogSnapshot? latestSkillSnapshot = null;
         Func<CancellationToken, Task<SkillCatalogSnapshot?>>? skillCatalogSnapshotProvider =
             skillCatalog is null
                 ? null
@@ -101,6 +102,7 @@ internal sealed class RuntimeExecutionCore(
                 {
                     var snapshot = await skillCatalog.GetSnapshotForInvocationAsync(token)
                         .ConfigureAwait(false);
+                    latestSkillSnapshot = snapshot;
                     skillCatalogSnapshots.TryAdd(snapshot.Version, snapshot);
                     return snapshot;
                 };
@@ -145,6 +147,13 @@ internal sealed class RuntimeExecutionCore(
                 version => skillCatalogSnapshots.TryGetValue(version, out var snapshot)
                     ? snapshot
                     : null));
+            executors.Add(new SkillRuntimeToolExecutor(
+                _workspaceRoot,
+                runId,
+                () => latestSkillSnapshot ?? skillCatalog.Current,
+                CollectAgents(request.Selection.ModeOptions),
+                skillActivationStore,
+                isHostModeSkills));
         }
         if (reverseExecutor is not null)
         {
@@ -173,7 +182,7 @@ internal sealed class RuntimeExecutionCore(
         Func<ToolCatalogSnapshot> liveCatalogProvider = () => skillCatalog is null
             ? toolCatalogStore.CaptureSnapshot()
             : toolCatalogStore.CaptureSnapshot()
-                .WithInternalTools([SkillScriptToolDefinition.Descriptor]);
+                .WithInternalTools(SkillRuntimeTools.GatewayDescriptors);
 
         // Host reverse-RPC 与 Standalone 共用 scope 解析：人审只回答是否同意，
         // AllowedExecutables/路径等由 Runtime 按本次 arguments 收窄（避免 Host Grant 空白名单）。
@@ -469,5 +478,47 @@ internal sealed class RuntimeExecutionCore(
         }
 
         return Encoding.UTF8.GetString(buffer.WrittenSpan);
+    }
+
+    private static Dictionary<string, AgentRef> CollectAgents(ModeOptions options)
+    {
+        var agents = new Dictionary<string, AgentRef>(StringComparer.Ordinal);
+        void Add(AgentRef? agent)
+        {
+            if (agent is not null)
+            {
+                agents[agent.AgentId] = agent;
+            }
+        }
+
+        switch (options)
+        {
+            case ExpertModeOptions expert:
+                Add(expert.Agent);
+                foreach (var agent in expert.AvailableAgents ?? [])
+                {
+                    Add(agent);
+                }
+
+                break;
+            case MeetingModeOptions meeting:
+                Add(meeting.HostAgent);
+                foreach (var participant in meeting.Participants)
+                {
+                    Add(participant.Agent);
+                }
+
+                break;
+            case WorkModeOptions work:
+                Add(work.GeneralManager);
+                foreach (var agent in work.AvailableAgents)
+                {
+                    Add(agent);
+                }
+
+                break;
+        }
+
+        return agents;
     }
 }

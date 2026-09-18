@@ -42,9 +42,12 @@ public sealed class MemoryToolTests
     public void Registry_MemoryTools_FreezeIdsSchemasAndApprovalRequirement()
     {
         var registry = new BuiltinToolRegistry();
+        var advertised = new ToolCatalogSnapshot("host", "effective", registry.GetTools()).Tools;
 
         var read = Assert.ContainsSingle(registry.GetTools(
             [BuiltinToolRegistry.MemoryReadToolId]));
+        var write = Assert.ContainsSingle(registry.GetTools(
+            [BuiltinToolRegistry.MemoryWriteToolId]));
         var append = Assert.ContainsSingle(registry.GetTools(
             [BuiltinToolRegistry.MemoryAppendToolId]));
         var update = Assert.ContainsSingle(registry.GetTools(
@@ -53,9 +56,14 @@ public sealed class MemoryToolTests
             [BuiltinToolRegistry.MemoryDeleteToolId]));
 
         Assert.IsFalse(read.RequiresApproval);
+        Assert.IsTrue(write.RequiresApproval);
         Assert.IsTrue(append.RequiresApproval);
         Assert.IsTrue(update.RequiresApproval);
         Assert.IsTrue(delete.RequiresApproval);
+        Assert.IsTrue(advertised.Any(static tool =>
+            tool.ToolId == BuiltinToolRegistry.MemoryWriteToolId));
+        Assert.IsFalse(advertised.Any(static tool =>
+            tool.ToolId == BuiltinToolRegistry.MemoryAppendToolId));
         using var readInput = JsonDocument.Parse(read.InputSchemaJson);
         using var readOutput = JsonDocument.Parse(read.OutputSchemaJson);
         using var appendInput = JsonDocument.Parse(append.InputSchemaJson);
@@ -284,6 +292,57 @@ public sealed class MemoryToolTests
             await service.ReadAsync(MemoryScope.Project, TestContext.CancellationToken));
     }
 
+    [TestMethod]
+    public async Task ExecuteAsync_MemoryWrite_DispatchesAppendUpdateAndDelete()
+    {
+        var service = CreateMemoryService();
+        await service.ReplaceAsync(
+            MemoryScope.Project,
+            "# Memory\n- First\n",
+            TestContext.CancellationToken);
+        var executor = new BuiltinMemoryToolExecutor(service);
+        var append = await executor.ExecuteAsync(
+            CreateInvocation(
+                BuiltinToolRegistry.MemoryWriteToolId,
+                $$"""{"scope":"project","operation":"append","lines":["- Extra"],"expectedHash":"{{await service.GetHashAsync(MemoryScope.Project, TestContext.CancellationToken)}}"}""")
+                with { PermissionContext = CreatePermission("write-append") },
+            TestContext.CancellationToken);
+
+        Assert.IsTrue(append.Success, append.Error);
+        using (var output = JsonDocument.Parse(append.OutputJson!))
+        {
+            Assert.IsTrue(output.RootElement.GetProperty("written").GetBoolean());
+            Assert.AreEqual("append", output.RootElement.GetProperty("operation").GetString());
+        }
+
+        Assert.AreEqual(
+            "# Memory\n- First\n- Extra\n",
+            await service.ReadAsync(MemoryScope.Project, TestContext.CancellationToken));
+        var hash = await service.GetHashAsync(MemoryScope.Project, TestContext.CancellationToken);
+        var update = await executor.ExecuteAsync(
+            CreateInvocation(
+                BuiltinToolRegistry.MemoryWriteToolId,
+                $$"""{"scope":"project","operation":"update","startLine":2,"endLine":2,"lines":["- Updated"],"expectedHash":"{{hash}}"}""")
+                with { PermissionContext = CreatePermission("write-update") },
+            TestContext.CancellationToken);
+        Assert.IsTrue(update.Success, update.Error);
+        Assert.AreEqual(
+            "# Memory\n- Updated\n- Extra\n",
+            await service.ReadAsync(MemoryScope.Project, TestContext.CancellationToken));
+
+        hash = await service.GetHashAsync(MemoryScope.Project, TestContext.CancellationToken);
+        var delete = await executor.ExecuteAsync(
+            CreateInvocation(
+                BuiltinToolRegistry.MemoryWriteToolId,
+                $$"""{"scope":"project","operation":"delete","startLine":2,"endLine":3,"expectedHash":"{{hash}}"}""")
+                with { PermissionContext = CreatePermission("write-delete") },
+            TestContext.CancellationToken);
+        Assert.IsTrue(delete.Success, delete.Error);
+        Assert.AreEqual(
+            "# Memory\n",
+            await service.ReadAsync(MemoryScope.Project, TestContext.CancellationToken));
+    }
+
     private MemoryFileService CreateMemoryService() => new(
         Path.Join(_root, "home"),
         Path.Join(_root, "workspace"));
@@ -312,6 +371,7 @@ public sealed class MemoryToolTests
         private static readonly string[] MemoryToolIds =
         [
             BuiltinToolRegistry.MemoryReadToolId,
+            BuiltinToolRegistry.MemoryWriteToolId,
             BuiltinToolRegistry.MemoryAppendToolId,
             BuiltinToolRegistry.MemoryUpdateToolId,
             BuiltinToolRegistry.MemoryDeleteToolId

@@ -4,6 +4,7 @@
 param(
     [switch]$Rebuild,
     [switch]$NoBump,
+    [switch]$SkipProviders,
     [ValidateSet("win-x64", "win-arm64", "linux-x64", "linux-arm64", "osx-x64", "osx-arm64")]
     [string]$Rid = "win-x64",
     [ValidateSet("patch", "minor", "major")]
@@ -16,6 +17,7 @@ $BuildDir = [System.IO.Path]::GetFullPath($PSScriptRoot)
 $SolutionDir = [System.IO.Path]::GetFullPath((Join-Path $BuildDir '..'))
 $SolutionFile = Join-Path $SolutionDir 'Madorin.AI.Runtime.slnx'
 $PackageVersionsFile = Join-Path $SolutionDir 'Directory.Packages.props'
+$DirectoryBuildPropsFile = Join-Path $SolutionDir 'Directory.Build.props'
 $ProjectFile = Join-Path $SolutionDir 'src/Madorin.AI.Runtime.Cli/Madorin.AI.Runtime.Cli.csproj'
 $ContractsProjectFile = Join-Path $SolutionDir 'src/Madorin.AI.Runtime.Contracts/Madorin.AI.Runtime.Contracts.csproj'
 $ClientProjectFile = Join-Path $SolutionDir 'src/Madorin.AI.Runtime.Client/Madorin.AI.Runtime.Client.csproj'
@@ -32,6 +34,7 @@ $SkillDirectoryName = 'madorin-cli'
 $SkillSourceDir = Join-Path $SolutionDir "skills/$SkillDirectoryName"
 $SkillOutputDir = Join-Path $OutputDir $SkillDirectoryName
 $BinDir = Join-Path $SkillOutputDir 'bin'
+$ProviderWorkersManifestFile = Join-Path $BuildDir 'provider-workers.json'
 
 if (-not (Test-Path -LiteralPath $SolutionFile -PathType Leaf)) {
     throw "Solution file was not found: $SolutionFile"
@@ -45,6 +48,10 @@ if (-not (Test-Path -LiteralPath $PackageVersionsFile -PathType Leaf)) {
     throw "Central package versions file was not found: $PackageVersionsFile"
 }
 
+if (-not (Test-Path -LiteralPath $DirectoryBuildPropsFile -PathType Leaf)) {
+    throw "Directory.Build.props was not found: $DirectoryBuildPropsFile"
+}
+
 foreach ($packageProjectFile in $ContractsProjectFile, $ClientProjectFile) {
     if (-not (Test-Path -LiteralPath $packageProjectFile -PathType Leaf)) {
         throw "Package project file was not found: $packageProjectFile"
@@ -55,22 +62,26 @@ if (-not (Test-Path -LiteralPath $SkillSourceDir -PathType Container)) {
     throw "Skill source directory was not found: $SkillSourceDir"
 }
 
+if (-not (Test-Path -LiteralPath $ProviderWorkersManifestFile -PathType Leaf)) {
+    throw "Provider workers manifest was not found: $ProviderWorkersManifestFile"
+}
+
 function Get-ProjectVersion {
-    $projectContent = Get-Content -Path $ProjectFile -Raw -Encoding UTF8
-    if ([string]::IsNullOrEmpty($projectContent)) {
-        throw "Project file is empty or could not be read: $ProjectFile"
+    $propsContent = Get-Content -Path $DirectoryBuildPropsFile -Raw -Encoding UTF8
+    if ([string]::IsNullOrEmpty($propsContent)) {
+        throw "Directory.Build.props is empty or could not be read: $DirectoryBuildPropsFile"
     }
-    $versionMatch = [regex]::Match($projectContent, '<Version>([^<]+)</Version>')
+    $versionMatch = [regex]::Match($propsContent, '<MadorinCliVersion>([^<]+)</MadorinCliVersion>')
     if (-not $versionMatch.Success) {
-        throw "Version was not found in project file: $ProjectFile"
+        throw "MadorinCliVersion was not found in: $DirectoryBuildPropsFile"
     }
     return $versionMatch.Groups[1].Value
 }
 
 function Bump-ProjectVersion {
-    $projectContent = Get-Content -Path $ProjectFile -Raw -Encoding UTF8
-    if ([string]::IsNullOrEmpty($projectContent)) {
-        throw "Project file is empty or could not be read: $ProjectFile"
+    $propsContent = Get-Content -Path $DirectoryBuildPropsFile -Raw -Encoding UTF8
+    if ([string]::IsNullOrEmpty($propsContent)) {
+        throw "Directory.Build.props is empty or could not be read: $DirectoryBuildPropsFile"
     }
     $CurrentVersion = Get-ProjectVersion
     $versionParts = $CurrentVersion.Split('.')
@@ -91,10 +102,10 @@ function Bump-ProjectVersion {
 
     $NewVersion = "$major.$minor.$patch"
 
-    $projectContent = $projectContent -replace "<Version>([^<]+)</Version>", "<Version>$NewVersion</Version>"
+    $propsContent = $propsContent -replace "<MadorinCliVersion>([^<]+)</MadorinCliVersion>", "<MadorinCliVersion>$NewVersion</MadorinCliVersion>"
 
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($ProjectFile, $projectContent, $utf8NoBom)
+    [System.IO.File]::WriteAllText($DirectoryBuildPropsFile, $propsContent, $utf8NoBom)
 
     Write-Host "Version bumped: $OldVersion -> $NewVersion" -ForegroundColor Yellow
     return $NewVersion
@@ -185,6 +196,10 @@ function Invoke-DotNetPublishWithRetry {
         '-o', $OutputPath,
         '--disable-build-servers',
         '--nologo',
+        "-p:Version=$NewVersion",
+        "-p:AssemblyVersion=$NewVersion",
+        "-p:FileVersion=$NewVersion",
+        "-p:InformationalVersion=$NewVersion",
         "-p:MadorinRuntimeContractsVersion=$NewVersion",
         "-p:RestoreConfigFile=$ReleaseNuGetConfigFile",
         "-p:RestorePackagesPath=$RestorePackagesDir"
@@ -253,6 +268,78 @@ function Invoke-DotNetPackWithRetry {
     & dotnet @packArgs
 }
 
+function Get-ProviderWorkerFileName {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Slug
+    )
+
+    if ($Rid.StartsWith('win')) {
+        return "madorin-provider-$Slug.exe"
+    }
+
+    return "madorin-provider-$Slug"
+}
+
+function Publish-ProviderWorkers {
+    $workersDoc = Get-Content -LiteralPath $ProviderWorkersManifestFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($null -eq $workersDoc.workers -or $workersDoc.workers.Count -eq 0) {
+        throw "Provider workers manifest did not list any workers: $ProviderWorkersManifestFile"
+    }
+
+    $index = 0
+    foreach ($worker in $workersDoc.workers) {
+        $index++
+        $projectPath = Join-Path $SolutionDir $worker.project
+        if (-not (Test-Path -LiteralPath $projectPath -PathType Leaf)) {
+            throw "Provider worker project was not found: $projectPath"
+        }
+
+        Write-Host "  [$index/$($workersDoc.workers.Count)] $($worker.protocol) ($($worker.slug))" -ForegroundColor Cyan
+        Invoke-DotNetPublishWithRetry `
+            -ProjectPath $projectPath `
+            -OutputPath $BinDir `
+            -Name "Provider $($worker.slug)"
+
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "Provider worker '$($worker.slug)' publish failed, exit code: $LASTEXITCODE" -ForegroundColor Red
+            exit $LASTEXITCODE
+        }
+
+        $workerFile = Join-Path $BinDir (Get-ProviderWorkerFileName -Slug $worker.slug)
+        if (-not (Test-Path -LiteralPath $workerFile -PathType Leaf)) {
+            throw "Provider worker output was not found: $workerFile"
+        }
+
+        $workerSizeMb = [math]::Round((Get-Item -LiteralPath $workerFile).Length / 1MB, 2)
+        Write-Host "    $workerFile (${workerSizeMb} MB)" -ForegroundColor Cyan
+    }
+}
+
+function Write-ProvidersRuntimeManifest {
+    $workersDoc = Get-Content -LiteralPath $ProviderWorkersManifestFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    $entries = @()
+    foreach ($worker in $workersDoc.workers) {
+        $entries += [pscustomobject]@{
+            protocol = $worker.protocol
+            slug     = $worker.slug
+            fileName = Get-ProviderWorkerFileName -Slug $worker.slug
+        }
+    }
+
+    $manifest = [pscustomobject]@{
+        version = $NewVersion
+        rid     = $Rid
+        workers = $entries
+    }
+
+    $manifestPath = Join-Path $BinDir 'providers.manifest.json'
+    $json = $manifest | ConvertTo-Json -Depth 5
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($manifestPath, $json, $utf8NoBom)
+    Write-Host "  Manifest: $manifestPath" -ForegroundColor Cyan
+}
+
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "  Madorin AI CLI Native AOT Publish" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
@@ -286,7 +373,7 @@ foreach ($ext in $cleanExts) {
         Remove-Item -Force
 }
 
-Write-Host "[1/6] Copying skill files..." -ForegroundColor Green
+Write-Host "[1/7] Copying skill files..." -ForegroundColor Green
 
 if (Test-Path $SkillOutputDir) {
     Remove-Item $SkillOutputDir -Recurse -Force
@@ -341,7 +428,7 @@ foreach ($packagePath in $expectedPackages) {
     }
 }
 
-Write-Host "[2/6] Packing Contracts NuGet package (Release | v$NewVersion)..." -ForegroundColor Green
+Write-Host "[2/7] Packing Contracts NuGet package (Release | v$NewVersion)..." -ForegroundColor Green
 
 Invoke-DotNetPackWithRetry `
     -ProjectPath $ContractsProjectFile `
@@ -358,7 +445,7 @@ if (-not (Test-Path -LiteralPath $contractsPackagePath -PathType Leaf)) {
     throw "Expected Contracts NuGet package was not found: $contractsPackagePath"
 }
 
-Write-Host "[3/6] Publishing CLI (Release | $Rid | AOT)..." -ForegroundColor Green
+Write-Host "[3/7] Publishing CLI (Release | $Rid | AOT)..." -ForegroundColor Green
 
 Invoke-DotNetPublishWithRetry `
     -ProjectPath $ProjectFile `
@@ -370,7 +457,14 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-Write-Host "[4/6] Packing Client NuGet package (Release | v$NewVersion)..." -ForegroundColor Green
+if ($SkipProviders) {
+    Write-Host "[4/7] Skipping provider workers (-SkipProviders)." -ForegroundColor Yellow
+} else {
+    Write-Host "[4/7] Publishing provider workers (Release | $Rid | AOT)..." -ForegroundColor Green
+    Publish-ProviderWorkers
+}
+
+Write-Host "[5/7] Packing Client NuGet package (Release | v$NewVersion)..." -ForegroundColor Green
 
 Invoke-DotNetPackWithRetry `
     -ProjectPath $ClientProjectFile `
@@ -392,7 +486,7 @@ foreach ($packagePath in $expectedPackages) {
     Write-Host "  Package: $packagePath (${packageSizeKb} KB)" -ForegroundColor Cyan
 }
 
-Write-Host "[5/6] Cleaning extra files..." -ForegroundColor Green
+Write-Host "[6/7] Cleaning extra files..." -ForegroundColor Green
 $junkExts = @('*.pdb', '*.xml', '*.deps.json', '*.runtimeconfig.dev.json')
 foreach ($ext in $junkExts) {
     Get-ChildItem -Path $BinDir -Filter $ext -File -ErrorAction SilentlyContinue |
@@ -410,7 +504,17 @@ if (Test-Path $exePath) {
     Write-Host "Warning: $exeFileName was not found. Check publish output." -ForegroundColor Yellow
 }
 
-Write-Host "[6/6] Packaging CLI to zip..." -ForegroundColor Green
+Write-ProvidersRuntimeManifest
+
+if (-not $Rid.StartsWith('win') -and (Get-Command chmod -ErrorAction SilentlyContinue)) {
+    Get-ChildItem -Path $BinDir -File -ErrorAction SilentlyContinue |
+        Where-Object { [string]::IsNullOrEmpty($_.Extension) } |
+        ForEach-Object {
+            & chmod 755 -- $_.FullName
+        }
+}
+
+Write-Host "[7/7] Packaging CLI to zip..." -ForegroundColor Green
 
 $zipFileName = "$PackageName-v$NewVersion-$Rid.zip"
 $hashFileName = "$PackageName-v$NewVersion-$Rid.sha256"

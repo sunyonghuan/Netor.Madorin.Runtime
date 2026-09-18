@@ -10,6 +10,7 @@ using Madorin.AI.Runtime.Contracts.Serialization;
 using Madorin.AI.Runtime.Entities;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Server;
+using Madorin.AI.Runtime.Server.ProviderWorkers;
 using Madorin.AI.Runtime.Services.Memory;
 using StandaloneSelection = Madorin.AI.Runtime.Cli.Config.ResolvedStandaloneSelection;
 
@@ -450,8 +451,9 @@ internal static class ServiceCommands
                 LocalRuntime runtime;
                 try
                 {
+                    var workerSupervisor = new ProviderWorkerSupervisor();
                     var providerResolver = providerResolverFactory is null
-                        ? StandaloneProviderFactory.Create(config)
+                        ? StandaloneProviderFactory.Create(config, workerSupervisor)
                         : providerResolverFactory(config);
                     var resolvedMemoryUserHome = memoryUserHome
                         ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -477,6 +479,7 @@ internal static class ServiceCommands
                             {
                                 MemoryFiles = memoryFiles,
                                 ToolConsentHandler = consentHandler,
+                                WorkerSupervisor = workerSupervisor,
                                 MinimumLogLevel = minimumLogLevel
                             },
                             cts.Token)
@@ -1438,7 +1441,10 @@ internal static class ServiceCommands
                         var access = tool.ToolId switch
                         {
                             "mcli_memory_read" => "read-only",
-                            "mcli_memory_append" or "mcli_memory_update" or "mcli_memory_delete" => "approval required",
+                            "mcli_memory_write"
+                                or "mcli_memory_append"
+                                or "mcli_memory_update"
+                                or "mcli_memory_delete" => "approval required",
                             _ when tool.RequiresApproval => "approval required",
                             _ => tool.Risk.ToString()
                         };

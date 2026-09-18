@@ -410,6 +410,81 @@ public sealed class BuiltinFileToolTests
             await File.ReadAllTextAsync(path, TestContext.CancellationToken));
     }
 
+    [TestMethod]
+    public async Task FileInspectAndMergedWrite_CoverListStatAppendAndMkdir()
+    {
+        var executor = new BuiltinFsToolExecutor();
+        var permission = CreatePermission(allowOverwrite: true);
+
+        var mkdir = await ExecuteAsync(
+            executor,
+            BuiltinToolRegistry.FileWriteToolId,
+            """{"path":"docs","mode":"mkdir"}""",
+            permission);
+        Assert.IsTrue(mkdir.Success, mkdir.Error);
+        using (var output = JsonDocument.Parse(mkdir.OutputJson!))
+        {
+            Assert.IsTrue(output.RootElement.GetProperty("written").GetBoolean());
+            Assert.AreEqual("mkdir", output.RootElement.GetProperty("mode").GetString());
+        }
+
+        var write = await ExecuteAsync(
+            executor,
+            BuiltinToolRegistry.FileWriteToolId,
+            """{"path":"docs/data.txt","content":"one\n","encoding":"utf-8","mode":"create"}""",
+            permission);
+        Assert.IsTrue(write.Success, write.Error);
+
+        var hash = await ComputeHashAsync(Path.Join(_root, "docs", "data.txt"));
+        var append = await ExecuteAsync(
+            executor,
+            BuiltinToolRegistry.FileWriteToolId,
+            $$"""{"path":"docs/data.txt","mode":"append","content":"two\n","encoding":"utf-8","expectedHash":"{{hash}}"}""",
+            permission);
+        Assert.IsTrue(append.Success, append.Error);
+        using (var output = JsonDocument.Parse(append.OutputJson!))
+        {
+            Assert.AreEqual("append", output.RootElement.GetProperty("mode").GetString());
+        }
+
+        var list = await ExecuteAsync(
+            executor,
+            BuiltinToolRegistry.FileInspectToolId,
+            """{"mode":"list","path":"docs"}""",
+            permission);
+        Assert.IsTrue(list.Success, list.Error);
+        using (var output = JsonDocument.Parse(list.OutputJson!))
+        {
+            Assert.IsTrue(output.RootElement.TryGetProperty("entries", out _));
+        }
+
+        var status = await ExecuteAsync(
+            executor,
+            BuiltinToolRegistry.FileInspectToolId,
+            """{"mode":"stat","path":"docs/data.txt"}""",
+            permission);
+        Assert.IsTrue(status.Success, status.Error);
+        using (var output = JsonDocument.Parse(status.OutputJson!))
+        {
+            Assert.AreEqual("file", output.RootElement.GetProperty("kind").GetString());
+        }
+    }
+
+    [TestMethod]
+    public async Task FileWrite_OverwriteMissingFile_CreatesFile()
+    {
+        var result = await ExecuteAsync(
+            new BuiltinFsToolExecutor(),
+            BuiltinToolRegistry.FileWriteToolId,
+            """{"path":"missing.txt","mode":"overwrite","content":"created","encoding":"utf-8"}""",
+            CreatePermission(allowOverwrite: false));
+
+        Assert.IsTrue(result.Success, result.Error);
+        Assert.AreEqual(
+            "created",
+            await File.ReadAllTextAsync(Path.Join(_root, "missing.txt"), TestContext.CancellationToken));
+    }
+
     private Task<ToolResult> ExecuteAsync(
         BuiltinFsToolExecutor executor,
         string toolId,

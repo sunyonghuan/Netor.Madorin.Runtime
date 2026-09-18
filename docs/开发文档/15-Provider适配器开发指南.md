@@ -22,7 +22,7 @@ Runtime 当前包含 1 个抽象项目（`Abstractions`）与 10 个 Provider �
 | AzureOpenAI | Azure OpenAI Service（实验性） |
 | Abstractions | 公共接口与基类，不含具体实现 |
 
-所有 Provider 共享 `Providers.Abstractions` 中定义的接口和数据结构。新增 Provider 只需实现这些接口并注册到 DI 容器。
+所有 Provider 共享 `Providers.Abstractions` 中定义的接口和数据结构。实现项目不得再被 CLI/Server 直接引用；生产路径通过独立 AOT Worker 进程加载，见第 9 节。
 
 ## 2. 核心接口
 
@@ -76,8 +76,8 @@ Providers.<Name>/
 3. **定义模型目录**：在 `Models/` 下声明已知模型列表，每个模型标注其支持的 `ProviderCapabilities`。
 4. **实现 Event mapper**：将 Provider 的流式 delta 事件映射为 Runtime 标准事件（`output.delta`、`tool.call.start`、`run.completed` 等）。
 5. **实现 Message mapper**：将 Runtime 标准消息（system / user / assistant / tool result）转换为 Provider API 请求体。
-6. **注册到 DI 容器**：在 `ServiceCollection` 扩展中注册适配器，使其可通过 Provider ID 解析。
-7. **加入配置向导**：在 `config init` 的 Provider 选择列表中添加新条目。
+6. **包装为 Worker 并登记 slug**：见第 9 节。不要把实现项目加回 Server/CLI 的 ProjectReference，也不要在主程序里 `new XxxAdapter`。
+7. **加入配置向导**：在 `config init` 的 Provider 选择列表中添加新条目。向导协议字符串与能力/凭据仍以本文第 5–7 节为准。
 
 ## 5. 配置与发现
 
@@ -144,10 +144,23 @@ Provider 的 API Key 来源有两种：
 
 单测：`ProviderToolNamePolicyTests`。宿主工具如 `skill.search` 经净化后常为 `skill_search`；Skills 激活钩子同时识别 `host.skill.search` / `skill.search` / `skill_search` 及编码 ToolId。
 
+## 9. Worker 包装、slug 与发布清单
+
+HTTP、工具名、凭据、能力投影和配置向导的权威仍在第 2–8 节。本节只补进程隔离后的注册方式。完整规格见 [12-Provider 进程隔离 AOT 按需加载](../方案设计/12-Provider进程隔离AOT按需加载方案.md)。
+
+1. **实现项目**：仍放 `src/Providers/Madorin.AI.Runtime.Providers.<Name>/`，只被对应 Worker 工程引用。
+2. **Worker 工程**：`src/Providers/Madorin.AI.Runtime.Providers.<Name>.Worker/`，`AssemblyName=madorin-provider-{slug}`，`Program.cs` 只映射本协议后调用 `ProviderWorkerHost.RunAsync`。
+3. **slug**：在 `ProviderProtocolSlugs` 与 `build/provider-workers.json` 同时登记。`Custom` 与 `OpenAI Compatible` 共用 `openai-compatible`，不要为 Custom 再开 Worker。
+4. **清单**：发布脚本读 JSON，把 CLI 与 10 个 Worker 发到同一 `bin/`，并写 `providers.manifest.json`（`version`、`rid`、`workers[{protocol,slug,fileName}]`，本版本不写 `download`）。
+5. **启动**：Runtime 按 slug 懒启动最多一个 Worker；连接信息走每条 `invoke.connection`，不要按 ApiKey 再开进程。
+
+协议字符串必须保持：`OpenAI`、`Anthropic`、`OpenAI Compatible`、`DeepSeek`、`Kimi`、`Aliyun`、`Azure OpenAI`、`Gemini`、`GLM`、`Custom`、`Ollama`。
+
 ---
 
 ## 修订记录
 
 | 日期 | 说明 |
 | --- | --- |
+| 2026-09-18 | 补 §9 Worker 包装 / slug / `providers.manifest.json`；新增步骤改为登记 Worker 而非主程序 DI |
 | 2026-09-07 | 新增 §8 ProviderToolNamePolicy（调用名风格短名化、描述性名称不误压、对称回解析） |

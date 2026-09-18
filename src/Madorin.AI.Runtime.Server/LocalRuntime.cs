@@ -11,6 +11,7 @@ using Madorin.AI.Runtime.Persistence.Abstractions;
 using Madorin.AI.Runtime.Persistence.Files;
 using Madorin.AI.Runtime.Persistence.Sqlite;
 using Madorin.AI.Runtime.Providers.Abstractions;
+using Madorin.AI.Runtime.Server.ProviderWorkers;
 using Madorin.AI.Runtime.Services.Memory;
 using Madorin.AI.Runtime.Services.Skills;
 using Madorin.AI.Runtime.Services.Tools;
@@ -41,6 +42,7 @@ public sealed class LocalRuntime : IAsyncDisposable
         new(StringComparer.Ordinal);
     private readonly WorkspaceWriteLock _workspaceLock;
     private readonly SkillCatalogService _skillCatalog;
+    private readonly IProviderWorkerSupervisor _workerSupervisor;
     private int _disposed;
 
     private LocalRuntime(
@@ -50,7 +52,8 @@ public sealed class LocalRuntime : IAsyncDisposable
         AgentContextComposer agentContextComposer,
         MemoryFileService memoryFiles,
         SkillCatalogService skillCatalog,
-        RuntimeDiagnosticLog diagnosticLog)
+        RuntimeDiagnosticLog diagnosticLog,
+        IProviderWorkerSupervisor workerSupervisor)
     {
         _dataDirectory = options.DataDirectory;
         _databaseConnectionString = databaseConnectionString;
@@ -60,6 +63,7 @@ public sealed class LocalRuntime : IAsyncDisposable
         _diagnosticLog = diagnosticLog;
         _workspaceLock = workspaceLock;
         _skillCatalog = skillCatalog;
+        _workerSupervisor = workerSupervisor;
         _blobStore = new BlobStagingStore(
             options.DataDirectory,
             options.RuntimeLimits,
@@ -203,7 +207,9 @@ public sealed class LocalRuntime : IAsyncDisposable
                 contextComposer,
                 memoryFiles,
                 skillCatalog,
-                diagnosticLog);
+                diagnosticLog,
+                normalized.WorkerSupervisor ?? new ProviderWorkerSupervisor(
+                    workerLog: line => ProviderWorkerLog.Write(diagnosticLog, line)));
         }
         catch (Exception ex)
         {
@@ -953,6 +959,7 @@ public sealed class LocalRuntime : IAsyncDisposable
             }
         }
 
+        await _workerSupervisor.DisposeAsync().ConfigureAwait(false);
         await _blobStore.DisposeAsync().ConfigureAwait(false);
         await _skillCatalog.DisposeAsync().ConfigureAwait(false);
         await _workspaceLock.DisposeAsync().ConfigureAwait(false);

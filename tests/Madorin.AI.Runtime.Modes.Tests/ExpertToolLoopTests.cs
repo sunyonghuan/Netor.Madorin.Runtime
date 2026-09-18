@@ -503,6 +503,8 @@ public sealed class ExpertToolLoopTests
                 Assert.IsTrue(request.Tools.Any(static tool =>
                     tool.ToolId == BuiltinToolRegistry.MemoryReadToolId));
                 Assert.IsTrue(request.Tools.Any(static tool =>
+                    tool.ToolId == BuiltinToolRegistry.MemoryWriteToolId));
+                Assert.IsFalse(request.Tools.Any(static tool =>
                     tool.ToolId == BuiltinToolRegistry.MemoryAppendToolId));
                 yield return new ToolCallCompleteProviderEvent(
                     request.InvocationId,

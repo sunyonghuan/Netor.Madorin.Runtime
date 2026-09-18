@@ -1,6 +1,7 @@
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Entities;
 using Madorin.AI.Runtime.Server;
+using Madorin.AI.Runtime.Server.ProviderWorkers;
 
 namespace Madorin.AI.Runtime.Provider.Tests;
 
@@ -8,9 +9,10 @@ namespace Madorin.AI.Runtime.Provider.Tests;
 public sealed class HostProviderRegistryTests
 {
     [TestMethod]
-    public void Upsert_And_Resolve_BuildsAdapterByProviderId()
+    public async Task Upsert_And_Resolve_BuildsAdapterByProviderId()
     {
-        var registry = new HostProviderRegistry();
+        await using var supervisor = new ProviderWorkerSupervisor(AppContext.BaseDirectory);
+        var registry = new HostProviderRegistry(supervisor);
         registry.Upsert(
         [
             new HostProviderConfig(
@@ -35,9 +37,10 @@ public sealed class HostProviderRegistryTests
     }
 
     [TestMethod]
-    public void Upsert_SameProviderId_OverwritesPreviousEntry()
+    public async Task Upsert_SameProviderId_OverwritesPreviousEntry()
     {
-        var registry = new HostProviderRegistry();
+        await using var supervisor = new ProviderWorkerSupervisor(AppContext.BaseDirectory);
+        var registry = new HostProviderRegistry(supervisor);
         registry.Upsert(
         [
             new HostProviderConfig(

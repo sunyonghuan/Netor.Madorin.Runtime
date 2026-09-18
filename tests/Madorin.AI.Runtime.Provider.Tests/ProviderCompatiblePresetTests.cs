@@ -2,8 +2,7 @@ using Madorin.AI.Runtime.Cli.Config;
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Providers.Gemini;
-using Madorin.AI.Runtime.Providers.GLM;
-using Madorin.AI.Runtime.Providers.OpenAICompatible;
+using Madorin.AI.Runtime.Server.ProviderWorkers;
 using Madorin.AI.Runtime.Tools.Abstractions;
 
 namespace Madorin.AI.Runtime.Provider.Tests;
@@ -22,7 +21,7 @@ public sealed class ProviderCompatiblePresetTests
     [DataRow("Gemini")]
     [DataRow("GLM")]
     [DataRow("Custom")]
-    [Timeout(10_000, CooperativeCancellation = true)]
+    [Timeout(30_000, CooperativeCancellation = true)]
     public async Task StandaloneFactory_CompatiblePreset_StreamsWithConfiguredProviderId(
         string protocol)
     {
@@ -44,11 +43,11 @@ public sealed class ProviderCompatiblePresetTests
                 }
             ]
         };
-        var adapter = StandaloneProviderFactory.CreateAdapter(config, providerId);
-        using var adapterLifetime = adapter as IDisposable;
+        await using var supervisor = new ProviderWorkerSupervisor(AppContext.BaseDirectory);
+        var adapter = StandaloneProviderFactory.CreateAdapter(config, providerId, supervisor);
 
         Assert.AreEqual(providerId, adapter.ProviderId);
-        AssertPresetType(protocol, adapter);
+        Assert.IsInstanceOfType<ProviderWorkerAdapter>(adapter);
         var events = await ProviderAdapterTestFactory.CollectAsync(
             adapter,
             ProviderAdapterTestFactory.CreateRequest(),
@@ -66,15 +65,15 @@ public sealed class ProviderCompatiblePresetTests
     [DataRow("Gemini")]
     [DataRow("GLM")]
     [DataRow("Custom")]
-    [Timeout(10_000, CooperativeCancellation = true)]
+    [Timeout(30_000, CooperativeCancellation = true)]
     public async Task StandaloneFactory_CompatiblePreset_EnablesToolCallingByDefault(
         string protocol)
     {
         await using var server = await FakeProviderServer.StartAsync(
             _ => ProviderProtocolScripts.ToolCall(ProviderAdapterKind.OpenAICompatible),
             _testContext.CancellationToken);
-        var adapter = CreateAdapter(protocol, server.BaseAddress);
-        using var adapterLifetime = adapter as IDisposable;
+        await using var supervisor = new ProviderWorkerSupervisor(AppContext.BaseDirectory);
+        var adapter = CreateAdapter(protocol, server.BaseAddress, supervisor);
         ToolDescriptor[] tools =
         [
             new("weather", "host", "get_weather", "Gets weather.", "{\"type\":\"object\"}")
@@ -96,7 +95,7 @@ public sealed class ProviderCompatiblePresetTests
     [DataRow("Gemini")]
     [DataRow("GLM")]
     [DataRow("Custom")]
-    [Timeout(10_000, CooperativeCancellation = true)]
+    [Timeout(30_000, CooperativeCancellation = true)]
     public async Task StandaloneFactory_CompatiblePreset_MapsRedactedAuthenticationFailure(
         string protocol)
     {
@@ -105,8 +104,8 @@ public sealed class ProviderCompatiblePresetTests
                 401,
                 $"{{\"error\":{{\"message\":\"{ProviderAdapterTestFactory.ApiKey} sensitive prompt\"}}}}"),
             _testContext.CancellationToken);
-        var adapter = CreateAdapter(protocol, server.BaseAddress);
-        using var adapterLifetime = adapter as IDisposable;
+        await using var supervisor = new ProviderWorkerSupervisor(AppContext.BaseDirectory);
+        var adapter = CreateAdapter(protocol, server.BaseAddress, supervisor);
 
         var events = await ProviderAdapterTestFactory.CollectAsync(
             adapter,
@@ -127,7 +126,7 @@ public sealed class ProviderCompatiblePresetTests
     [DataRow("Gemini")]
     [DataRow("GLM")]
     [DataRow("Custom")]
-    [Timeout(10_000, CooperativeCancellation = true)]
+    [Timeout(30_000, CooperativeCancellation = true)]
     public async Task StandaloneFactory_CompatiblePreset_CancellationStopsSlowStream(
         string protocol)
     {
@@ -136,8 +135,8 @@ public sealed class ProviderCompatiblePresetTests
                 ProviderAdapterKind.OpenAICompatible,
                 TimeSpan.FromSeconds(5)),
             _testContext.CancellationToken);
-        var adapter = CreateAdapter(protocol, server.BaseAddress);
-        using var adapterLifetime = adapter as IDisposable;
+        await using var supervisor = new ProviderWorkerSupervisor(AppContext.BaseDirectory);
+        var adapter = CreateAdapter(protocol, server.BaseAddress, supervisor);
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(
             _testContext.CancellationToken);
         await using var enumerator = adapter
@@ -208,25 +207,10 @@ public sealed class ProviderCompatiblePresetTests
         Assert.AreEqual("models", custom.DefaultProbePath);
     }
 
-    private static void AssertPresetType(string protocol, IRuntimeProviderAdapter adapter)
-    {
-        switch (protocol)
-        {
-            case "Gemini":
-                Assert.IsInstanceOfType<GeminiProviderAdapter>(adapter);
-                break;
-            case "GLM":
-                Assert.IsInstanceOfType<GlmProviderAdapter>(adapter);
-                break;
-            case "Custom":
-                Assert.IsInstanceOfType<OpenAICompatibleProviderAdapter>(adapter);
-                break;
-            default:
-                throw new ArgumentOutOfRangeException(nameof(protocol), protocol, null);
-        }
-    }
-
-    private static IRuntimeProviderAdapter CreateAdapter(string protocol, Uri baseAddress)
+    private static IRuntimeProviderAdapter CreateAdapter(
+        string protocol,
+        Uri baseAddress,
+        IProviderWorkerSupervisor supervisor)
     {
         var providerId = $"profile-{protocol}";
         var config = new StandaloneConfig
@@ -243,6 +227,6 @@ public sealed class ProviderCompatiblePresetTests
                 }
             ]
         };
-        return StandaloneProviderFactory.CreateAdapter(config, providerId);
+        return StandaloneProviderFactory.CreateAdapter(config, providerId, supervisor);
     }
 }

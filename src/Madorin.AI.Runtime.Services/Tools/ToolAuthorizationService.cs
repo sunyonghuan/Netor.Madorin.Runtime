@@ -532,9 +532,17 @@ public sealed class ToolAuthorizationService(
             MissingCapabilities: [capability],
             Reason: reason);
 
+    /// <summary>
+    /// 默认可在无宿主 Grant 时执行的工具：仅只读文件系统、记忆读取和宿主元工具。
+    /// 写入/删除/进程不得走默认授权，否则宿主无法拒绝，也无法用 Grant 提升 AllowOverwrite。
+    /// </summary>
     private static bool IsDefaultAllowedTool(string toolId) =>
         string.Equals(toolId, "mcli_memory_read", StringComparison.Ordinal)
-        || toolId.StartsWith("mcli_fs_", StringComparison.Ordinal)
+        || string.Equals(toolId, "mcli_fs_read", StringComparison.Ordinal)
+        || string.Equals(toolId, "mcli_fs_list", StringComparison.Ordinal)
+        || string.Equals(toolId, "mcli_fs_stat", StringComparison.Ordinal)
+        || string.Equals(toolId, "mcli_fs_inspect", StringComparison.Ordinal)
+        || string.Equals(toolId, "mcli_fs_search", StringComparison.Ordinal)
         || toolId.StartsWith("host.host..", StringComparison.Ordinal);
 
     private static string[] NormalizeValues(string[]? values) =>

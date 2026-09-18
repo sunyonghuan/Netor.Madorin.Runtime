@@ -46,11 +46,12 @@ public sealed partial class BuiltinFsToolExecutor
 
         return invocation.ToolId switch
         {
+            BuiltinToolRegistry.FileInspectToolId => PrepareInspect(invocation, arguments, policy),
             BuiltinToolRegistry.FileListToolId => PrepareList(invocation, arguments, policy),
             BuiltinToolRegistry.FileStatusToolId => PrepareStatus(invocation, arguments, policy),
             BuiltinToolRegistry.FileReadToolId => PrepareRead(invocation, arguments, policy),
             BuiltinToolRegistry.FileWriteToolId =>
-                PrepareWrite(invocation, arguments, permission, policy),
+                PrepareWriteMerged(invocation, arguments, permission, policy),
             BuiltinToolRegistry.FileAppendToolId =>
                 PrepareAppend(invocation, arguments, permission, policy),
             BuiltinToolRegistry.DirectoryCreateToolId =>
@@ -103,21 +104,21 @@ public sealed partial class BuiltinFsToolExecutor
         {
             var path = GetRequiredString(arguments, "path");
             var mode = GetRequiredString(arguments, "mode");
-            if (mode is not ("create" or "overwrite"))
+            if (mode is not ("create" or "overwrite" or "append" or "mkdir"))
             {
                 throw new ArgumentException(
-                    "Tool argument 'mode' must be create or overwrite.");
+                    "Tool argument 'mode' must be create, overwrite, append, or mkdir.");
             }
 
-            if (mode == "overwrite" && !permission.AllowOverwrite)
+            if (mode is "overwrite" or "append")
             {
-                throw new ToolPermissionRequiredException(
-                    "Overwriting this file is not permitted.");
-            }
-
-            if (mode == "overwrite")
-            {
-                _ = policy.ResolveReadPath(path);
+                var resolvedPath = policy.ResolveReadPath(path);
+                var exists = File.Exists(resolvedPath) || Directory.Exists(resolvedPath);
+                if (exists && !permission.AllowOverwrite)
+                {
+                    throw new ToolPermissionRequiredException(
+                        "Overwriting this file is not permitted.");
+                }
             }
         }
         else if (toolId is BuiltinToolRegistry.FileAppendToolId
@@ -183,6 +184,37 @@ public sealed partial class BuiltinFsToolExecutor
             or BuiltinToolRegistry.FileMoveToolId
             or BuiltinToolRegistry.FileDeleteToolId;
 
+    private static FsPreparedExecution PrepareInspect(
+        ToolInvocation invocation,
+        JsonElement arguments,
+        BuiltinFsPathPolicy policy)
+    {
+        var mode = GetRequiredString(arguments, "mode");
+        return mode switch
+        {
+            "list" => PrepareList(invocation, arguments, policy),
+            "stat" => PrepareStatus(invocation, arguments, policy),
+            _ => throw new ArgumentException("Tool argument 'mode' must be list or stat.")
+        };
+    }
+
+    private static FsPreparedExecution PrepareWriteMerged(
+        ToolInvocation invocation,
+        JsonElement arguments,
+        ToolPermissionContext permission,
+        BuiltinFsPathPolicy policy)
+    {
+        var mode = GetRequiredString(arguments, "mode");
+        return mode switch
+        {
+            "create" or "overwrite" => PrepareWrite(invocation, arguments, permission, policy),
+            "append" => PrepareAppend(invocation, arguments, permission, policy),
+            "mkdir" => PrepareDirectoryCreate(invocation, arguments, policy),
+            _ => throw new ArgumentException(
+                "Tool argument 'mode' must be create, overwrite, append, or mkdir.")
+        };
+    }
+
     private static FsPreparedExecution PrepareList(
         ToolInvocation invocation,
         JsonElement arguments,
@@ -245,24 +277,18 @@ public sealed partial class BuiltinFsToolExecutor
             throw new IOException("The write target already exists.");
         }
 
-        if (string.Equals(mode, "overwrite", StringComparison.Ordinal))
+        if (string.Equals(mode, "overwrite", StringComparison.Ordinal)
+            && exists
+            && !permission.AllowOverwrite)
         {
-            if (!permission.AllowOverwrite)
-            {
-                throw new ToolPermissionRequiredException(
-                    "Overwriting this file is not permitted.");
-            }
-
-            if (!File.Exists(resolvedPath))
-            {
-                throw new FileNotFoundException("The overwrite target was not found.", path);
-            }
+            throw new ToolPermissionRequiredException(
+                "Overwriting this file is not permitted.");
         }
 
         PinnedPath? existing = null;
         try
         {
-            existing = string.Equals(mode, "overwrite", StringComparison.Ordinal)
+            existing = string.Equals(mode, "overwrite", StringComparison.Ordinal) && exists
                 ? policy.PinReadFile(path, allowDeleteSharing: true)
                 : null;
             var parent = policy.PinWriteParent(path);
@@ -752,6 +778,7 @@ public sealed partial class BuiltinFsToolExecutor
         {
             writer.WriteStartObject();
             writer.WriteBoolean("written", true);
+            writer.WriteString("mode", GetRequiredString(arguments, "mode"));
             writer.WriteNumber("byteLength", bytes.Length);
             writer.WriteString("sha256", hash);
             writer.WriteEndObject();
@@ -791,7 +818,19 @@ public sealed partial class BuiltinFsToolExecutor
         var output = ToolJson.Write(writer =>
         {
             writer.WriteStartObject();
-            writer.WriteBoolean("appended", true);
+            if (string.Equals(
+                    invocation.ToolId,
+                    BuiltinToolRegistry.FileWriteToolId,
+                    StringComparison.Ordinal))
+            {
+                writer.WriteBoolean("written", true);
+                writer.WriteString("mode", "append");
+            }
+            else
+            {
+                writer.WriteBoolean("appended", true);
+            }
+
             writer.WriteNumber("byteLength", bytes.Length);
             writer.WriteString("sha256", hash);
             writer.WriteEndObject();
@@ -821,7 +860,21 @@ public sealed partial class BuiltinFsToolExecutor
         var output = ToolJson.Write(writer =>
         {
             writer.WriteStartObject();
-            writer.WriteBoolean("created", created);
+            if (string.Equals(
+                    invocation.ToolId,
+                    BuiltinToolRegistry.FileWriteToolId,
+                    StringComparison.Ordinal))
+            {
+                writer.WriteBoolean("written", true);
+                writer.WriteString("mode", "mkdir");
+                writer.WriteNull("byteLength");
+                writer.WriteNull("sha256");
+            }
+            else
+            {
+                writer.WriteBoolean("created", created);
+            }
+
             writer.WriteEndObject();
         });
         return Success(invocation, output);

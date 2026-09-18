@@ -2,7 +2,9 @@ using System.Text.Json;
 using Madorin.AI.Runtime.Cli.Config;
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Entities;
+using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Server;
+using Madorin.AI.Runtime.Server.ProviderWorkers;
 using Madorin.AI.Runtime.Services.Tools;
 using Madorin.AI.Runtime.Tools.Abstractions;
 using Madorin.AI.Runtime.Tools.Builtin;
@@ -40,21 +42,8 @@ public sealed class LiveProcessConsentE2ETests
             return;
         }
 
-        var provider = RuntimeProviderAdapterFactory.Create(
-            new ProviderConnectionConfig(
-                entry.Name,
-                entry.Protocol,
-                entry.BaseUrl,
-                entry.ApiKey,
-                entry.AuthenticationHeader,
-                entry.AuthenticationScheme,
-                entry.UserAgent,
-                entry.ApiVersion,
-                entry.Models,
-                entry.ConfigurationVersion,
-                entry.Capabilities,
-                entry.ProbePath,
-                entry.MaxTools));
+        var workerSupervisor = new ProviderWorkerSupervisor();
+        var provider = StandaloneProviderFactory.CreateAdapter(config, entry.Name, workerSupervisor);
 
         var root = Path.Combine(
             Path.GetTempPath(),
@@ -75,6 +64,7 @@ public sealed class LiveProcessConsentE2ETests
                 Guid.NewGuid().ToString("N"),
                 _ => provider)
             {
+                WorkerSupervisor = workerSupervisor,
                 ToolConsentHandler = autoConsent,
                 MinimumLogLevel = RuntimeDiagnosticLogLevel.Warning
             };

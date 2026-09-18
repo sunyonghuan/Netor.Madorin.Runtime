@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Madorin.AI.Runtime.Providers.WorkerHost\Madorin.AI.Runtime.Providers.WorkerHost.csproj" />
+    <ProjectReference Include="..\Madorin.AI.Runtime.Providers.Anthropic\Madorin.AI.Runtime.Providers.Anthropic.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>madorin-provider-anthropic</AssemblyName>
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>Madorin.AI.Runtime.Providers.Anthropic.Worker</RootNamespace>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <Import Project="..\ProviderWorker.props" />
+
+</Project>

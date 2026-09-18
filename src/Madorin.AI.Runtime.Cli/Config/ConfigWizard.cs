@@ -1,18 +1,23 @@
 using Madorin.AI.Runtime.Providers.Abstractions;
+using Madorin.AI.Runtime.Server.ProviderWorkers;
 
 namespace Madorin.AI.Runtime.Cli.Config;
 
 public static class ConfigWizard
 {
-    public static Task<StandaloneConfig> RunInitAsync(
+    public static async Task<StandaloneConfig> RunInitAsync(
         string configDirectory,
         ICliTerminal terminal,
-        CancellationToken ct = default) =>
-        RunInitAsync(
+        CancellationToken ct = default)
+    {
+        await using var supervisor = new ProviderWorkerSupervisor();
+        return await RunInitAsync(
             configDirectory,
             terminal,
-            StandaloneProviderFactory.CreateAdapter,
-            ct);
+            (config, providerId) =>
+                StandaloneProviderFactory.CreateAdapter(config, providerId, supervisor),
+            ct).ConfigureAwait(false);
+    }
 
     internal static async Task<StandaloneConfig> RunInitAsync(
         string configDirectory,
@@ -112,15 +117,19 @@ public static class ConfigWizard
         return config;
     }
 
-    public static Task<StandaloneConfig> RunEditAsync(
+    public static async Task<StandaloneConfig> RunEditAsync(
         string configDirectory,
         ICliTerminal terminal,
-        CancellationToken ct = default) =>
-        RunEditAsync(
+        CancellationToken ct = default)
+    {
+        await using var supervisor = new ProviderWorkerSupervisor();
+        return await RunEditAsync(
             configDirectory,
             terminal,
-            StandaloneProviderFactory.CreateAdapter,
-            ct);
+            (config, providerId) =>
+                StandaloneProviderFactory.CreateAdapter(config, providerId, supervisor),
+            ct).ConfigureAwait(false);
+    }
 
     internal static async Task<StandaloneConfig> RunEditAsync(
         string configDirectory,

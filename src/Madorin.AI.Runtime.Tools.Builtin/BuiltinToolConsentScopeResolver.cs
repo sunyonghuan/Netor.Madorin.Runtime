@@ -58,6 +58,7 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
         JsonElement arguments,
         string workspaceRoot) => toolId switch
         {
+            BuiltinToolRegistry.FileInspectToolId => InspectScope(workspaceRoot, arguments),
             BuiltinToolRegistry.FileListToolId => FileReadScope(
                 workspaceRoot,
                 BuiltinFsToolExecutor.GetOptionalString(arguments, "path") ?? ".",
@@ -74,9 +75,7 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
                 workspaceRoot,
                 BuiltinFsToolExecutor.GetRequiredString(arguments, "path"),
                 "bounded text search"),
-            BuiltinToolRegistry.FileWriteToolId => FileWriteScope(
-                workspaceRoot,
-                BuiltinFsToolExecutor.GetRequiredString(arguments, "path")),
+            BuiltinToolRegistry.FileWriteToolId => WriteMergedScope(workspaceRoot, arguments),
             BuiltinToolRegistry.FileAppendToolId => FileModifyScope(
                 workspaceRoot,
                 arguments,
@@ -92,14 +91,43 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
                 arguments,
                 "edit lines"),
             BuiltinToolRegistry.MemoryReadToolId => MemoryScope(arguments, "read memory", canGrantForRun: true),
+            BuiltinToolRegistry.MemoryWriteToolId => MemoryWriteScope(arguments),
             BuiltinToolRegistry.MemoryAppendToolId => MemoryScope(arguments, "append memory lines"),
             BuiltinToolRegistry.MemoryUpdateToolId => MemoryScope(arguments, "update memory lines"),
             BuiltinToolRegistry.MemoryDeleteToolId => MemoryScope(arguments, "delete memory lines"),
             BuiltinToolRegistry.ProcessRunToolId => ProcessScope(workspaceRoot, arguments),
             BuiltinToolRegistry.HttpRequestToolId => HttpScope(arguments),
             SkillScriptAuthorization.ToolId => ScriptScope(arguments, workspaceRoot),
+            SkillRuntimeTools.LoadToolId => FileReadScope(workspaceRoot, ".", "load skill"),
+            SkillRuntimeTools.ReadToolId => SkillReadScope(arguments, workspaceRoot),
+            SkillRuntimeTools.ReadResourceToolId => FileReadScope(workspaceRoot, ".", "read skill resource"),
+            SkillRuntimeTools.RunToolId => SkillRuntimeRunScope(arguments),
             _ => throw new NotSupportedException("The built-in tool scope is unknown.")
         };
+
+    private static ToolRequestedScope SkillRuntimeRunScope(JsonElement arguments)
+    {
+        var skill = arguments.TryGetProperty("skillName", out var skillElement)
+            ? skillElement.GetString()
+            : arguments.TryGetProperty("name", out var nameElement)
+                ? nameElement.GetString()
+                : null;
+        var script = arguments.TryGetProperty("script", out var scriptElement)
+            ? scriptElement.GetString()
+            : null;
+        if (string.IsNullOrWhiteSpace(skill) || string.IsNullOrWhiteSpace(script))
+        {
+            throw new InvalidDataException("A Skill script scope requires skillName and script.");
+        }
+
+        return Create(
+            $"skill:{skill}/{script}",
+            "Runtime user permissions apply to the declared Skill script",
+            readRoots: [],
+            writeRoots: [],
+            allowedExecutables: [],
+            canGrantForRun: true);
+    }
 
     private static ToolRequestedScope ScriptScope(JsonElement arguments, string workspaceRoot)
     {
@@ -123,6 +151,64 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
             allowedExecutables: [interpreter],
             allowedEnvironmentVariables: SkillScriptEnvironmentPolicy.InheritedVariableNames.ToArray(),
             canGrantForRun: true);
+    }
+
+    private static ToolRequestedScope InspectScope(string workspaceRoot, JsonElement arguments)
+    {
+        var mode = BuiltinFsToolExecutor.GetRequiredString(arguments, "mode");
+        return mode switch
+        {
+            "list" => FileReadScope(
+                workspaceRoot,
+                BuiltinFsToolExecutor.GetOptionalString(arguments, "path") ?? ".",
+                "directory listing"),
+            "stat" => FileReadScope(
+                workspaceRoot,
+                BuiltinFsToolExecutor.GetRequiredString(arguments, "path"),
+                "path metadata"),
+            _ => throw new InvalidDataException("Inspect mode must be list or stat.")
+        };
+    }
+
+    private static ToolRequestedScope WriteMergedScope(string workspaceRoot, JsonElement arguments)
+    {
+        var mode = BuiltinFsToolExecutor.GetRequiredString(arguments, "mode");
+        return mode switch
+        {
+            "append" => FileModifyScope(workspaceRoot, arguments, "append text"),
+            "mkdir" => DirectoryCreateScope(
+                workspaceRoot,
+                BuiltinFsToolExecutor.GetRequiredString(arguments, "path")),
+            "create" or "overwrite" => FileWriteScope(
+                workspaceRoot,
+                BuiltinFsToolExecutor.GetRequiredString(arguments, "path")),
+            _ => throw new InvalidDataException(
+                "Write mode must be create, overwrite, append, or mkdir.")
+        };
+    }
+
+    private static ToolRequestedScope MemoryWriteScope(JsonElement arguments)
+    {
+        var operation = BuiltinMemoryToolExecutor.GetRequiredString(arguments, "operation");
+        return operation switch
+        {
+            "append" => MemoryScope(arguments, "append memory lines"),
+            "update" => MemoryScope(arguments, "update memory lines"),
+            "delete" => MemoryScope(arguments, "delete memory lines"),
+            _ => throw new InvalidDataException(
+                "Memory write operation must be append, update, or delete.")
+        };
+    }
+
+    private static ToolRequestedScope SkillReadScope(JsonElement arguments, string workspaceRoot)
+    {
+        var resource = arguments.TryGetProperty("resource", out var resourceElement)
+            ? resourceElement.GetString()
+            : null;
+        return FileReadScope(
+            workspaceRoot,
+            ".",
+            string.IsNullOrWhiteSpace(resource) ? "load skill" : "read skill resource");
     }
 
     private static ToolRequestedScope FileReadScope(

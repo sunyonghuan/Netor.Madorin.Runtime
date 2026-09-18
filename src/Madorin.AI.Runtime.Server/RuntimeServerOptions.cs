@@ -1,5 +1,6 @@
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Providers.Abstractions;
+using Madorin.AI.Runtime.Server.ProviderWorkers;
 
 namespace Madorin.AI.Runtime.Server;
 
@@ -72,4 +73,6 @@ public sealed record RuntimeServerOptions
     public string? MemoryUserHome { get; init; }
 
     public Func<NextTurnSelection, IRuntimeProviderAdapter>? ProviderResolver { get; init; }
+
+    public IProviderWorkerSupervisor? WorkerSupervisor { get; init; }
 }

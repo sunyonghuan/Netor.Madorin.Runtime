@@ -5,6 +5,7 @@ using Madorin.AI.Runtime.Cli.Config;
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Server;
+using Madorin.AI.Runtime.Server.ProviderWorkers;
 using Madorin.AI.Runtime.Services.Memory;
 using Madorin.AI.Runtime.Services.Skills;
 
@@ -134,10 +135,14 @@ internal static class DoctorCommand
                 context.WorkspaceRoot,
                 context.DataDirectory)
             .ConfigureAwait(false));
+        await using var supervisor = new ProviderWorkerSupervisor();
+        var adapterFactory = providerAdapterFactory
+            ?? ((StandaloneConfig config, string id) =>
+                StandaloneProviderFactory.CreateAdapter(config, id, supervisor));
         checks.Add(await CheckProviderAsync(
                 providerId,
                 configInspection,
-                providerAdapterFactory ?? StandaloneProviderFactory.CreateAdapter)
+                adapterFactory)
             .ConfigureAwait(false));
         checks.Add(CheckTransport());
         checks.Add(CheckDirectory("logs", context.LogDirectory));
@@ -560,7 +565,7 @@ internal static class DoctorCommand
                 ? "; support experimental"
                 : string.Empty;
             var detail =
-                $"Provider '{providerId}' is reachable; {DescribeModelCatalog(models)}; source {probe.Source}; configuration {probe.ConfigurationVersion}{experimental}.";
+                $"Provider '{providerId}' worker is ready; {DescribeModelCatalog(models)}; probe source {probe.Source}; configuration {probe.ConfigurationVersion}{experimental}.";
             return new DoctorCheck(
                 "provider",
                 "ok",

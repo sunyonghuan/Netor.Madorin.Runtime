@@ -1,6 +1,6 @@
 # Agent 委派工具契约
 
-> 当前生效版本：Madorin.AI.Runtime V1（工具目录 `CatalogVersion` 为 `2.0.0`）
+> 当前生效版本：Madorin.AI.Runtime V1（工具目录 `CatalogVersion` 为 `3.0.0`）
 >
 > 本文描述 Runtime 暴露给模型的 Agent 委派工具，用于支持 `@agentname` 语义和多 Agent 协作。
 

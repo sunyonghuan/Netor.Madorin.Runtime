@@ -6,6 +6,7 @@ using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Entities;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Server;
+using Madorin.AI.Runtime.Server.ProviderWorkers;
 
 namespace Madorin.AI.Runtime.Cli.Commands;
 
@@ -575,8 +576,9 @@ internal static class SessionCommands
             throw new InvalidDataException(string.Join(Environment.NewLine, validationErrors));
         }
 
+        var workerSupervisor = new ProviderWorkerSupervisor();
         var providerResolver = providerResolverFactory is null
-            ? StandaloneProviderFactory.Create(config)
+            ? StandaloneProviderFactory.Create(config, workerSupervisor)
             : providerResolverFactory(config);
         return await LocalRuntime.StartAsync(new LocalRuntimeOptions(
             context.WorkspaceRoot,
@@ -585,7 +587,8 @@ internal static class SessionCommands
             context.RuntimeInstanceId,
             providerResolver)
         {
-            MemoryUserHome = memoryUserHome
+            MemoryUserHome = memoryUserHome,
+            WorkerSupervisor = workerSupervisor
         }).ConfigureAwait(false);
     }
 

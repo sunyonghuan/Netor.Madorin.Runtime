@@ -1,6 +1,4 @@
-using Madorin.AI.Runtime.Providers.Abstractions;
-
-namespace Madorin.AI.Runtime.Server;
+namespace Madorin.AI.Runtime.Providers.Abstractions;
 
 /// <summary>
 /// Shared provider connection surface used by host Registry and standalone factory.

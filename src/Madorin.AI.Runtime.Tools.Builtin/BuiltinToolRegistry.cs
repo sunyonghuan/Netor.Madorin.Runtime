@@ -6,9 +6,11 @@ namespace Madorin.AI.Runtime.Tools.Builtin;
 public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
 {
     public const string MemoryReadToolId = "mcli_memory_read";
+    public const string MemoryWriteToolId = "mcli_memory_write";
     public const string MemoryAppendToolId = "mcli_memory_append";
     public const string MemoryUpdateToolId = "mcli_memory_update";
     public const string MemoryDeleteToolId = "mcli_memory_delete";
+    public const string FileInspectToolId = "mcli_fs_inspect";
     public const string FileListToolId = "mcli_fs_list";
     public const string FileStatusToolId = "mcli_fs_stat";
     public const string FileReadToolId = "mcli_fs_read";
@@ -24,7 +26,7 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
     public const string HttpRequestToolId = "mcli_http";
     public const string DelegateToAgentToolId = "mcli_delegate_agent";
 
-    private static readonly IReadOnlyList<ToolDescriptor> Tools = Array.AsReadOnly<ToolDescriptor>(
+    private static readonly IReadOnlyList<ToolDescriptor> AdvertisedTools = Array.AsReadOnly<ToolDescriptor>(
     [
         new(
             MemoryReadToolId,
@@ -35,54 +37,23 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
             """{"type":"object","properties":{"scope":{"type":"string"},"lineCount":{"type":"integer"},"lines":{"type":"array","items":{"type":"object","properties":{"line":{"type":"integer"},"text":{"type":"string"}},"required":["line","text"],"additionalProperties":false}},"hash":{"type":["string","null"]}},"required":["scope","lineCount","lines","hash"],"additionalProperties":false}""",
             Capabilities: ["memory.read"]),
         new(
-            MemoryAppendToolId,
+            MemoryWriteToolId,
             "mcli",
-            "Append memory",
-            "Appends complete Markdown lines to global or project memory. Read first and pass its hash.",
-            """{"type":"object","properties":{"scope":{"type":"string","enum":["global","project"]},"lines":{"type":"array","minItems":1,"items":{"type":"string","minLength":1}},"expectedHash":{"type":["string","null"]}},"required":["scope","lines","expectedHash"],"additionalProperties":false}""",
-            """{"type":"object","properties":{"appended":{"type":"boolean"},"lineCount":{"type":"integer"},"hash":{"type":"string"},"appliesFrom":{"type":"string","const":"nextInvocation"}},"required":["appended","lineCount","hash","appliesFrom"],"additionalProperties":false}""",
+            "Write memory",
+            "Appends, replaces, or deletes lines in global or project memory. Read first and pass its hash.",
+            """{"type":"object","properties":{"scope":{"type":"string","enum":["global","project"]},"operation":{"type":"string","enum":["append","update","delete"]},"lines":{"type":"array","minItems":1,"items":{"type":"string","minLength":1}},"startLine":{"type":"integer","minimum":1},"endLine":{"type":"integer","minimum":1},"expectedHash":{"type":["string","null"]}},"required":["scope","operation","expectedHash"],"additionalProperties":false,"allOf":[{"if":{"properties":{"operation":{"const":"append"}},"required":["operation"]},"then":{"required":["lines"]}},{"if":{"properties":{"operation":{"const":"update"}},"required":["operation"]},"then":{"required":["startLine","endLine","lines"]}},{"if":{"properties":{"operation":{"const":"delete"}},"required":["operation"]},"then":{"required":["startLine","endLine"]}}]}""",
+            """{"type":"object","properties":{"written":{"type":"boolean"},"operation":{"type":"string"},"lineCount":{"type":"integer"},"hash":{"type":"string"},"appliesFrom":{"type":"string","const":"nextInvocation"}},"required":["written","operation","lineCount","hash","appliesFrom"],"additionalProperties":false}""",
             RiskLevel: "medium",
             RequiresApproval: true,
             Capabilities: ["memory.write"],
             Risk: ToolRiskLevel.Write),
         new(
-            MemoryUpdateToolId,
+            FileInspectToolId,
             "mcli",
-            "Update memory",
-            "Replaces an inclusive line range in global or project memory. Read first and pass its hash.",
-            """{"type":"object","properties":{"scope":{"type":"string","enum":["global","project"]},"startLine":{"type":"integer","minimum":1},"endLine":{"type":"integer","minimum":1},"lines":{"type":"array","minItems":1,"items":{"type":"string","minLength":1}},"expectedHash":{"type":"string"}},"required":["scope","startLine","endLine","lines","expectedHash"],"additionalProperties":false}""",
-            """{"type":"object","properties":{"updated":{"type":"boolean"},"lineCount":{"type":"integer"},"hash":{"type":"string"},"appliesFrom":{"type":"string","const":"nextInvocation"}},"required":["updated","lineCount","hash","appliesFrom"],"additionalProperties":false}""",
-            RiskLevel: "medium",
-            RequiresApproval: true,
-            Capabilities: ["memory.write"],
-            Risk: ToolRiskLevel.Write),
-        new(
-            MemoryDeleteToolId,
-            "mcli",
-            "Delete memory",
-            "Deletes an inclusive line range from global or project memory. Read first and pass its hash.",
-            """{"type":"object","properties":{"scope":{"type":"string","enum":["global","project"]},"startLine":{"type":"integer","minimum":1},"endLine":{"type":"integer","minimum":1},"expectedHash":{"type":"string"}},"required":["scope","startLine","endLine","expectedHash"],"additionalProperties":false}""",
-            """{"type":"object","properties":{"deleted":{"type":"boolean"},"lineCount":{"type":"integer"},"hash":{"type":"string"},"appliesFrom":{"type":"string","const":"nextInvocation"}},"required":["deleted","lineCount","hash","appliesFrom"],"additionalProperties":false}""",
-            RiskLevel: "high",
-            RequiresApproval: true,
-            Capabilities: ["memory.write"],
-            Risk: ToolRiskLevel.Destructive),
-        new(
-            FileListToolId,
-            "mcli",
-            "List files",
-            "Lists files and directories.",
-            """{"type":"object","properties":{"path":{"type":"string"},"pattern":{"type":"string"},"recursive":{"type":"boolean"},"maxDepth":{"type":"integer","minimum":0,"maximum":32},"limit":{"type":"integer","minimum":1,"maximum":10000}},"additionalProperties":false}""",
-            """{"type":"object","properties":{"entries":{"type":"array"},"truncated":{"type":"boolean"}},"required":["entries","truncated"],"additionalProperties":false}""",
-            Capabilities: ["filesystem.read"],
-            Risk: ToolRiskLevel.SensitiveRead),
-        new(
-            FileStatusToolId,
-            "mcli",
-            "Inspect path",
-            "Gets file or directory metadata.",
-            """{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}""",
-            """{"type":"object","properties":{"exists":{"type":"boolean"},"kind":{"type":["string","null"]},"contentKind":{"type":["string","null"]},"byteLength":{"type":["integer","null"]},"lastWriteTime":{"type":["string","null"]},"sha256":{"type":["string","null"]}},"required":["exists","kind","contentKind","byteLength","lastWriteTime","sha256"],"additionalProperties":false}""",
+            "Inspect files",
+            "Lists a directory or returns path metadata.",
+            """{"type":"object","properties":{"mode":{"type":"string","enum":["list","stat"]},"path":{"type":"string"},"pattern":{"type":"string"},"recursive":{"type":"boolean"},"maxDepth":{"type":"integer","minimum":0,"maximum":32},"limit":{"type":"integer","minimum":1,"maximum":10000}},"required":["mode"],"additionalProperties":false,"allOf":[{"if":{"properties":{"mode":{"const":"stat"}},"required":["mode"]},"then":{"required":["path"]}}]}""",
+            """{"oneOf":[{"type":"object","properties":{"entries":{"type":"array"},"truncated":{"type":"boolean"}},"required":["entries","truncated"],"additionalProperties":false},{"type":"object","properties":{"exists":{"type":"boolean"},"kind":{"type":["string","null"]},"contentKind":{"type":["string","null"]},"byteLength":{"type":["integer","null"]},"lastWriteTime":{"type":["string","null"]},"sha256":{"type":["string","null"]}},"required":["exists","kind","contentKind","byteLength","lastWriteTime","sha256"],"additionalProperties":false}]}""",
             Capabilities: ["filesystem.read"],
             Risk: ToolRiskLevel.SensitiveRead),
         new(
@@ -98,33 +69,13 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
             FileWriteToolId,
             "mcli",
             "Write file",
-            "Creates or replaces a text file.",
-            """{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"},"encoding":{"type":"string","enum":["utf-8","utf-16le","utf-16be","gb2312","gbk","gb18030","ascii","latin1"]},"mode":{"type":"string","enum":["create","overwrite"]},"expectedHash":{"type":"string"},"bom":{"type":"string","enum":["preserve","add","remove"]},"lineEnding":{"type":"string","enum":["preserve","lf","crlf"]}},"required":["path","content","encoding","mode"],"additionalProperties":false}""",
-            """{"type":"object","properties":{"written":{"type":"boolean"},"byteLength":{"type":"integer"},"sha256":{"type":"string"}},"required":["written","byteLength","sha256"],"additionalProperties":false}""",
+            "Creates, overwrites, or appends a text file, or creates a directory.",
+            """{"type":"object","properties":{"path":{"type":"string"},"mode":{"type":"string","enum":["create","overwrite","append","mkdir"]},"content":{"type":"string"},"encoding":{"type":"string","enum":["utf-8","utf-16le","utf-16be","gb2312","gbk","gb18030","ascii","latin1"]},"expectedHash":{"type":"string"},"bom":{"type":"string","enum":["preserve","add","remove"]},"lineEnding":{"type":"string","enum":["preserve","lf","crlf"]},"createParents":{"type":"boolean"}},"required":["path","mode"],"additionalProperties":false,"allOf":[{"if":{"properties":{"mode":{"enum":["create","overwrite","append"]}},"required":["mode"]},"then":{"required":["content","encoding"]}}]}""",
+            """{"oneOf":[{"type":"object","properties":{"written":{"type":"boolean"},"mode":{"type":"string"},"byteLength":{"type":["integer","null"]},"sha256":{"type":["string","null"]}},"required":["written","mode","byteLength","sha256"],"additionalProperties":false},{"type":"object","properties":{"written":{"type":"boolean"},"byteLength":{"type":"integer"},"sha256":{"type":"string"}},"required":["written","byteLength","sha256"],"additionalProperties":false}]}""",
             RiskLevel: "medium",
             Capabilities: ["filesystem.write"],
             Risk: ToolRiskLevel.Write,
             IsIdempotent: false),
-        new(
-            FileAppendToolId,
-            "mcli",
-            "Append file",
-            "Appends text to a file.",
-            """{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"},"encoding":{"type":"string","enum":["utf-8","utf-16le","utf-16be","gb2312","gbk","gb18030","ascii","latin1"]},"expectedHash":{"type":"string"}},"required":["path","content","encoding","expectedHash"],"additionalProperties":false}""",
-            """{"type":"object","properties":{"appended":{"type":"boolean"},"byteLength":{"type":"integer"},"sha256":{"type":"string"}},"required":["appended","byteLength","sha256"],"additionalProperties":false}""",
-            RiskLevel: "medium",
-            Capabilities: ["filesystem.read", "filesystem.write"],
-            Risk: ToolRiskLevel.Write,
-            IsIdempotent: false),
-        new(
-            DirectoryCreateToolId,
-            "mcli",
-            "Create directory",
-            "Creates a directory.",
-            """{"type":"object","properties":{"path":{"type":"string"},"createParents":{"type":"boolean"}},"required":["path"],"additionalProperties":false}""",
-            """{"type":"object","properties":{"created":{"type":"boolean"}},"required":["created"],"additionalProperties":false}""",
-            Capabilities: ["filesystem.write"],
-            Risk: ToolRiskLevel.Write),
         new(
             FileCopyToolId,
             "mcli",
@@ -207,7 +158,10 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
             IsIdempotent: false)
     ]);
 
-    public string CatalogVersion => "2.0.0";
+    private static readonly IReadOnlyList<ToolDescriptor> Tools = Array.AsReadOnly(
+        [.. AdvertisedTools, .. BuiltinToolAliasCatalog.Tools]);
+
+    public string CatalogVersion => "3.0.0";
 
     public IReadOnlyList<ToolDescriptor> GetTools() => Tools;
 

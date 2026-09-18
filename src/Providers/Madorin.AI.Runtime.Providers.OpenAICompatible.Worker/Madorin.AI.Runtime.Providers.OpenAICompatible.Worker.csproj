@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Madorin.AI.Runtime.Providers.WorkerHost\Madorin.AI.Runtime.Providers.WorkerHost.csproj" />
+    <ProjectReference Include="..\Madorin.AI.Runtime.Providers.OpenAICompatible\Madorin.AI.Runtime.Providers.OpenAICompatible.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>madorin-provider-openai-compatible</AssemblyName>
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>Madorin.AI.Runtime.Providers.OpenAICompatible.Worker</RootNamespace>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <Import Project="..\ProviderWorker.props" />
+
+</Project>

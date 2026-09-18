@@ -3,6 +3,7 @@ using Madorin.AI.Runtime.Cli.Config;
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Providers.Ollama;
+using Madorin.AI.Runtime.Server.ProviderWorkers;
 using Madorin.AI.Runtime.Tools.Abstractions;
 
 namespace Madorin.AI.Runtime.Provider.Tests;
@@ -62,8 +63,8 @@ public sealed class OllamaProviderTests
         config.Providers[0].ApiKey = ProviderAdapterTestFactory.ApiKey;
         config.Providers[0].AuthenticationHeader = "X-Ollama-Key";
         config.Providers[0].AuthenticationScheme = "Token";
-        var created = StandaloneProviderFactory.CreateAdapter(config, "ollama-local");
-        using var adapterLifetime = created as IDisposable;
+        await using var supervisor = new ProviderWorkerSupervisor(AppContext.BaseDirectory);
+        var created = StandaloneProviderFactory.CreateAdapter(config, "ollama-local", supervisor);
 
         await ProviderAdapterTestFactory.CollectAsync(
             created,

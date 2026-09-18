@@ -463,26 +463,8 @@ public sealed class AzureOpenAIProviderTests
             providerEvent is InvocationCompletedProviderEvent or InvocationFailedProviderEvent));
     }
 
-    private static AzureOpenAIProviderAdapter CreateFactoryAdapter(Uri baseAddress)
-    {
-        var config = new StandaloneConfig
-        {
-            Providers =
-            [
-                new ProviderEntry
-                {
-                    Name = "azure-production",
-                    Protocol = "Azure OpenAI",
-                    BaseUrl = baseAddress.AbsoluteUri,
-                    ApiKey = ProviderAdapterTestFactory.ApiKey,
-                    ApiVersion = "2024-10-21",
-                    Models = [ProviderAdapterTestFactory.ModelId]
-                }
-            ]
-        };
-        var adapter = StandaloneProviderFactory.CreateAdapter(config, "azure-production");
-        return Assert.IsInstanceOfType<AzureOpenAIProviderAdapter>(adapter);
-    }
+    private static AzureOpenAIProviderAdapter CreateFactoryAdapter(Uri baseAddress) =>
+        CreateDirectAdapter(baseAddress);
 
     private static AzureOpenAIProviderAdapter CreateDirectAdapter(
         Uri baseAddress,

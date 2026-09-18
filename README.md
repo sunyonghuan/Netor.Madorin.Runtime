@@ -276,11 +276,18 @@ dotnet test .\Madorin.AI.Runtime.slnx -c Debug --no-build
 # 验证 CLI 命令树
 dotnet run --project .\src\Madorin.AI.Runtime.Cli --no-build -- --help
 
-# 发布 win-x64 Native AOT
-dotnet publish .\src\Madorin.AI.Runtime.Cli `
-  -c Release `
-  -r win-x64 `
-  --self-contained true
+# 发布 win-x64 Native AOT（CLI + 10 个 Provider Worker，同 bin）
+.\build\madorin-cli.publish.cmd -Rid win-x64
+# 或：pwsh -File .\build\madorin-cli.publish.ps1 -Rid win-x64
 ```
+
+Linux / macOS（在对应 OS 上执行；有 `pwsh` 时委托同一套 `.ps1`，否则走脚本内原生 bash 发布）：
+
+```bash
+./build/madorin-cli.publish.linux.sh --rid linux-x64
+./build/madorin-cli.publish.macos.sh --rid osx-arm64
+```
+
+产物在 `releases/Madorin-Cli/madorin-cli/bin/`：`madorin-cli`、10 个 `madorin-provider-*`、`providers.manifest.json`。Worker 清单见 `build/provider-workers.json`。方案见 [12-Provider 进程隔离 AOT 按需加载](./docs/方案设计/12-Provider进程隔离AOT按需加载方案.md)。
 
 Release 版本默认启用 Native AOT。发布时需要保持零 IL 裁剪 / AOT 警告，并继续使用源生成上下文来保证协议 JSON 的稳定性。

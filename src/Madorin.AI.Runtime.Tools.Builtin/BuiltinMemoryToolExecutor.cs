@@ -11,6 +11,7 @@ public sealed class BuiltinMemoryToolExecutor(MemoryFileService memoryFileServic
 
     public bool CanExecute(string toolId) =>
         toolId is BuiltinToolRegistry.MemoryReadToolId
+            or BuiltinToolRegistry.MemoryWriteToolId
             or BuiltinToolRegistry.MemoryAppendToolId
             or BuiltinToolRegistry.MemoryUpdateToolId
             or BuiltinToolRegistry.MemoryDeleteToolId;
@@ -42,6 +43,8 @@ public sealed class BuiltinMemoryToolExecutor(MemoryFileService memoryFileServic
             {
                 BuiltinToolRegistry.MemoryReadToolId =>
                     await ReadAsync(invocation, arguments.RootElement, ct).ConfigureAwait(false),
+                BuiltinToolRegistry.MemoryWriteToolId =>
+                    await WriteAsync(invocation, arguments.RootElement, ct).ConfigureAwait(false),
                 BuiltinToolRegistry.MemoryAppendToolId =>
                     await AppendAsync(invocation, arguments.RootElement, ct).ConfigureAwait(false),
                 BuiltinToolRegistry.MemoryUpdateToolId =>
@@ -103,6 +106,21 @@ public sealed class BuiltinMemoryToolExecutor(MemoryFileService memoryFileServic
             writer.WriteEndObject();
         });
         return new ToolResult(invocation.CallId, invocation.ToolId, true, output);
+    }
+
+    private async Task<ToolResult> WriteAsync(
+        ToolInvocation invocation,
+        JsonElement arguments,
+        CancellationToken ct)
+    {
+        var operation = GetRequiredString(arguments, "operation");
+        return operation switch
+        {
+            "append" => await AppendAsync(invocation, arguments, ct).ConfigureAwait(false),
+            "update" => await UpdateAsync(invocation, arguments, ct).ConfigureAwait(false),
+            "delete" => await DeleteAsync(invocation, arguments, ct).ConfigureAwait(false),
+            _ => throw new ArgumentException("Tool argument 'operation' must be append, update, or delete.")
+        };
     }
 
     private async Task<ToolResult> AppendAsync(
@@ -170,7 +188,27 @@ public sealed class BuiltinMemoryToolExecutor(MemoryFileService memoryFileServic
         var output = ToolJson.Write(writer =>
         {
             writer.WriteStartObject();
-            writer.WriteBoolean(action, true);
+            if (string.Equals(
+                    invocation.ToolId,
+                    BuiltinToolRegistry.MemoryWriteToolId,
+                    StringComparison.Ordinal))
+            {
+                writer.WriteBoolean("written", true);
+                writer.WriteString(
+                    "operation",
+                    action switch
+                    {
+                        "appended" => "append",
+                        "updated" => "update",
+                        "deleted" => "delete",
+                        _ => action
+                    });
+            }
+            else
+            {
+                writer.WriteBoolean(action, true);
+            }
+
             writer.WriteNumber("lineCount", MemoryFileService.SplitLines(snapshot.Content).Count);
             writer.WriteString("hash", snapshot.Hash);
             writer.WriteString("appliesFrom", "nextInvocation");
@@ -270,7 +308,8 @@ public sealed class BuiltinMemoryToolExecutor(MemoryFileService memoryFileServic
     }
 
     private static bool IsWriteTool(string toolId) =>
-        toolId is BuiltinToolRegistry.MemoryAppendToolId
+        toolId is BuiltinToolRegistry.MemoryWriteToolId
+            or BuiltinToolRegistry.MemoryAppendToolId
             or BuiltinToolRegistry.MemoryUpdateToolId
             or BuiltinToolRegistry.MemoryDeleteToolId;
 

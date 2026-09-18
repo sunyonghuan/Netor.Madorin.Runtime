@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Providers.Abstractions;
+using Madorin.AI.Runtime.Server.ProviderWorkers;
 
 namespace Madorin.AI.Runtime.Server;
 
@@ -12,6 +13,12 @@ public sealed class HostProviderRegistry
 {
     private readonly ConcurrentDictionary<string, RegistryEntry> _entries =
         new(StringComparer.Ordinal);
+    private readonly IProviderWorkerSupervisor? _workerSupervisor;
+
+    public HostProviderRegistry(IProviderWorkerSupervisor? workerSupervisor = null)
+    {
+        _workerSupervisor = workerSupervisor;
+    }
 
     public Func<NextTurnSelection, IRuntimeProviderAdapter> CreateResolver() =>
         selection =>
@@ -26,7 +33,7 @@ public sealed class HostProviderRegistry
         foreach (var config in configs)
         {
             var normalized = NormalizeAndValidate(config);
-            _entries[normalized.ProviderId] = new RegistryEntry(normalized);
+            _entries[normalized.ProviderId] = new RegistryEntry(normalized, _workerSupervisor);
         }
     }
 
@@ -50,7 +57,7 @@ public sealed class HostProviderRegistry
         }
 
         var updated = existing.Config with { ApiKey = credential.Trim() };
-        _entries[key] = new RegistryEntry(updated);
+        _entries[key] = new RegistryEntry(updated, _workerSupervisor);
         return true;
     }
 
@@ -122,7 +129,7 @@ public sealed class HostProviderRegistry
     private static string? NormalizeOptional(string? value) =>
         string.IsNullOrWhiteSpace(value) ? value : value.Trim();
 
-    private sealed class RegistryEntry(HostProviderConfig config)
+    private sealed class RegistryEntry(HostProviderConfig config, IProviderWorkerSupervisor? workerSupervisor)
     {
         private readonly object _gate = new();
         private IRuntimeProviderAdapter? _adapter;
@@ -133,19 +140,36 @@ public sealed class HostProviderRegistry
         {
             lock (_gate)
             {
-                return _adapter ??= RuntimeProviderAdapterFactory.Create(
-                    new ProviderConnectionConfig(
-                        Config.ProviderId,
-                        Config.Protocol,
-                        Config.BaseUrl,
-                        Config.ApiKey,
-                        Config.AuthenticationHeader,
-                        Config.AuthenticationScheme,
-                        Config.UserAgent,
-                        Config.ApiVersion,
-                        Config.Models,
-                        Config.ConfigurationVersion));
+                return _adapter ??= CreateAdapter();
             }
+        }
+
+        private IRuntimeProviderAdapter CreateAdapter()
+        {
+            var connection = new ProviderConnectionConfig(
+                Config.ProviderId,
+                Config.Protocol,
+                Config.BaseUrl,
+                Config.ApiKey,
+                Config.AuthenticationHeader,
+                Config.AuthenticationScheme,
+                Config.UserAgent,
+                Config.ApiVersion,
+                Config.Models,
+                Config.ConfigurationVersion);
+            if (!RuntimeProviderAdapterFactory.TryMapProtocolToSlug(connection.Protocol, out _))
+            {
+                throw new InvalidOperationException(
+                    $"Provider '{Config.ProviderId}' uses unsupported protocol '{connection.Protocol}'.");
+            }
+
+            if (workerSupervisor is null)
+            {
+                throw new InvalidOperationException(
+                    $"Provider '{Config.ProviderId}' protocol '{connection.Protocol}' requires a provider worker supervisor.");
+            }
+
+            return workerSupervisor.CreateAdapter(connection.Protocol, connection);
         }
     }
 }

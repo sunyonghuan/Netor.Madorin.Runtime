@@ -1,5 +1,6 @@
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Providers.Abstractions;
+using Madorin.AI.Runtime.Server.ProviderWorkers;
 using Madorin.AI.Runtime.Services.Memory;
 using Madorin.AI.Runtime.Services.Tools;
 
@@ -34,4 +35,9 @@ public sealed record LocalRuntimeOptions(
 
     /// <summary>Additional host Skill directories, appended after automatic sources.</summary>
     public IReadOnlyList<SkillSourceDescriptor>? SkillSources { get; init; }
+
+    /// <summary>
+    /// Per-Runtime worker supervisor. When null, <see cref="LocalRuntime"/> creates one.
+    /// </summary>
+    public IProviderWorkerSupervisor? WorkerSupervisor { get; init; }
 }

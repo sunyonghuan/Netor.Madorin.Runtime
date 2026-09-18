@@ -21,7 +21,8 @@ public sealed partial class BuiltinFsToolExecutor : IToolExecutor
     }
 
     public bool CanExecute(string toolId) =>
-        string.Equals(toolId, BuiltinToolRegistry.FileListToolId, StringComparison.Ordinal)
+        string.Equals(toolId, BuiltinToolRegistry.FileInspectToolId, StringComparison.Ordinal)
+        || string.Equals(toolId, BuiltinToolRegistry.FileListToolId, StringComparison.Ordinal)
         || string.Equals(toolId, BuiltinToolRegistry.FileStatusToolId, StringComparison.Ordinal)
         || string.Equals(toolId, BuiltinToolRegistry.FileReadToolId, StringComparison.Ordinal)
         || string.Equals(toolId, BuiltinToolRegistry.FileWriteToolId, StringComparison.Ordinal)

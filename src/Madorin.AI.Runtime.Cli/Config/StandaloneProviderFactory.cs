@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Providers.Abstractions;
+using Madorin.AI.Runtime.Server.ProviderWorkers;
 
 namespace Madorin.AI.Runtime.Cli.Config;
 
@@ -11,27 +12,41 @@ namespace Madorin.AI.Runtime.Cli.Config;
 /// </summary>
 internal static class StandaloneProviderFactory
 {
-    public static Func<NextTurnSelection, IRuntimeProviderAdapter> Create(StandaloneConfig config)
+    public static Func<NextTurnSelection, IRuntimeProviderAdapter> Create(StandaloneConfig config) =>
+        Create(config, workerSupervisor: null);
+
+    public static Func<NextTurnSelection, IRuntimeProviderAdapter> Create(
+        StandaloneConfig config,
+        IProviderWorkerSupervisor? workerSupervisor)
     {
         ArgumentNullException.ThrowIfNull(config);
         var cache = new ConcurrentDictionary<string, IRuntimeProviderAdapter>(StringComparer.Ordinal);
         return selection =>
         {
             var providerId = selection.DefaultSelection.ProviderId;
-            return cache.GetOrAdd(providerId, id => BuildAdapter(config, id));
+            return cache.GetOrAdd(providerId, id => BuildAdapter(config, id, workerSupervisor));
         };
     }
 
     public static IRuntimeProviderAdapter CreateAdapter(
         StandaloneConfig config,
-        string providerId)
+        string providerId) =>
+        CreateAdapter(config, providerId, workerSupervisor: null);
+
+    public static IRuntimeProviderAdapter CreateAdapter(
+        StandaloneConfig config,
+        string providerId,
+        IProviderWorkerSupervisor? workerSupervisor)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentException.ThrowIfNullOrWhiteSpace(providerId);
-        return BuildAdapter(config, providerId);
+        return BuildAdapter(config, providerId, workerSupervisor);
     }
 
-    private static IRuntimeProviderAdapter BuildAdapter(StandaloneConfig config, string providerId)
+    private static IRuntimeProviderAdapter BuildAdapter(
+        StandaloneConfig config,
+        string providerId,
+        IProviderWorkerSupervisor? workerSupervisor)
     {
         var entry = config.Providers.FirstOrDefault(p =>
             p.Name.Equals(providerId, StringComparison.Ordinal))
@@ -44,21 +59,33 @@ internal static class StandaloneProviderFactory
                 $"Provider '{providerId}' uses unsupported protocol '{entry.Protocol}'.");
         }
 
-        // Shared Protocol → Adapter mapping (host Registry uses the same factory).
-        return Server.RuntimeProviderAdapterFactory.Create(
-            new Server.ProviderConnectionConfig(
-                entry.Name,
-                entry.Protocol,
-                entry.BaseUrl,
-                entry.ApiKey,
-                entry.AuthenticationHeader,
-                entry.AuthenticationScheme,
-                entry.UserAgent,
-                entry.ApiVersion,
-                entry.Models,
-                entry.ConfigurationVersion,
-                entry.Capabilities,
-                entry.ProbePath,
-                entry.MaxTools));
+        var connection = new ProviderConnectionConfig(
+            entry.Name,
+            entry.Protocol,
+            entry.BaseUrl,
+            entry.ApiKey,
+            entry.AuthenticationHeader,
+            entry.AuthenticationScheme,
+            entry.UserAgent,
+            entry.ApiVersion,
+            entry.Models,
+            entry.ConfigurationVersion,
+            entry.Capabilities,
+            entry.ProbePath,
+            entry.MaxTools);
+
+        if (!Server.RuntimeProviderAdapterFactory.TryMapProtocolToSlug(connection.Protocol, out _))
+        {
+            throw new InvalidOperationException(
+                $"Provider '{providerId}' uses unsupported protocol '{connection.Protocol}'.");
+        }
+
+        if (workerSupervisor is null)
+        {
+            throw new InvalidOperationException(
+                $"Provider '{providerId}' protocol '{connection.Protocol}' requires a provider worker supervisor.");
+        }
+
+        return workerSupervisor.CreateAdapter(connection.Protocol, connection);
     }
 }

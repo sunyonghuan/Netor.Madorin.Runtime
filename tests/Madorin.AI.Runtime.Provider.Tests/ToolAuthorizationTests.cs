@@ -641,6 +641,71 @@ public sealed class ToolAuthorizationTests
         Assert.IsNotNull(granted.EffectivePermission);
     }
 
+    [TestMethod]
+    public async Task AuthorizeAsync_FileWrite_RequiresExplicitGrant()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync(TestContext.CancellationToken);
+        await SqliteSchema.EnsureCreatedAsync(connection, TestContext.CancellationToken);
+        using var store = new SqliteToolIntentRepository(connection);
+        var service = new ToolAuthorizationService(
+            store,
+            RuntimeToolPolicy.CreateRestricted(_workspace));
+        var invocation = new ToolInvocation(
+            "call-write",
+            BuiltinToolRegistry.FileWriteToolId,
+            "agent-root",
+            ParentAgentId: null,
+            """{"path":"out.txt","mode":"create","content":"x","encoding":"utf-8"}""",
+            "run-1",
+            "session-1",
+            "invocation-write");
+        var descriptor = new ToolDescriptor(
+            invocation.ToolId,
+            "mcli",
+            "Write file",
+            "Writes a file.",
+            "{\"type\":\"object\"}",
+            "{\"type\":\"object\"}",
+            Risk: ToolRiskLevel.Write,
+            Capabilities: ["filesystem.write"]);
+
+        var denied = await service.AuthorizeAsync(
+            invocation,
+            descriptor,
+            ct: TestContext.CancellationToken);
+        Assert.AreEqual(ToolAuthorizationDecision.Denied, denied.Decision);
+
+        await service.SaveGrantAsync(
+            new ToolGrant(
+                "grant-write",
+                invocation.RunId,
+                _workspace,
+                [_workspace],
+                [_workspace],
+                AllowOverwrite: true,
+                AllowMove: false,
+                AllowDelete: false,
+                AllowedExecutables: [],
+                AllowPowerShell: false,
+                new NetworkPolicy(),
+                DateTimeOffset.UtcNow.AddHours(1),
+                AllowDelegation: false,
+                DelegatedAgentIds: [],
+                AllowedToolIds: [invocation.ToolId],
+                MaximumRisk: ToolRiskLevel.Write,
+                AgentId: invocation.AgentId),
+            ct: TestContext.CancellationToken);
+
+        var granted = await service.AuthorizeAsync(
+            invocation,
+            descriptor,
+            ct: TestContext.CancellationToken);
+        Assert.AreEqual(ToolAuthorizationDecision.Granted, granted.Decision);
+        Assert.IsNotNull(granted.EffectivePermission);
+        Assert.IsTrue(granted.EffectivePermission.AllowOverwrite);
+    }
+
     private ToolGrant CreateGrant(
         string grantId,
         string agentId,

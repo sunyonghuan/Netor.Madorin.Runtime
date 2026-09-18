@@ -8,7 +8,9 @@ using Madorin.AI.Runtime.Client;
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Contracts.Serialization;
 using Madorin.AI.Runtime.Entities;
+using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Server;
+using Madorin.AI.Runtime.Server.ProviderWorkers;
 
 if (args.Length == 4 && args[0] == "--timed-read")
 {
@@ -63,11 +65,13 @@ internal static partial class Smoke
         Save("environment.json", new { started = DateTimeOffset.Now, provider = _provider, model = _model,
             endpoint = entry.BaseUrl, protocol = entry.Protocol, sourceCommit = "9d5ad99492efb7d790055ad6f2489cf3fbd36bfb" });
         var secret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+        var workerSupervisor = new ProviderWorkerSupervisor();
         await using var server = await RuntimeServer.StartAsync(new RuntimeServerOptions(_workspace)
         {
             InstanceId = Guid.NewGuid().ToString("N"), PipePrefix = "madorin.real-smoke." + Guid.NewGuid().ToString("N"),
             HandshakeSecret = secret, MemoryUserHome = Path.Combine(output, "isolated-home"),
-            ProviderResolver = _ => RuntimeProviderAdapterFactory.Create(connection),
+            WorkerSupervisor = workerSupervisor,
+            ProviderResolver = _ => workerSupervisor.CreateAdapter(connection.Protocol, connection),
             MinimumLogLevel = RuntimeDiagnosticLogLevel.Warning,
             RunTimeout = TimeSpan.FromMinutes(8)
         });
@@ -105,7 +109,7 @@ internal static partial class Smoke
     }
 
     private static AgentRef Agent(string id, string prompt) => new(id, "smoke-v1", prompt, _provider, _model,
-        AllowedToolIds: ["mcli_fs_read", "mcli_fs_write", "mcli_fs_list", "mcli_process"]);
+        AllowedToolIds: ["mcli_fs_read", "mcli_fs_write", "mcli_fs_inspect", "mcli_fs_list", "mcli_process"]);
     private static NextTurnSelection Select(RuntimeMode mode, ModeOptions options) =>
         new(1, mode, new DefaultSelection(_provider, _model), options);
     private static void Save(string path, object? value) =>

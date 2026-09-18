@@ -247,6 +247,42 @@ public sealed class BuiltinToolConsentScopeResolverTests
         Assert.IsTrue(delete.IsSuccess, delete.Error);
         Assert.AreEqual("memory:project", delete.Scope!.TargetSummary);
         Assert.IsFalse(delete.Scope.CanGrantForRun);
+
+        var write = Resolve(
+            BuiltinToolRegistry.MemoryWriteToolId,
+            """{"scope":"project","operation":"append","lines":["- never print this memory value"],"expectedHash":null}""");
+        Assert.IsTrue(write.IsSuccess, write.Error);
+        Assert.AreEqual("append memory lines", write.Scope!.DetailSummary);
+        Assert.IsFalse(write.Scope.CanGrantForRun);
+        Assert.DoesNotContain("never print", write.Scope.DetailSummary, StringComparison.Ordinal);
+    }
+
+    [TestMethod]
+    public void Resolve_InspectAndMergedWrite_MatchLegacyScopes()
+    {
+        var list = Resolve(
+            BuiltinToolRegistry.FileInspectToolId,
+            """{"mode":"list","path":"."}""");
+        var stat = Resolve(
+            BuiltinToolRegistry.FileInspectToolId,
+            """{"mode":"stat","path":"existing.txt"}""");
+        File.WriteAllText(Path.Combine(_workspace, "existing.txt"), "existing");
+        var append = Resolve(
+            BuiltinToolRegistry.FileWriteToolId,
+            """{"path":"existing.txt","mode":"append","content":"more","encoding":"utf-8","expectedHash":"hash"}""");
+        var mkdir = Resolve(
+            BuiltinToolRegistry.FileWriteToolId,
+            """{"path":"docs","mode":"mkdir"}""");
+
+        Assert.IsTrue(list.IsSuccess, list.Error);
+        Assert.AreEqual("directory listing", list.Scope!.DetailSummary);
+        Assert.IsTrue(stat.IsSuccess, stat.Error);
+        Assert.AreEqual("path metadata", stat.Scope!.DetailSummary);
+        Assert.IsTrue(append.IsSuccess, append.Error);
+        Assert.AreEqual("append text", append.Scope!.DetailSummary);
+        Assert.IsTrue(append.Scope.AllowOverwrite);
+        Assert.IsTrue(mkdir.IsSuccess, mkdir.Error);
+        Assert.AreEqual("create directory", mkdir.Scope!.DetailSummary);
     }
 
     [TestMethod]

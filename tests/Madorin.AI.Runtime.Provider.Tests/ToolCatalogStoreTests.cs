@@ -32,6 +32,16 @@ public sealed class ToolCatalogStoreTests
         Assert.AreNotEqual(first.EffectiveVersion, second.EffectiveVersion);
         Assert.IsTrue(first.TryGetTool(BuiltinToolRegistry.MemoryReadToolId, out _));
         Assert.IsTrue(second.TryGetTool(BuiltinToolRegistry.MemoryReadToolId, out _));
+        Assert.IsTrue(first.TryGetTool(BuiltinToolRegistry.MemoryWriteToolId, out _));
+        Assert.IsTrue(first.TryGetTool(BuiltinToolRegistry.MemoryAppendToolId, out _));
+        Assert.IsTrue(first.Tools.Any(static tool =>
+            tool.ToolId == BuiltinToolRegistry.MemoryWriteToolId));
+        Assert.IsFalse(first.Tools.Any(static tool =>
+            tool.ToolId == BuiltinToolRegistry.MemoryAppendToolId));
+        Assert.IsFalse(first.Tools.Any(static tool =>
+            tool.ToolId == BuiltinToolRegistry.FileListToolId));
+        Assert.IsTrue(first.Tools.Any(static tool =>
+            tool.ToolId == BuiltinToolRegistry.FileInspectToolId));
     }
 
     [TestMethod]

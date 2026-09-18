@@ -499,8 +499,17 @@ public sealed class AliyunProviderTests
         string modelId = ProviderAdapterTestFactory.ModelId)
     {
         var config = CreateConfig(baseAddress, capabilities, modelId);
-        var adapter = StandaloneProviderFactory.CreateAdapter(config, "aliyun-cn");
-        return Assert.IsInstanceOfType<AliyunProviderAdapter>(adapter);
+        var entry = config.Providers[0];
+        return new AliyunProviderAdapter(
+            new AliyunProviderOptions(
+                entry.Name,
+                entry.ApiKey,
+                entry.BaseUrl,
+                entry.Capabilities,
+                [new ProviderModel(modelId, modelId)],
+                string.IsNullOrWhiteSpace(entry.ConfigurationVersion)
+                    ? "1"
+                    : entry.ConfigurationVersion));
     }
 
     private static StandaloneConfig CreateConfig(

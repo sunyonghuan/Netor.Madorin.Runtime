@@ -2,9 +2,7 @@ using Madorin.AI.Runtime.Cli.Config;
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Entities;
 using Madorin.AI.Runtime.Providers.Abstractions;
-using Madorin.AI.Runtime.Providers.Anthropic;
-using Madorin.AI.Runtime.Providers.OpenAI;
-using Madorin.AI.Runtime.Providers.OpenAICompatible;
+using Madorin.AI.Runtime.Server.ProviderWorkers;
 
 namespace Madorin.AI.Runtime.Provider.Tests;
 
@@ -30,7 +28,7 @@ public sealed class StandaloneProviderFactoryTests
     [DataRow("GLM")]
     [DataRow("Custom")]
     [DataRow("Ollama")]
-    public void Create_ProviderWithoutDeclaredCapabilities_EnablesToolCalling(string protocol)
+    public async Task Create_ProviderWithoutDeclaredCapabilities_EnablesToolCalling(string protocol)
     {
         const string providerId = "default-tool-calling-provider";
         var config = new StandaloneConfig
@@ -47,19 +45,18 @@ public sealed class StandaloneProviderFactoryTests
                 }
             ]
         };
-        var resolver = StandaloneProviderFactory.Create(config);
-
+        await using var supervisor = new ProviderWorkerSupervisor(AppContext.BaseDirectory);
+        var resolver = StandaloneProviderFactory.Create(config, supervisor);
         var adapter = resolver(CreateSelection(providerId));
-        using var adapterLifetime = adapter as IDisposable;
-
         Assert.IsTrue(adapter.Capabilities.ToolCalling);
+        Assert.IsInstanceOfType<ProviderWorkerAdapter>(adapter);
     }
 
     [TestMethod]
     [DataRow(ProviderAdapterKind.OpenAI)]
     [DataRow(ProviderAdapterKind.Anthropic)]
     [DataRow(ProviderAdapterKind.OpenAICompatible)]
-    [Timeout(10_000, CooperativeCancellation = true)]
+    [Timeout(30_000, CooperativeCancellation = true)]
     public async Task Create_ConfiguredProfile_ReusesCorrectAdapterAndForwardsConfiguration(
         ProviderAdapterKind kind)
     {
@@ -93,21 +90,21 @@ public sealed class StandaloneProviderFactoryTests
                 }
             ]
         };
-        var resolver = StandaloneProviderFactory.Create(config);
+        await using var supervisor = new ProviderWorkerSupervisor(AppContext.BaseDirectory);
+        var resolver = StandaloneProviderFactory.Create(config, supervisor);
 
         var adapter = resolver(CreateSelection(providerId));
-        using var adapterLifetime = adapter as IDisposable;
         var cachedAdapter = resolver(CreateSelection(providerId));
 
         Assert.AreSame(adapter, cachedAdapter);
         Assert.AreEqual(providerId, adapter.ProviderId);
         Assert.HasCount(1, adapter.Models);
         Assert.AreEqual(ProviderAdapterTestFactory.ModelId, adapter.Models[0].Id);
-        AssertAdapterType(kind, adapter);
+        Assert.IsInstanceOfType<ProviderWorkerAdapter>(adapter);
 
         var events = await ProviderAdapterTestFactory.CollectAsync(
             adapter,
-            ProviderAdapterTestFactory.CreateRequest(),
+            ProviderAdapterTestFactory.CreateRequest() with { ProviderId = providerId },
             _testContext.CancellationToken);
 
         Assert.ContainsSingle(events.OfType<InvocationCompletedProviderEvent>());
@@ -119,7 +116,7 @@ public sealed class StandaloneProviderFactoryTests
     }
 
     [TestMethod]
-    [Timeout(10_000, CooperativeCancellation = true)]
+    [Timeout(30_000, CooperativeCancellation = true)]
     public async Task Create_SameProtocolProfiles_IsolatesAdaptersCredentialsAndRequests()
     {
         await using var firstServer = await FakeProviderServer.StartAsync(
@@ -156,12 +153,15 @@ public sealed class StandaloneProviderFactoryTests
                 }
             ]
         };
-        var resolver = StandaloneProviderFactory.Create(config);
+        await using var supervisor = new ProviderWorkerSupervisor(AppContext.BaseDirectory);
+        var resolver = StandaloneProviderFactory.Create(config, supervisor);
 
         var firstAdapter = resolver(CreateSelection(firstProviderId, firstModelId));
         var secondAdapter = resolver(CreateSelection(secondProviderId, secondModelId));
         using var firstLifetime = firstAdapter as IDisposable;
         using var secondLifetime = secondAdapter as IDisposable;
+        Assert.IsInstanceOfType<ProviderWorkerAdapter>(firstAdapter);
+        Assert.IsInstanceOfType<ProviderWorkerAdapter>(secondAdapter);
 
         Assert.AreNotSame(firstAdapter, secondAdapter);
         Assert.AreSame(firstAdapter, resolver(CreateSelection(firstProviderId, firstModelId)));
@@ -171,11 +171,13 @@ public sealed class StandaloneProviderFactoryTests
 
         var firstRequest = ProviderAdapterTestFactory.CreateRequest() with
         {
+            InvocationId = "inv-first",
             ProviderId = firstProviderId,
             ModelId = firstModelId
         };
         var secondRequest = ProviderAdapterTestFactory.CreateRequest() with
         {
+            InvocationId = "inv-second",
             ProviderId = secondProviderId,
             ModelId = secondModelId
         };
@@ -207,26 +209,6 @@ public sealed class StandaloneProviderFactoryTests
             RuntimeMode.Expert,
             new DefaultSelection(providerId, modelId),
             new ExpertModeOptions(new AgentRef("agent", "v1", "test")));
-
-    private static void AssertAdapterType(
-        ProviderAdapterKind kind,
-        object adapter)
-    {
-        switch (kind)
-        {
-            case ProviderAdapterKind.OpenAI:
-                Assert.IsInstanceOfType<OpenAIProviderAdapter>(adapter);
-                break;
-            case ProviderAdapterKind.Anthropic:
-                Assert.IsInstanceOfType<AnthropicProviderAdapter>(adapter);
-                break;
-            case ProviderAdapterKind.OpenAICompatible:
-                Assert.IsInstanceOfType<OpenAICompatibleProviderAdapter>(adapter);
-                break;
-            default:
-                throw new ArgumentOutOfRangeException(nameof(kind), kind, null);
-        }
-    }
 
     private static void AssertAuthentication(
         ProviderAdapterKind kind,

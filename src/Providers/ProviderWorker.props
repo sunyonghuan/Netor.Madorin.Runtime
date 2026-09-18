@@ -1,0 +1,30 @@
+<Project>
+  <!-- Worker exe metadata follows madorin-cli: same product/company/copyright/version, name = AssemblyName. -->
+  <PropertyGroup>
+    <Version>$(MadorinCliVersion)</Version>
+    <AssemblyVersion>$(Version)</AssemblyVersion>
+    <FileVersion>$(Version)</FileVersion>
+    <InformationalVersion>$(Version)</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <AssemblyTitle>$(AssemblyName)</AssemblyTitle>
+    <FileDescription>$(AssemblyName)</FileDescription>
+    <Product>$(MadorinProductName)</Product>
+    <Company>$(MadorinCompany)</Company>
+    <Copyright>$(MadorinCopyright)</Copyright>
+    <ApplicationIcon>assets\provider.ico</ApplicationIcon>
+    <WorkerProtocolDisplayName Condition="'$(AssemblyName)' == 'madorin-provider-openai'">OpenAI</WorkerProtocolDisplayName>
+    <WorkerProtocolDisplayName Condition="'$(AssemblyName)' == 'madorin-provider-anthropic'">Anthropic</WorkerProtocolDisplayName>
+    <WorkerProtocolDisplayName Condition="'$(AssemblyName)' == 'madorin-provider-openai-compatible'">OpenAI Compatible</WorkerProtocolDisplayName>
+    <WorkerProtocolDisplayName Condition="'$(AssemblyName)' == 'madorin-provider-deepseek'">DeepSeek</WorkerProtocolDisplayName>
+    <WorkerProtocolDisplayName Condition="'$(AssemblyName)' == 'madorin-provider-kimi'">Kimi</WorkerProtocolDisplayName>
+    <WorkerProtocolDisplayName Condition="'$(AssemblyName)' == 'madorin-provider-aliyun'">Aliyun</WorkerProtocolDisplayName>
+    <WorkerProtocolDisplayName Condition="'$(AssemblyName)' == 'madorin-provider-azure-openai'">Azure OpenAI</WorkerProtocolDisplayName>
+    <WorkerProtocolDisplayName Condition="'$(AssemblyName)' == 'madorin-provider-gemini'">Gemini</WorkerProtocolDisplayName>
+    <WorkerProtocolDisplayName Condition="'$(AssemblyName)' == 'madorin-provider-glm'">GLM</WorkerProtocolDisplayName>
+    <WorkerProtocolDisplayName Condition="'$(AssemblyName)' == 'madorin-provider-ollama'">Ollama</WorkerProtocolDisplayName>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <Description>$(AssemblyName) $(WorkerProtocolDisplayName) Provider 工作进程</Description>
+  </PropertyGroup>
+</Project>

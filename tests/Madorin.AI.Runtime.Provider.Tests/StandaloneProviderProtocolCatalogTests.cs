@@ -1,4 +1,5 @@
 using Madorin.AI.Runtime.Cli.Config;
+using Madorin.AI.Runtime.Server;
 
 namespace Madorin.AI.Runtime.Provider.Tests;
 
@@ -70,24 +71,20 @@ public sealed class StandaloneProviderProtocolCatalogTests
     }
 
     [TestMethod]
-    public void BuildAdapter_LegacyProtocolsPreserveConfiguredProviderId()
+    public void TryMapProtocolToSlug_CoversCatalogProtocols()
     {
-        foreach (var definition in StandaloneProviderProtocolCatalog.All.Take(LegacyProtocols.Length))
+        foreach (var definition in StandaloneProviderProtocolCatalog.All)
         {
-            var providerId = $"profile-{definition.Protocol}";
-            var entry = new ProviderEntry
-            {
-                Name = providerId,
-                Protocol = definition.Protocol,
-                BaseUrl = definition.DefaultBaseUrl,
-                ApiKey = ProviderAdapterTestFactory.ApiKey,
-                Models = [definition.DefaultModel]
-            };
-
-            var adapter = definition.BuildAdapter(entry);
-            using var adapterLifetime = adapter as IDisposable;
-
-            Assert.AreEqual(providerId, adapter.ProviderId);
+            Assert.IsTrue(
+                RuntimeProviderAdapterFactory.TryMapProtocolToSlug(definition.Protocol, out var slug),
+                definition.Protocol);
+            Assert.IsFalse(string.IsNullOrWhiteSpace(slug));
         }
+
+        Assert.IsTrue(RuntimeProviderAdapterFactory.TryMapProtocolToSlug("Custom", out var customSlug));
+        Assert.AreEqual("openai-compatible", customSlug);
+        Assert.IsTrue(
+            RuntimeProviderAdapterFactory.TryMapProtocolToSlug("OpenAI Compatible", out var compatibleSlug));
+        Assert.AreEqual(customSlug, compatibleSlug);
     }
 }

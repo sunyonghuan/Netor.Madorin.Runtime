@@ -1,15 +1,3 @@
-using Madorin.AI.Runtime.Providers.Abstractions;
-using Madorin.AI.Runtime.Providers.Aliyun;
-using Madorin.AI.Runtime.Providers.Anthropic;
-using Madorin.AI.Runtime.Providers.AzureOpenAI;
-using Madorin.AI.Runtime.Providers.DeepSeek;
-using Madorin.AI.Runtime.Providers.Gemini;
-using Madorin.AI.Runtime.Providers.GLM;
-using Madorin.AI.Runtime.Providers.Kimi;
-using Madorin.AI.Runtime.Providers.OpenAI;
-using Madorin.AI.Runtime.Providers.OpenAICompatible;
-using Madorin.AI.Runtime.Providers.Ollama;
-
 namespace Madorin.AI.Runtime.Cli.Config;
 
 internal sealed record StandaloneProviderProtocolDefinition(
@@ -22,8 +10,7 @@ internal sealed record StandaloneProviderProtocolDefinition(
     bool IsApiKeyRequired,
     string DefaultAuthenticationHeader,
     string? DefaultAuthenticationScheme,
-    string? DefaultProbePath,
-    Func<ProviderEntry, IRuntimeProviderAdapter> BuildAdapter);
+    string? DefaultProbePath);
 
 internal static class StandaloneProviderProtocolCatalog
 {
@@ -39,8 +26,7 @@ internal static class StandaloneProviderProtocolCatalog
             true,
             "Authorization",
             "Bearer",
-            null,
-            BuildOpenAI),
+            null),
         new(
             "Anthropic",
             "Anthropic",
@@ -51,8 +37,7 @@ internal static class StandaloneProviderProtocolCatalog
             true,
             "x-api-key",
             null,
-            null,
-            BuildAnthropic),
+            null),
         new(
             "OpenAI Compatible",
             "OpenAI Compatible",
@@ -63,8 +48,7 @@ internal static class StandaloneProviderProtocolCatalog
             true,
             "Authorization",
             "Bearer",
-            "models",
-            BuildCompatible),
+            "models"),
         new(
             "DeepSeek",
             "DeepSeek",
@@ -75,8 +59,7 @@ internal static class StandaloneProviderProtocolCatalog
             true,
             "Authorization",
             "Bearer",
-            null,
-            BuildDeepSeek),
+            null),
         new(
             "Kimi",
             "Kimi",
@@ -87,20 +70,18 @@ internal static class StandaloneProviderProtocolCatalog
             true,
             "Authorization",
             "Bearer",
-            null,
-            BuildKimi),
+            null),
         new(
             "Aliyun",
             "Aliyun / DashScope",
             true,
-            AliyunModelCatalog.DefaultBaseUrl,
-            AliyunModelCatalog.DefaultModelId,
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "qwen-plus",
             false,
             true,
             "Authorization",
             "Bearer",
-            "models",
-            BuildAliyun),
+            "models"),
         new(
             "Azure OpenAI",
             "Azure OpenAI (Experimental)",
@@ -111,20 +92,18 @@ internal static class StandaloneProviderProtocolCatalog
             true,
             "api-key",
             null,
-            null,
-            BuildAzureOpenAI),
+            null),
         new(
             "Gemini",
             "Gemini",
             true,
-            GeminiModelCatalog.DefaultBaseUrl,
-            GeminiModelCatalog.DefaultModelId,
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            "gemini-2.5-flash",
             false,
             true,
             "Authorization",
             "Bearer",
-            "models",
-            BuildGemini),
+            "models"),
         new(
             "GLM",
             "GLM",
@@ -135,8 +114,7 @@ internal static class StandaloneProviderProtocolCatalog
             true,
             "Authorization",
             "Bearer",
-            "models",
-            BuildGlm),
+            "models"),
         new(
             "Custom",
             "Custom",
@@ -147,20 +125,18 @@ internal static class StandaloneProviderProtocolCatalog
             true,
             "Authorization",
             "Bearer",
-            "models",
-            BuildCompatible),
+            "models"),
         new(
             "Ollama",
             "Ollama",
             true,
-            OllamaModelCatalog.DefaultBaseUrl,
-            OllamaModelCatalog.DefaultModelId,
+            "http://localhost:11434/v1",
+            "llama3.2",
             false,
             false,
             "Authorization",
             "Bearer",
-            null,
-            BuildOllama)
+            null)
     ];
 
     public static IReadOnlyList<StandaloneProviderProtocolDefinition> All => Definitions;
@@ -194,120 +170,4 @@ internal static class StandaloneProviderProtocolCatalog
         return WizardEntries.FirstOrDefault(definition =>
             definition.Protocol.Equals(input, StringComparison.OrdinalIgnoreCase));
     }
-
-    private static OpenAIProviderAdapter BuildOpenAI(ProviderEntry entry) =>
-        new(
-            entry.Name,
-            entry.ApiKey,
-            GetBaseUrl(entry, "OpenAI"),
-            ToProviderModels(entry.Models));
-
-    private static AnthropicProviderAdapter BuildAnthropic(ProviderEntry entry) =>
-        new(
-            entry.Name,
-            entry.ApiKey,
-            GetBaseUrl(entry, "Anthropic"),
-            ToProviderModels(entry.Models));
-
-    private static DeepSeekProviderAdapter BuildDeepSeek(ProviderEntry entry) =>
-        new(
-            GetBaseUrl(entry, "DeepSeek"),
-            entry.ApiKey,
-            models: ToProviderModels(entry.Models),
-            providerId: entry.Name);
-
-    private static KimiProviderAdapter BuildKimi(ProviderEntry entry) =>
-        new(
-            entry.ApiKey,
-            baseUrl: GetBaseUrl(entry, "Kimi"),
-            models: ToProviderModels(entry.Models),
-            providerId: entry.Name,
-            maxTools: entry.MaxTools);
-
-    private static AliyunProviderAdapter BuildAliyun(ProviderEntry entry) =>
-        new(
-            new AliyunProviderOptions(
-                entry.Name,
-                entry.ApiKey,
-                GetBaseUrl(entry, "Aliyun"),
-                entry.Capabilities,
-                ToProviderModels(entry.Models),
-                entry.ConfigurationVersion));
-
-    private static AzureOpenAIProviderAdapter BuildAzureOpenAI(ProviderEntry entry) =>
-        new(
-            new AzureOpenAIProviderOptions(
-                entry.Name,
-                entry.ApiKey,
-                GetBaseUrl(entry, "Azure OpenAI"),
-                ToProviderModels(entry.Models),
-                entry.ApiVersion ?? AzureOpenAIProtocol.DefaultApiVersion,
-                entry.Capabilities,
-                entry.ConfigurationVersion));
-
-    private static GeminiProviderAdapter BuildGemini(ProviderEntry entry) =>
-        new(
-            new GeminiProviderOptions(
-                entry.Name,
-                entry.ApiKey,
-                GetBaseUrl(entry, "Gemini"),
-                entry.Capabilities,
-                ToProviderModels(entry.Models),
-                entry.ConfigurationVersion));
-
-    private static GlmProviderAdapter BuildGlm(ProviderEntry entry) =>
-        new(
-            new GlmProviderOptions(
-                entry.Name,
-                entry.ApiKey,
-                GetBaseUrl(entry, "GLM"),
-                entry.Capabilities,
-                ToProviderModels(entry.Models),
-                entry.ConfigurationVersion,
-                entry.ProbePath));
-
-    private static OllamaProviderAdapter BuildOllama(ProviderEntry entry) =>
-        new(
-            new OllamaProviderOptions(
-                entry.Name,
-                GetBaseUrl(entry, "Ollama"),
-                entry.ApiKey,
-                entry.AuthenticationHeader,
-                entry.AuthenticationScheme,
-                string.IsNullOrWhiteSpace(entry.ApiKey)
-                    ? ProviderAuthenticationMode.None
-                    : ProviderAuthenticationMode.Required,
-                entry.Capabilities,
-                ToProviderModels(entry.Models),
-                entry.ConfigurationVersion));
-
-    private static OpenAICompatibleProviderAdapter BuildCompatible(ProviderEntry entry)
-    {
-        var baseUrl = string.IsNullOrWhiteSpace(entry.BaseUrl)
-            ? "https://api.openai.com/v1"
-            : entry.BaseUrl;
-        var options = new OpenAICompatibleProviderOptions(
-            entry.Name,
-            baseUrl,
-            entry.ApiKey,
-            entry.AuthenticationHeader,
-            entry.AuthenticationScheme,
-            entry.Capabilities,
-            ToProviderModels(entry.Models),
-            entry.ConfigurationVersion,
-            entry.ProbePath,
-            UserAgent: entry.UserAgent);
-        return new OpenAICompatibleProviderAdapter(
-            options,
-            ProviderHttpClientFactory.Shared.CreateClient(entry.Name),
-            disposeHttpClient: true);
-    }
-
-    private static string GetBaseUrl(ProviderEntry entry, string protocol) =>
-        string.IsNullOrWhiteSpace(entry.BaseUrl)
-            ? GetRequired(protocol).DefaultBaseUrl
-            : entry.BaseUrl;
-
-    private static List<ProviderModel> ToProviderModels(IEnumerable<string> ids) =>
-        ids.Select(static id => new ProviderModel(id, id)).ToList();
 }
