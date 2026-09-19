@@ -1569,6 +1569,39 @@ public sealed class RuntimeServer : IAsyncDisposable
         return sb.ToString().TrimEnd();
     }
 
+    /// <summary>
+    /// 用本轮用户输入首段文本写入会话临时标题（仅 title 为空时生效）。
+    /// 覆盖 new_session 与 existing_session，避免历史列表只能看到 SessionId。
+    /// </summary>
+    private static async Task TryEnsureInitialSessionTitleAsync(
+        SqliteSessionRepository repository,
+        string sessionId,
+        ContentBlock[]? initialInput,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId) || initialInput is null || initialInput.Length == 0)
+        {
+            return;
+        }
+
+        var titleText = initialInput
+            .OfType<TextContentBlock>()
+            .Select(static block => block.Text)
+            .FirstOrDefault(static text => !string.IsNullOrWhiteSpace(text));
+        if (string.IsNullOrWhiteSpace(titleText))
+        {
+            return;
+        }
+
+        var title = FlattenSessionTitle(titleText);
+        if (string.IsNullOrWhiteSpace(title))
+        {
+            return;
+        }
+
+        await repository.TrySetInitialSessionTitleAsync(sessionId, title, ct).ConfigureAwait(false);
+    }
+
     private static byte[] EncodeBlobResponse(
         BlobFrameOperation operation,
         BlobOperationResponse? response,
@@ -2740,16 +2773,6 @@ public sealed class RuntimeServer : IAsyncDisposable
                     TimeSpan.FromDays(7),
                     plan.RequestHash,
                     ct).ConfigureAwait(false);
-                var titleText = runRequest.InitialInput?
-                    .OfType<TextContentBlock>()
-                    .Select(t => t.Text)
-                    .FirstOrDefault(t => !string.IsNullOrWhiteSpace(t));
-                if (!string.IsNullOrWhiteSpace(titleText))
-                {
-                    var title = FlattenSessionTitle(titleText!);
-                    await repository.TrySetInitialSessionTitleAsync(sessionId, title, ct)
-                        .ConfigureAwait(false);
-                }
 
                 var initialSelection = plan.InitialSelection!;
                 var persistedSelection = RuntimeRunMetadata.RemovePromptContent(initialSelection);
@@ -2770,6 +2793,15 @@ public sealed class RuntimeServer : IAsyncDisposable
 
                 _sessionSelections[sessionId] = initialSelection;
             }
+
+            // 临时标题：新建与续跑共用。仅在 title 仍为空时，用本轮用户首段文本落盘。
+            // TrySetInitialSessionTitleAsync 的 WHERE 保证已有标题不会被覆盖。
+            await TryEnsureInitialSessionTitleAsync(
+                    repository,
+                    sessionId,
+                    runRequest.InitialInput,
+                    ct)
+                .ConfigureAwait(false);
 
             if (!runLease.TryBindSession(sessionId))
             {

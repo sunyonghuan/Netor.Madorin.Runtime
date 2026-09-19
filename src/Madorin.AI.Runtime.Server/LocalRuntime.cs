@@ -1340,6 +1340,18 @@ public sealed class LocalRuntime : IAsyncDisposable
             throw new InvalidOperationException("The Session Selection could not be initialized.");
         }
 
+        // 临时标题：首条用户输入文本写入 sessions.title（仅空标题时）。
+        var titleText = request.InitialInput?
+            .OfType<TextContentBlock>()
+            .Select(static block => block.Text)
+            .FirstOrDefault(static text => !string.IsNullOrWhiteSpace(text));
+        if (!string.IsNullOrWhiteSpace(titleText))
+        {
+            await repository
+                .TrySetInitialSessionTitleAsync(sessionId, FlattenSessionTitle(titleText), ct)
+                .ConfigureAwait(false);
+        }
+
         _sessionSelections[sessionId] = request.Selection;
         return await PrepareRunAsync(
                 repository,
@@ -1351,19 +1363,67 @@ public sealed class LocalRuntime : IAsyncDisposable
             .ConfigureAwait(false);
     }
 
-    private Task<PreparedRun> PrepareExistingSessionAsync(
+    private static string FlattenSessionTitle(string text)
+    {
+        var sb = new System.Text.StringBuilder(text.Length);
+        foreach (var ch in text)
+        {
+            if (char.IsWhiteSpace(ch))
+            {
+                if (sb.Length > 0 && sb[^1] != ' ')
+                {
+                    sb.Append(' ');
+                }
+            }
+            else
+            {
+                sb.Append(ch);
+            }
+        }
+
+        if (sb.Length > 120)
+        {
+            sb.Length = 120;
+            if (sb.Length > 0 && char.IsHighSurrogate(sb[^1]))
+            {
+                sb.Length = 119;
+            }
+        }
+
+        return sb.ToString().TrimEnd();
+    }
+
+    private async Task<PreparedRun> PrepareExistingSessionAsync(
         SqliteSessionRepository repository,
         ExistingSessionRunRequest request,
         NewSessionRunRequest executionRequest,
         IRuntimeProviderAdapter provider,
-        CancellationToken ct) =>
-        PrepareRunAsync(
-            repository,
-            request.SessionId,
-            executionRequest.RunIdempotencyKey,
-            RuntimeRunMetadata.ComputeRequestHash(request),
-            provider,
-            ct);
+        CancellationToken ct)
+    {
+        // 续跑时若 title 仍空，用本轮用户输入补上临时标题。
+        var titleText = executionRequest.InitialInput?
+            .OfType<TextContentBlock>()
+            .Select(static block => block.Text)
+            .FirstOrDefault(static text => !string.IsNullOrWhiteSpace(text));
+        if (!string.IsNullOrWhiteSpace(titleText))
+        {
+            await repository
+                .TrySetInitialSessionTitleAsync(
+                    request.SessionId,
+                    FlattenSessionTitle(titleText),
+                    ct)
+                .ConfigureAwait(false);
+        }
+
+        return await PrepareRunAsync(
+                repository,
+                request.SessionId,
+                executionRequest.RunIdempotencyKey,
+                RuntimeRunMetadata.ComputeRequestHash(request),
+                provider,
+                ct)
+            .ConfigureAwait(false);
+    }
 
     private async Task<PreparedRun> PrepareRunAsync(
         SqliteSessionRepository repository,
