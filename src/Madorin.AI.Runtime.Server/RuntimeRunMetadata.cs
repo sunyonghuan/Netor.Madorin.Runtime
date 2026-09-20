@@ -30,7 +30,12 @@ internal static class RuntimeRunMetadata
     {
         ModeOptions modeOptions = selection.ModeOptions switch
         {
-            ExpertModeOptions expert => new ExpertModeOptions(RemovePromptContent(expert.Agent)),
+            // Expert 须保留 AvailableAgents，否则落盘/续跑后 @ 委派池丢失。
+            ExpertModeOptions expert => new ExpertModeOptions(
+                RemovePromptContent(expert.Agent),
+                expert.AvailableAgents is null
+                    ? null
+                    : [.. expert.AvailableAgents.Select(RemovePromptContent)]),
             MeetingModeOptions meeting => meeting with
             {
                 Participants = [.. meeting.Participants.Select(
@@ -60,7 +65,7 @@ internal static class RuntimeRunMetadata
     {
         IEnumerable<AgentRef> agents = selection.ModeOptions switch
         {
-            ExpertModeOptions expert => [expert.Agent],
+            ExpertModeOptions expert => [expert.Agent, .. expert.AvailableAgents ?? []],
             MeetingModeOptions meeting => EnumerateMeetingAgents(meeting),
             WorkModeOptions work => [work.GeneralManager, .. work.AvailableAgents],
             _ => throw new InvalidOperationException(

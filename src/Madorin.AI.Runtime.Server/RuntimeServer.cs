@@ -4745,6 +4745,14 @@ public sealed class RuntimeServer : IAsyncDisposable
         {
             case ExpertModeOptions expert:
                 roles[expert.Agent.AgentId] = ("SingleAgent", null);
+                if (expert.AvailableAgents is not null)
+                {
+                    foreach (var agent in expert.AvailableAgents)
+                    {
+                        roles.TryAdd(agent.AgentId, ("ExpertSubAgent", null));
+                    }
+                }
+
                 break;
             case MeetingModeOptions meeting:
                 foreach (var participant in meeting.Participants)
@@ -4812,7 +4820,12 @@ public sealed class RuntimeServer : IAsyncDisposable
 
         ModeOptions modeOptions = selection.ModeOptions switch
         {
-            ExpertModeOptions expert => new ExpertModeOptions(RehydrateAgent(expert.Agent)),
+            // Expert 须恢复 AvailableAgents，否则 rehydrate 后 @ 委派池丢失。
+            ExpertModeOptions expert => new ExpertModeOptions(
+                RehydrateAgent(expert.Agent),
+                expert.AvailableAgents is null
+                    ? null
+                    : [.. expert.AvailableAgents.Select(RehydrateAgent)]),
             MeetingModeOptions meeting => meeting with
             {
                 Participants = [.. meeting.Participants.Select(

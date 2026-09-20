@@ -244,6 +244,51 @@ public sealed class MeetingResumeMapperTests
     }
 
     [TestMethod]
+    public void RemovePromptContent_ExpertSelection_PreservesAvailableAgentsWithoutPrompt()
+    {
+        var primary = new AgentRef("primary", "v1", "Primary prompt", ProviderId: "p", ModelId: "m");
+        var sub = new AgentRef("sub-a", "v1", "Sub prompt", ProviderId: "p", ModelId: "m");
+        var selection = new NextTurnSelection(
+            3,
+            RuntimeMode.Expert,
+            new DefaultSelection("p", "m"),
+            new ExpertModeOptions(primary, [primary, sub]));
+
+        var stripped = RuntimeRunMetadata.RemovePromptContent(selection);
+        var expert = Assert.IsInstanceOfType<ExpertModeOptions>(stripped.ModeOptions);
+
+        Assert.AreEqual(string.Empty, expert.Agent.SystemPrompt);
+        Assert.IsNotNull(expert.AvailableAgents);
+        Assert.HasCount(2, expert.AvailableAgents);
+        Assert.AreEqual("primary", expert.AvailableAgents[0].AgentId);
+        Assert.AreEqual("sub-a", expert.AvailableAgents[1].AgentId);
+        Assert.AreEqual(string.Empty, expert.AvailableAgents[0].SystemPrompt);
+        Assert.AreEqual(string.Empty, expert.AvailableAgents[1].SystemPrompt);
+
+        var snapshots = RuntimeRunMetadata.CreateAgentSnapshots(selection);
+        Assert.HasCount(2, snapshots);
+        Assert.IsTrue(snapshots.Any(s => s.AgentId == "primary"));
+        Assert.IsTrue(snapshots.Any(s => s.AgentId == "sub-a"));
+
+        var needed = RuntimeServer.CreateNeededDefinitions(
+            new PersistedSessionSnapshot(
+                "session-expert",
+                RuntimeMode.Expert,
+                SessionStatus.Active,
+                Timestamp,
+                Timestamp,
+                selection.SelectionVersion,
+                SelectionJson: null,
+                LatestRun: null,
+                snapshots,
+                LastGsn: 0),
+            selection);
+        Assert.HasCount(2, needed);
+        AssertDefinition(needed, primary, "SingleAgent", participantId: null);
+        AssertDefinition(needed, sub, "ExpertSubAgent", participantId: null);
+    }
+
+    [TestMethod]
     public void CreateNeededDefinitions_MeetingSelection_IncludesEveryConfiguredRole()
     {
         var active = new AgentRef("agent-active", "v1", "Active prompt");
