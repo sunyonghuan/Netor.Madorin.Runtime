@@ -151,7 +151,7 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
             "Delegate to agent",
             "Delegates a task to a specific agent from the available agent pool.",
             """{"type":"object","properties":{"agentName":{"type":"string","description":"Name of the target agent (case-insensitive)"},"task":{"type":"string","description":"Task description to delegate"}},"required":["agentName","task"],"additionalProperties":false}""",
-            """{"type":"object","properties":{"delegated":{"type":"boolean"},"agentId":{"type":"string"},"agentDisplayName":{"type":"string"},"message":{"type":"string"}},"required":["delegated","message"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"delegated":{"type":"boolean"},"agentName":{"type":"string"},"task":{"type":"string"},"message":{"type":"string"}},"required":["delegated","message"],"additionalProperties":false}""",
             RiskLevel: "low",
             Capabilities: ["agent.delegate"],
             Risk: ToolRiskLevel.Low,

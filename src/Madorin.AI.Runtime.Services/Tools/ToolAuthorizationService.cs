@@ -543,6 +543,7 @@ public sealed class ToolAuthorizationService(
         || string.Equals(toolId, "mcli_fs_stat", StringComparison.Ordinal)
         || string.Equals(toolId, "mcli_fs_inspect", StringComparison.Ordinal)
         || string.Equals(toolId, "mcli_fs_search", StringComparison.Ordinal)
+        || string.Equals(toolId, "mcli_delegate_agent", StringComparison.Ordinal)
         || toolId.StartsWith("host.host..", StringComparison.Ordinal);
 
     private static string[] NormalizeValues(string[]? values) =>

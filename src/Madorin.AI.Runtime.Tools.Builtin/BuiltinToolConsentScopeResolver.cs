@@ -97,6 +97,10 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
             BuiltinToolRegistry.MemoryDeleteToolId => MemoryScope(arguments, "delete memory lines"),
             BuiltinToolRegistry.ProcessRunToolId => ProcessScope(workspaceRoot, arguments),
             BuiltinToolRegistry.HttpRequestToolId => HttpScope(arguments),
+            BuiltinToolRegistry.DelegateToAgentToolId => Create(
+                "agent:delegate",
+                "delegate task to agent",
+                canGrantForRun: true),
             SkillScriptAuthorization.ToolId => ScriptScope(arguments, workspaceRoot),
             SkillRuntimeTools.LoadToolId => FileReadScope(workspaceRoot, ".", "load skill"),
             SkillRuntimeTools.ReadToolId => SkillReadScope(arguments, workspaceRoot),
