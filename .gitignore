@@ -1,3 +1,11 @@
+# Branch-local docs and agent constraints (keep on disk, do not track)
+/README.md
+/AGENTS.md
+/AGENT.md
+
+# All root-level directories that start with a dot
+/.*/
+
 # Build output
 [Bb]in/
 [Oo]bj/
