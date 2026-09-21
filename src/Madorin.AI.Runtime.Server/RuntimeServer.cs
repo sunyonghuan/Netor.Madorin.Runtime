@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Runtime.ExceptionServices;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
@@ -39,6 +39,7 @@ public sealed class RuntimeServer : IAsyncDisposable
     private readonly TimeSpan _hostLeaseTimeout;
     private readonly RuntimeLimits _limits;
     private readonly Func<NextTurnSelection, IRuntimeProviderAdapter>? _providerResolver;
+    private readonly SessionCompactionService _compactionService;
     private readonly HostProviderRegistry? _hostProviderRegistry;
     private readonly IProviderWorkerSupervisor _workerSupervisor;
     private readonly RuntimeExecutionCore _executionCore;
@@ -102,6 +103,10 @@ public sealed class RuntimeServer : IAsyncDisposable
         }
 
         _diagnosticLog = diagnosticLog;
+        _compactionService = new SessionCompactionService(
+            _dataDirectory,
+            _databaseConnectionString,
+            selection => ResolveProviderAdapter(selection, selection.DefaultSelection.ProviderId));
         var userHome = options.MemoryUserHome
             ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         ArgumentException.ThrowIfNullOrWhiteSpace(userHome);
@@ -469,6 +474,7 @@ public sealed class RuntimeServer : IAsyncDisposable
         await _blobStore.DisposeAsync().ConfigureAwait(false);
         await _instanceLock.DisposeAsync().ConfigureAwait(false);
         await _instanceNameLock.DisposeAsync().ConfigureAwait(false);
+        _compactionService.Dispose();
         _eventDispatchGate.Dispose();
         _meetingResumeGate.Dispose();
         _runRegistry.Dispose();
@@ -1209,6 +1215,12 @@ public sealed class RuntimeServer : IAsyncDisposable
                 .ConfigureAwait(false);
         }
 
+        if (string.Equals(request.Method, MessageTypes.SessionCompaction, StringComparison.Ordinal))
+        {
+            return await CreateSessionCompactionResponseAsync(request, ct)
+                .ConfigureAwait(false);
+        }
+
         if (string.Equals(request.Method, MessageTypes.SessionRehydrate, StringComparison.Ordinal))
         {
             return await CreateSessionRehydrateResponseAsync(
@@ -1928,6 +1940,92 @@ public sealed class RuntimeServer : IAsyncDisposable
         return new JsonRpcResponse("2.0", request.Id, payload);
     }
 
+    private async Task<JsonRpcResponse> CreateSessionCompactionResponseAsync(
+        JsonRpcRequest request,
+        CancellationToken ct)
+    {
+        var parameters = request.Params is { } json
+            ? json.Deserialize(RuntimeJsonContext.Default.SessionCompactionRequest)
+            : null;
+        if (parameters is null || string.IsNullOrWhiteSpace(parameters.SessionId))
+        {
+            return Error(request.Id, -32602, "The session.compact parameters are invalid.");
+        }
+
+        var strategy = parameters.Strategy.Trim().ToLowerInvariant() switch
+        {
+            "summary" => SessionCompactionStrategy.Summary,
+            "full" => SessionCompactionStrategy.Full,
+            "sliding-window" => SessionCompactionStrategy.SlidingWindow,
+            _ => (SessionCompactionStrategy?)null
+        };
+        if (strategy is null)
+        {
+            return Error(request.Id, -32602, "Strategy must be full, sliding-window, or summary.");
+        }
+
+        try
+        {
+            var result = await _compactionService.CompactAsync(
+                    parameters.SessionId,
+                    new SessionCompactionOptions(
+                        strategy.Value,
+                        parameters.ProviderId,
+                        parameters.ModelId,
+                        parameters.KeepLastTokens,
+                        parameters.DryRun,
+                        parameters.Force,
+                        parameters.SelectionSource),
+                    ct)
+                .ConfigureAwait(false);
+            if (result is null)
+            {
+                return Error(request.Id, -32004, $"Session '{parameters.SessionId}' was not found.");
+            }
+
+            var dto = new SessionCompactionResultDto(
+                result.SessionId,
+                ToCompactionWireValue(result.Strategy),
+                result.ProviderId,
+                result.ModelId,
+                result.KeepLastTokens,
+                result.SourceMessageCount,
+                result.ProjectedMessageCount,
+                result.DroppedMessageCount,
+                result.BeforeEstimatedTokens,
+                result.AfterEstimatedTokens,
+                result.EstimateSource,
+                result.DryRun,
+                result.CacheHit,
+                result.CacheWritten,
+                result.CacheMissReason,
+                result.SelectionSource,
+                result.SummaryGenerated);
+            var payload = JsonSerializer.SerializeToElement(
+                dto,
+                RuntimeJsonContext.Default.SessionCompactionResultDto);
+            return new JsonRpcResponse("2.0", request.Id, payload);
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return Error(request.Id, -32010, $"InvalidCompactionSelection: {ex.Message}");
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidDataException or InvalidOperationException)
+        {
+            return Error(
+                request.Id,
+                -32020,
+                $"SessionCompactionFailed: stage=projection;sessionId={parameters.SessionId};reason={ex.Message}");
+        }
+    }
+
+    private static string ToCompactionWireValue(SessionCompactionStrategy strategy) => strategy switch
+    {
+        SessionCompactionStrategy.Full => "full",
+        SessionCompactionStrategy.SlidingWindow => "sliding-window",
+        SessionCompactionStrategy.Summary => "summary",
+        _ => throw new ArgumentOutOfRangeException(nameof(strategy))
+    };
     private async Task<JsonRpcResponse> CreateSessionSelectionUpdateResponseAsync(
         JsonRpcRequest request,
         SqliteSessionRepository repository,

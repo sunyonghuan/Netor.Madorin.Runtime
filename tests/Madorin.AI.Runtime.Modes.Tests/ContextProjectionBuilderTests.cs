@@ -99,6 +99,30 @@ public sealed class ContextProjectionBuilderTests
         Assert.IsFalse(result.IsAdjusted);
     }
 
+    [TestMethod]
+    public void BuildTailWindow_UsesMessageCountAndKeepsToolRoundAtomic()
+    {
+        using var arguments = JsonDocument.Parse("{}");
+        ConversationRecordV1[] history =
+        [
+            CreateRecord(1, "user", new TextContentBlock("old")),
+            CreateRecord(
+                2,
+                "assistant",
+                new ToolCallContentBlock("call-1", "builtin.test", "test", arguments.RootElement.Clone())),
+            CreateRecord(
+                3,
+                "tool",
+                new ToolResultContentBlock("call-1", "builtin.test", true, [new TextContentBlock("result")])),
+            CreateRecord(4, "assistant", new TextContentBlock("latest"))
+        ];
+
+        var messages = ContextProjectionBuilder.BuildTailWindow(history, tailMessageCount: 2);
+
+        CollectionAssert.AreEqual(
+            TailWindowRoles,
+            messages.Select(static message => message.Role).ToArray());
+    }
     private static ValueTask<ProviderTokenEstimate> EstimateTokensAsync(
         RuntimeProviderMessage[] messages,
         CancellationToken ct)

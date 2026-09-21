@@ -7,9 +7,35 @@ using Madorin.AI.Runtime.Providers.Abstractions;
 
 namespace Madorin.AI.Runtime.Modes.Expert;
 
-internal static class ContextProjectionBuilder
-{
-    internal static async Task<Result> BuildAsync(
+public static class ContextProjectionBuilder
+{    /// <summary>
+    /// Selects the newest message units up to the requested tail count while keeping
+    /// tool-call/tool-result units atomic.
+    /// </summary>
+    public static RuntimeProviderMessage[] BuildTailWindow(
+        IReadOnlyList<ConversationRecordV1> history,
+        int tailMessageCount)
+    {
+        ArgumentNullException.ThrowIfNull(history);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(tailMessageCount);
+
+        var units = BuildAtomicUnits(history);
+        var selected = new List<AtomicUnit>();
+        var selectedMessageCount = 0;
+        for (var index = units.Count - 1; index >= 0; index--)
+        {
+            selected.Insert(0, units[index]);
+            selectedMessageCount += units[index].Messages.Count;
+            if (selectedMessageCount >= tailMessageCount)
+            {
+                break;
+            }
+        }
+
+        return selected.SelectMany(static unit => unit.Messages).ToArray();
+    }
+
+    public static async Task<Result> BuildAsync(
         IReadOnlyList<ConversationRecordV1> history,
         int tokenLimit,
         Func<RuntimeProviderMessage[], CancellationToken, ValueTask<ProviderTokenEstimate>> estimator,
@@ -144,7 +170,7 @@ internal static class ContextProjectionBuilder
             content);
     }
 
-    internal sealed record Result(
+    public sealed record Result(
         RuntimeProviderMessage[] Messages,
         string Strategy,
         int DroppedMessageCount,

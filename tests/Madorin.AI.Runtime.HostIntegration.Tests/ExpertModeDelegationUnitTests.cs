@@ -144,10 +144,14 @@ public class ExpertModeDelegationUnitTests
 
         // Assert
         StringAssert.Contains(enhanced, "## Sub-Agent Delegation");
+        StringAssert.Contains(enhanced, "mcli_delegate_agent");
+        StringAssert.Contains(enhanced, "mcli_agent_job_create");
+        StringAssert.Contains(enhanced, "mcli_agent_job_wait");
         StringAssert.Contains(enhanced, "@developer");
         StringAssert.Contains(enhanced, "@code-reviewer");
         StringAssert.Contains(enhanced, "You are a developer.");
-        Assert.DoesNotContain("@expert", enhanced); // 主Agent不应该出现在列表中
+        StringAssert.Contains(enhanced, "result");
+        Assert.DoesNotContain("**@expert**", enhanced); // 主Agent不应该出现在列表中
     }
 
     [TestMethod]
@@ -237,7 +241,29 @@ public class ExpertModeDelegationUnitTests
         var agentListBuilder = new System.Text.StringBuilder();
         agentListBuilder.AppendLine();
         agentListBuilder.AppendLine("## Sub-Agent Delegation in Expert Mode");
+        agentListBuilder.AppendLine();
+        agentListBuilder.AppendLine("### Synchronous single-agent handoff");
+        agentListBuilder.AppendLine(
+            "Use `mcli_delegate_agent` when you need one specialist and must block for its `result` immediately.");
+        agentListBuilder.AppendLine();
+        agentListBuilder.AppendLine("### Parallel background jobs (no scheduling)");
+        agentListBuilder.AppendLine(
+            "Use these tools to run multiple specialists in parallel without blocking the create call:");
+        agentListBuilder.AppendLine("- `mcli_agent_job_create` / `mcli_agent_job_create_many`: enqueue jobs, get `jobId`(s)");
+        agentListBuilder.AppendLine("- `mcli_agent_job_status`: query state");
+        agentListBuilder.AppendLine(
+            "- `mcli_agent_job_result`: recover finished result(s) (`jobId` or `jobIds`); non-terminal returns ready=false");
+        agentListBuilder.AppendLine(
+            "- `mcli_agent_job_wait`: wait until terminal (or timeout) then recover results — preferred after create_many");
+        agentListBuilder.AppendLine("- `mcli_agent_job_cancel`: request cancel");
+        agentListBuilder.AppendLine(
+            "There is no cron/timer API; long multi-step orchestration belongs in Work mode.");
+        agentListBuilder.AppendLine();
+        agentListBuilder.AppendLine(
+            "Users may also start a turn with `@agentName <task>`; that path is handled before your turn.");
+        agentListBuilder.AppendLine();
         agentListBuilder.AppendLine("Available sub-agents:");
+        agentListBuilder.AppendLine();
 
         foreach (var agent in availableAgents)
         {
@@ -245,7 +271,9 @@ public class ExpertModeDelegationUnitTests
             {
                 var description = agent.SystemPrompt?.Split('\n', StringSplitOptions.RemoveEmptyEntries)
                     .FirstOrDefault() ?? string.Empty;
-                agentListBuilder.AppendLine(System.Globalization.CultureInfo.InvariantCulture, $"- **@{agent.AgentId}** - {description}");
+                agentListBuilder.AppendLine(
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    $"- **{agent.AgentId}** (`@{agent.AgentId}`) - {description}");
             }
         }
         return baseInstructions + agentListBuilder.ToString();

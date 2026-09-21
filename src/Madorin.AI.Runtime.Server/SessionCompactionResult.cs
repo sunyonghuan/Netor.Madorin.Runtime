@@ -15,4 +15,7 @@ public sealed record SessionCompactionResult(
     string EstimateSource,
     bool DryRun,
     bool CacheHit,
-    bool CacheWritten);
+    bool CacheWritten,
+    string? CacheMissReason = null,
+    string SelectionSource = "session-default",
+    bool SummaryGenerated = false);

@@ -101,6 +101,30 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
                 "agent:delegate",
                 "delegate task to agent",
                 canGrantForRun: true),
+            BuiltinToolRegistry.AgentJobCreateToolId => Create(
+                "agent:job",
+                "create parallel agent job",
+                canGrantForRun: true),
+            BuiltinToolRegistry.AgentJobCreateManyToolId => Create(
+                "agent:job",
+                "create parallel agent jobs",
+                canGrantForRun: true),
+            BuiltinToolRegistry.AgentJobStatusToolId => Create(
+                "agent:job",
+                "query parallel agent job status",
+                canGrantForRun: true),
+            BuiltinToolRegistry.AgentJobResultToolId => Create(
+                "agent:job",
+                "recover parallel agent job result",
+                canGrantForRun: true),
+            BuiltinToolRegistry.AgentJobWaitToolId => Create(
+                "agent:job",
+                "wait and recover parallel agent jobs",
+                canGrantForRun: true),
+            BuiltinToolRegistry.AgentJobCancelToolId => Create(
+                "agent:job",
+                "cancel parallel agent job",
+                canGrantForRun: true),
             SkillScriptAuthorization.ToolId => ScriptScope(arguments, workspaceRoot),
             SkillRuntimeTools.LoadToolId => FileReadScope(workspaceRoot, ".", "load skill"),
             SkillRuntimeTools.ReadToolId => SkillReadScope(arguments, workspaceRoot),

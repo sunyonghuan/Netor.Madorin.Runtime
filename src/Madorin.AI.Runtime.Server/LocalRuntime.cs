@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Runtime.CompilerServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Madorin.AI.Runtime.Contracts;
@@ -644,6 +645,20 @@ public sealed class LocalRuntime : IAsyncDisposable
             }
 
             var selection = await GetSessionSelectionAsync(snapshot, ct).ConfigureAwait(false);
+            var isExpertMode = selection.ModeOptions is ExpertModeOptions;
+            var expertOptions = isExpertMode ? (ExpertModeOptions)selection.ModeOptions : null;
+            var contextPolicy = expertOptions?.ContextPolicy ?? new ExpertContextPolicy();
+            var contextPolicyHash = isExpertMode
+                ? CompactionCacheKeyFactory.ComputeContextPolicyHash(contextPolicy)
+                : string.Empty;
+            var agentPromptHash = isExpertMode
+                ? CompactionCacheKeyFactory.ExtractAgentPromptHashFromSnapshot(
+                    snapshot,
+                    expertOptions!.Agent.AgentId)
+                    ?? CompactionCacheKeyFactory.ComputeAgentPromptHash(
+                        expertOptions.Agent.SystemPrompt)
+                : string.Empty;
+            var toolCatalogVersion = selection.ToolCatalogVersion;
             var providerId = options.ProviderId ?? selection.DefaultSelection.ProviderId;
             var modelId = options.ModelId ?? selection.DefaultSelection.ModelId;
             var effectiveSelection = selection with
@@ -652,28 +667,72 @@ public sealed class LocalRuntime : IAsyncDisposable
             };
             var provider = ResolveProvider(effectiveSelection);
             ValidateCompactionModel(provider, modelId);
+
+            // 解析压缩模型（与 ExpertModeOrchestrator 保持一致）
+            var compactionProviderId = isExpertMode && !string.IsNullOrWhiteSpace(contextPolicy.SummaryProviderId)
+                ? contextPolicy.SummaryProviderId
+                : providerId;
+            var compactionModelId = isExpertMode && !string.IsNullOrWhiteSpace(contextPolicy.SummaryModelId)
+                ? contextPolicy.SummaryModelId
+                : modelId;
+            var compactionProvider = string.Equals(compactionProviderId, providerId, StringComparison.Ordinal)
+                ? provider
+                : ResolveProvider(effectiveSelection with
+                {
+                    DefaultSelection = new DefaultSelection(compactionProviderId, compactionModelId)
+                });
+            ValidateCompactionModel(compactionProvider, compactionModelId);
+
             int? keepLastTokens = options.Strategy is SessionCompactionStrategy.SlidingWindow
                 ? options.KeepLastTokens ?? ResolveDefaultCompactionWindow(provider, modelId)
                 : null;
             var strategyName = GetCompactionStrategyName(options.Strategy);
+            var summaryModelVersion = ResolveCompactionModelVersion(compactionProvider, compactionModelId);
             var store = new ConversationStore(_dataDirectory);
             var source = await store.ReadCompactionSourceAsync(sessionId, ct)
                 .ConfigureAwait(false);
+
+            string? cacheMissReason = null;
+            var selectionSource = options.SelectionSource
+                ?? (options.ProviderId is not null || options.ModelId is not null
+                    ? "cli-override"
+                    : "session-default");
 
             if (!options.DryRun && !options.Force)
             {
                 var cached = await store.ReadCompactCacheAsync(sessionId, ct)
                     .ConfigureAwait(false);
-                if (IsMatchingCompactCache(
-                        cached,
-                        source.HistorySha256,
-                        strategyName,
-                        providerId,
-                        modelId,
-                        keepLastTokens))
+                if (CompactionCacheKeyFactory.IsMatchingCache(
+                    cached,
+                    source.HistorySha256,
+                    strategyName,
+                    providerId,
+                    modelId,
+                    keepLastTokens,
+                    isExpertMode ? contextPolicyHash : null,
+                    isExpertMode ? agentPromptHash : null,
+                    isExpertMode ? toolCatalogVersion : null,
+                    summaryModelVersion))
                 {
-                    return CreateCachedCompactionResult(cached!);
+                    return CreateCachedCompactionResult(cached!, selectionSource);
                 }
+
+                cacheMissReason = CompactionCacheKeyFactory.AnalyzeCacheMismatch(
+                    cached,
+                    source.HistorySha256,
+                    strategyName,
+                    providerId,
+                    modelId,
+                    keepLastTokens,
+                    isExpertMode ? contextPolicyHash : null,
+                    isExpertMode ? agentPromptHash : null,
+                    isExpertMode ? toolCatalogVersion : null,
+                    summaryModelVersion);
+            }
+
+            if (options.Force)
+            {
+                cacheMissReason = "forced-regeneration";
             }
 
             var estimateInvocationId = "compact-estimate-" + Guid.NewGuid().ToString("N");
@@ -723,7 +782,10 @@ public sealed class LocalRuntime : IAsyncDisposable
                     fullProjection.EstimateSource,
                     DryRun: true,
                     CacheHit: false,
-                    CacheWritten: false);
+                    CacheWritten: false,
+                    CacheMissReason: cacheMissReason,
+                    SelectionSource: selectionSource,
+                    SummaryGenerated: false);
             }
 
             RuntimeProviderMessage[] projectionMessages;
@@ -734,9 +796,9 @@ public sealed class LocalRuntime : IAsyncDisposable
             {
                 projectionMessages =
                 [await GenerateSummaryMessageAsync(
-                    provider,
-                    providerId,
-                    modelId,
+                    compactionProvider,
+                    compactionProviderId,
+                    compactionModelId,
                     fullProjection.Messages,
                     ct).ConfigureAwait(false)];
                 var afterEstimate = await EstimateAsync(projectionMessages, ct).ConfigureAwait(false);
@@ -783,10 +845,16 @@ public sealed class LocalRuntime : IAsyncDisposable
                 afterEstimatedTokens,
                 estimateSource,
                 projectionMessages.Select(CreateCompactMessage).ToArray(),
-                DateTimeOffset.UtcNow);
+                DateTimeOffset.UtcNow,
+                RuntimeMode: snapshot.Mode.ToString(),
+                ContextPolicyHash: contextPolicyHash,
+                AgentPromptHash: agentPromptHash,
+                ToolCatalogVersion: selection.ToolCatalogVersion,
+                SummaryModelVersion: summaryModelVersion,
+                CacheMissReason: cacheMissReason);
             await store.WriteCompactCacheAsync(sessionId, compactCache, ct)
                 .ConfigureAwait(false);
-            return CreateGeneratedCompactionResult(options.Strategy, compactCache);
+            return CreateGeneratedCompactionResult(options.Strategy, compactCache, cacheMissReason, selectionSource);
         }
         finally
         {
@@ -1583,6 +1651,16 @@ public sealed class LocalRuntime : IAsyncDisposable
             : SessionCompactionOptions.DefaultKeepLastTokens;
     }
 
+    private static string ResolveCompactionModelVersion(
+        IRuntimeProviderAdapter provider,
+        string modelId)
+    {
+        var model = provider.Models.FirstOrDefault(candidate =>
+            string.Equals(candidate.Id, modelId, StringComparison.Ordinal)
+            || string.Equals(candidate.ProviderModelId, modelId, StringComparison.Ordinal));
+        return model?.ProviderModelId ?? modelId;
+    }
+
     private static int EstimateHistoryTokens(IReadOnlyList<ConversationRecordV1> records)
     {
         long utf8Bytes = 0;
@@ -1666,25 +1744,13 @@ public sealed class LocalRuntime : IAsyncDisposable
         return [new TextContentBlock(content.GetRawText())];
     }
 
-    private static bool IsMatchingCompactCache(
-        ConversationCompactCacheV1? cache,
-        string sourceHistorySha256,
-        string strategy,
-        string providerId,
-        string modelId,
-        int? keepLastTokens) =>
-        cache is not null
-        && string.Equals(
-            cache.SourceHistorySha256,
-            sourceHistorySha256,
-            StringComparison.OrdinalIgnoreCase)
-        && string.Equals(cache.Strategy, strategy, StringComparison.Ordinal)
-        && string.Equals(cache.ProviderId, providerId, StringComparison.Ordinal)
-        && string.Equals(cache.ModelId, modelId, StringComparison.Ordinal)
-        && cache.KeepLastTokens == keepLastTokens;
+    private static string ComputeCompactionHash(string value) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+
 
     private static SessionCompactionResult CreateCachedCompactionResult(
-        ConversationCompactCacheV1 cache) =>
+        ConversationCompactCacheV1 cache,
+        string selectionSource) =>
         new(
             cache.SessionId,
             ParseCompactionStrategy(cache.Strategy),
@@ -1699,11 +1765,15 @@ public sealed class LocalRuntime : IAsyncDisposable
             cache.EstimateSource,
             DryRun: false,
             CacheHit: true,
-            CacheWritten: false);
-
+            CacheWritten: false,
+            CacheMissReason: null,
+            SelectionSource: selectionSource,
+            SummaryGenerated: string.Equals(cache.Strategy, "summary", StringComparison.Ordinal));
     private static SessionCompactionResult CreateGeneratedCompactionResult(
         SessionCompactionStrategy strategy,
-        ConversationCompactCacheV1 cache) =>
+        ConversationCompactCacheV1 cache,
+        string? cacheMissReason,
+        string selectionSource) =>
         new(
             cache.SessionId,
             strategy,
@@ -1718,7 +1788,10 @@ public sealed class LocalRuntime : IAsyncDisposable
             cache.EstimateSource,
             DryRun: false,
             CacheHit: false,
-            CacheWritten: true);
+            CacheWritten: true,
+            CacheMissReason: cacheMissReason,
+            SelectionSource: selectionSource,
+            SummaryGenerated: strategy is SessionCompactionStrategy.Summary);
 
     private static ConversationCompactMessageV1 CreateCompactMessage(
         RuntimeProviderMessage message) =>
@@ -1951,6 +2024,16 @@ public sealed class LocalRuntime : IAsyncDisposable
             throw new InvalidOperationException(
                 $"Agent prompt template version for '{expertOptions.Agent.AgentId}' does not match the Session snapshot.");
         }
+    }
+
+    private static string ResolveModelVersion(
+        IRuntimeProviderAdapter provider,
+        string modelId)
+    {
+        var found = provider.Models.FirstOrDefault(model =>
+            string.Equals(model.Id, modelId, StringComparison.Ordinal)
+            || string.Equals(model.ProviderModelId, modelId, StringComparison.Ordinal));
+        return found?.ProviderModelId ?? found?.Id ?? modelId;
     }
 
     private sealed record PreparedRun(

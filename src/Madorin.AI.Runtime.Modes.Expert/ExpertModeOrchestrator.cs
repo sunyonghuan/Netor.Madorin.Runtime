@@ -1,4 +1,4 @@
-﻿using System.Runtime.CompilerServices;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -11,6 +11,7 @@ using Madorin.AI.Runtime.Persistence.Abstractions;
 using Madorin.AI.Runtime.Persistence.Files;
 using Madorin.AI.Runtime.Persistence.Sqlite;
 using Madorin.AI.Runtime.Providers.Abstractions;
+using Madorin.AI.Runtime.Services.AgentJobs;
 using Madorin.AI.Runtime.Services.Memory;
 using Madorin.AI.Runtime.Services.Skills;
 using Madorin.AI.Runtime.Services.Tools;
@@ -42,9 +43,13 @@ public sealed class ExpertModeOrchestrator(
     Func<RuntimeSkillScriptInvocation, CancellationToken, Task<RuntimeSkillScriptResult>>? scriptInvoker = null,
     Func<ToolCatalogSnapshot>? liveCatalogProvider = null,
     bool isHostModeSkills = false,
-    SkillActivationStore? skillActivationStore = null) : IModeOrchestrator
+    SkillActivationStore? skillActivationStore = null,
+    IAgentJobCoordinator? agentJobCoordinator = null,
+    Func<string, IRuntimeProviderAdapter>? providerResolver = null) : IModeOrchestrator
 {
     private const string ProjectionVersion = "expert-full-tail-v1";
+    /// <summary>与 BuiltinToolRegistry.DelegateToAgentToolId 保持一致，避免 Modes.Expert 反向依赖 Tools.Builtin。</summary>
+    private const string DelegateToAgentToolId = "mcli_delegate_agent";
     private readonly SqliteEventOutbox _outbox = outbox
         ?? throw new ArgumentNullException(nameof(outbox));
     private readonly IRuntimeProviderAdapter _provider = provider
@@ -76,6 +81,17 @@ public sealed class ExpertModeOrchestrator(
     private readonly Func<ToolCatalogSnapshot>? _liveCatalogProvider = liveCatalogProvider;
     private readonly bool _isHostModeSkills = isHostModeSkills;
     private readonly SkillActivationStore? _skillActivationStore = skillActivationStore;
+    private readonly IAgentJobCoordinator? _agentJobCoordinator = agentJobCoordinator;
+    private readonly Func<string, IRuntimeProviderAdapter> _providerResolver = providerResolver ?? (requestedProviderId =>
+    {
+        if (string.Equals(requestedProviderId, provider.ProviderId, StringComparison.Ordinal))
+        {
+            return provider;
+        }
+
+        throw new InvalidOperationException(
+            $"Provider {requestedProviderId} is not available through the selected adapter.");
+    });
     private string[]? _hostAllowlistSkillIds;
     private string? _hostSkillDiscoveryMode;
     private IReadOnlyDictionary<string, string>? _hostCatalogPathsByName;
@@ -105,6 +121,19 @@ public sealed class ExpertModeOrchestrator(
                 $"Provider '{providerId}' is not available through the selected adapter.");
         }
 
+        // 并行作业池：绑定本 Run 的子 Agent 执行器，供 mcli_agent_job_* 工具 create/wait/result 回收。
+        _agentJobCoordinator?.BindWorker(
+            (jobId, agentName, task, jobRunId, jobSessionId, parentAgentId, jobCt) =>
+                ExecuteAgentJobAsync(
+                    expert,
+                    jobId,
+                    agentName,
+                    task,
+                    jobRunId,
+                    jobSessionId,
+                    parentAgentId,
+                    jobCt));
+
         var invocationId = Guid.NewGuid().ToString("N");
         var startedAt = DateTimeOffset.UtcNow;
 
@@ -133,7 +162,7 @@ public sealed class ExpertModeOrchestrator(
             expert.Agent.AgentId,
             providerId,
             modelId,
-            ComputeHash(expert.Agent.SystemPrompt),
+            CompactionCacheKeyFactory.ComputeAgentPromptHash(expert.Agent.SystemPrompt),
             agentContext.GlobalMemoryHash,
             agentContext.ProjectMemoryHash,
             catalogVersion,
@@ -157,6 +186,7 @@ public sealed class ExpertModeOrchestrator(
         var userInputText = string.Concat(
             request.InitialInput.OfType<TextContentBlock>().Select(block => block.Text));
         var (isDelegation, delegatedAgentName, delegatedTask) = TryParseDelegationSyntax(userInputText);
+        var preTurnSource = await _store.ReadCompactionSourceAsync(sessionId, ct).ConfigureAwait(false);
 
         if (isDelegation && expert.AvailableAgents is { Length: > 0 })
         {
@@ -261,21 +291,35 @@ public sealed class ExpertModeOrchestrator(
                 startedAt,
                 ct).ConfigureAwait(false);
         }
-        var snapshotJson = JsonSerializer.Serialize(
-            snapshot,
-            RuntimeJsonContext.Default.InvocationSnapshot);
-        await _sessionRepo.SaveInvocationSnapshotAsync(
-            runId,
-            sessionId,
-            snapshot,
-            snapshotJson,
-            ct).ConfigureAwait(false);
+
         var history = await _store.ReadAllAsync(sessionId, ct).ConfigureAwait(false);
+        var contextPolicy = expert.ContextPolicy ?? new ExpertContextPolicy();
         var model = _provider.Models.FirstOrDefault(candidate =>
-            string.Equals(candidate.Id, modelId, StringComparison.Ordinal));
-        var tokenLimit = model?.ContextWindow is > 0
-            ? (int)(model.ContextWindow.Value * 0.9)
+            string.Equals(candidate.Id, modelId, StringComparison.Ordinal)
+            || string.Equals(candidate.ProviderModelId, modelId, StringComparison.Ordinal));
+        var modelContextLimit = model?.ContextWindow is > 0
+            ? Math.Max(1, (int)(model.ContextWindow.Value * 0.9))
             : int.MaxValue;
+        var configuredLimit = contextPolicy.MaxTokens;
+        var tokenLimit = configuredLimit is > 0
+            ? Math.Min(configuredLimit.Value, modelContextLimit)
+            : modelContextLimit;
+        var useSummaryStrategy = IsSummaryStrategy(contextPolicy.Strategy);
+        var compactionProviderId = string.IsNullOrWhiteSpace(contextPolicy.SummaryProviderId)
+            ? providerId
+            : contextPolicy.SummaryProviderId;
+        var compactionModelId = string.IsNullOrWhiteSpace(contextPolicy.SummaryModelId)
+            ? modelId
+            : contextPolicy.SummaryModelId;
+        var compactionProvider = _provider;
+        if (useSummaryStrategy)
+        {
+            compactionProvider = _providerResolver(compactionProviderId);
+            ValidateCompactionModel(compactionProvider, compactionModelId);
+        }
+        var summaryModelVersion = useSummaryStrategy
+            ? ResolveModelVersion(compactionProvider!, compactionModelId)
+            : $"{compactionProviderId}:{compactionModelId}";
         var systemMessage = new RuntimeProviderMessage(
             RuntimeProviderRoles.System,
             [new TextContentBlock(agentContext.Instructions)]);
@@ -297,12 +341,150 @@ public sealed class ExpertModeOrchestrator(
                     CancellationToken: token,
                     Skills: CreateSkillsContext(snapshot, runId, sessionId)),
                 token);
-        var projection = await ContextProjectionBuilder.BuildAsync(
+        var contextPolicyHash = CompactionCacheKeyFactory.ComputeContextPolicyHash(contextPolicy);
+        var agentPromptHash = CompactionCacheKeyFactory.ComputeAgentPromptHash(expert.Agent.SystemPrompt);
+        var cachedProjection = useSummaryStrategy
+            ? await TryReadProjectionCacheAsync(
+                    sessionId,
+                    preTurnSource,
+                    compactionProviderId,
+                    compactionModelId,
+                    contextPolicyHash,
+                    agentPromptHash,
+                    request.Selection.ToolCatalogVersion,
+                    summaryModelVersion,
+                    ct)
+                .ConfigureAwait(false)
+            : (Projection: (ContextProjectionBuilder.Result?)null, CacheHit: false, CacheMissReason: (string?)null);
+        var projectionCacheHit = cachedProjection.CacheHit;
+        var projection = cachedProjection.Projection;
+        var projectionCacheMissReason = cachedProjection.CacheMissReason;
+        if (projection is not null && history.Count > preTurnSource.Records.Count)
+        {
+            var currentTurnMessages = history
+                .Skip(preTurnSource.Records.Count)
+                .Select(ToRuntimeProviderMessage)
+                .ToArray();
+            RuntimeProviderMessage[] mergedMessages = [.. projection.Messages, .. currentTurnMessages];
+            var mergedEstimate = await EstimateProjectionAsync(mergedMessages, ct).ConfigureAwait(false);
+            var mergedTokens = mergedEstimate.InputTokens
+                ?? ProviderTokenEstimator.Estimate(new RuntimeProviderRequest(
+                    "compact-cache-turn-estimate-" + Guid.NewGuid().ToString("N"),
+                    expert.Agent.AgentId,
+                    providerId,
+                    modelId,
+                    [systemMessage, .. mergedMessages])).InputTokens
+                ?? int.MaxValue;
+            if (mergedTokens <= tokenLimit)
+            {
+                projection = projection with
+                {
+                    Messages = mergedMessages,
+                    EstimatedTokens = mergedTokens,
+                    EstimateSource = mergedEstimate.InputTokens is null
+                        ? "runtime.utf8-bytes/4"
+                        : $"provider.{mergedEstimate.Accuracy.ToString().ToLowerInvariant()}"
+                };
+            }
+            else
+            {
+                projection = null;
+                projectionCacheHit = false;
+                projectionCacheMissReason = "cache-current-turn-over-budget";
+            }
+        }
+
+        projection ??= await ContextProjectionBuilder.BuildAsync(
                 history,
                 tokenLimit,
                 EstimateProjectionAsync,
                 ct)
             .ConfigureAwait(false);
+        if (!projectionCacheHit
+            && useSummaryStrategy
+            && projection.IsAdjusted)
+        {
+            try
+            {
+                var fullProjection = await ContextProjectionBuilder.BuildAsync(
+                        history,
+                        int.MaxValue,
+                        EstimateProjectionAsync,
+                        ct)
+                    .ConfigureAwait(false);
+                var summaryMessage = await GenerateSummaryMessageAsync(
+                        compactionProvider!,
+                        compactionProviderId,
+                        compactionModelId,
+                        fullProjection.Messages,
+                        ct)
+                    .ConfigureAwait(false);
+                var summaryProjection = await BuildSummaryProjectionAsync(
+                        history,
+                        summaryMessage,
+                        contextPolicy.TailMessageCount,
+                        tokenLimit,
+                        EstimateProjectionAsync,
+                        ct)
+                    .ConfigureAwait(false);
+                if (summaryProjection is null)
+                {
+                    if (contextPolicy.SummaryRequired)
+                    {
+                        throw new InvalidDataException(
+                            "The configured summary did not fit within the active context window.");
+                    }
+                }
+                else
+                {
+                    projection = summaryProjection;
+                    var source = await _store.ReadCompactionSourceAsync(sessionId, ct)
+                        .ConfigureAwait(false);
+                    await WriteProjectionCacheAsync(
+                            sessionId,
+                            source,
+                            projection,
+                            fullProjection.EstimatedTokens,
+                            compactionProvider!,
+                            compactionProviderId,
+                            compactionModelId,
+                            contextPolicyHash,
+                            agentPromptHash,
+                            request.Selection.ToolCatalogVersion,
+                            projectionCacheMissReason,
+                            ct)
+                        .ConfigureAwait(false);
+                }
+            }
+            catch (Exception) when (!contextPolicy.SummaryRequired && !ct.IsCancellationRequested)
+            {
+                projectionCacheMissReason = "summary-failed";
+            }
+        }
+        snapshot = snapshot with
+        {
+            ContextProjection = new ContextProjectionSnapshot(
+                projection.Strategy,
+                [],
+                projection.DroppedMessageCount,
+                projection.Messages.Length,
+                projection.EstimatedTokens,
+                projection.EstimateSource,
+                tokenLimit,
+                CompactionProviderId: compactionProviderId,
+                CompactionModelId: compactionModelId,
+                CacheHit: projectionCacheHit,
+                CacheMissReason: projectionCacheMissReason ?? (projection.IsAdjusted ? "projection-rebuilt" : null))
+        };
+        var updatedSnapshotJson = JsonSerializer.Serialize(
+            snapshot,
+            RuntimeJsonContext.Default.InvocationSnapshot);
+        await _sessionRepo.SaveInvocationSnapshotAsync(
+            runId,
+            sessionId,
+            snapshot,
+            updatedSnapshotJson,
+            ct).ConfigureAwait(false);
         var messages = new RuntimeProviderMessage[projection.Messages.Length + 1];
         messages[0] = systemMessage;
         projection.Messages.CopyTo(messages, 1);
@@ -319,7 +501,6 @@ public sealed class ExpertModeOrchestrator(
         {
             HistoryMessageCount = Math.Max(0, providerMessages.Count - 1)
         };
-
         long runSequence = 1;
         var startedPayload = JsonSerializer.SerializeToElement(
             new InvocationStartedEvent(invocationId, snapshot),
@@ -633,6 +814,7 @@ public sealed class ExpertModeOrchestrator(
                     cancelled = true;
                     break;
                 }
+
                 if (gatewayResult.Kind is ToolGatewayResultKind.NeedsPermission
                     or ToolGatewayResultKind.NeedsApproval)
                 {
@@ -673,6 +855,20 @@ public sealed class ExpertModeOrchestrator(
                     .ConfigureAwait(false);
 
                 var toolResult = CreateToolResultContent(toolCall, gatewayResult);
+                // 元数据工具受理后，由 Expert 编排器同步路由子 Agent，并把真实结果写回 tool result。
+                if (IsDelegateToAgentTool(toolCall.ToolId)
+                    && gatewayResult.Kind is ToolGatewayResultKind.Success
+                    && gatewayResult.Result is { Success: true })
+                {
+                    toolResult = await RouteDelegateAgentToolAsync(
+                        toolCall,
+                        expert,
+                        runId,
+                        sessionId,
+                        invocationId,
+                        ct).ConfigureAwait(false);
+                }
+
                 if (_isHostModeSkills
                     && gatewayResult.Kind is ToolGatewayResultKind.Success
                     && gatewayResult.Result is { Success: true, OutputJson: { } outputJson })
@@ -972,6 +1168,315 @@ public sealed class ExpertModeOrchestrator(
             toolCall.ToolId,
             success,
             content);
+    }
+
+    private static bool IsDelegateToAgentTool(string toolId) =>
+        string.Equals(toolId, DelegateToAgentToolId, StringComparison.Ordinal);
+
+    /// <summary>并行 Job Worker：解析 AvailableAgents 并复用 InvokeSubAgentAsync。</summary>
+    private async Task<AgentJobWorkerResult> ExecuteAgentJobAsync(
+        ExpertModeOptions expert,
+        string jobId,
+        string agentName,
+        string task,
+        string runId,
+        string sessionId,
+        string parentAgentId,
+        CancellationToken ct)
+    {
+        _ = jobId;
+        if (string.Equals(agentName, expert.Agent.AgentId, StringComparison.OrdinalIgnoreCase))
+        {
+            return new AgentJobWorkerResult(
+                false,
+                null,
+                $"Cannot run parallel job as the primary agent '{agentName}'.");
+        }
+
+        if (expert.AvailableAgents is not { Length: > 0 })
+        {
+            return new AgentJobWorkerResult(
+                false,
+                null,
+                "Expert mode has no AvailableAgents configured for parallel jobs.");
+        }
+
+        var targetAgent = Array.Find(
+            expert.AvailableAgents,
+            a => string.Equals(a.AgentId, agentName, StringComparison.OrdinalIgnoreCase));
+        if (targetAgent is null)
+        {
+            var availableAgentIds = string.Join(
+                ", ",
+                expert.AvailableAgents.Select(static a => a.AgentId));
+            return new AgentJobWorkerResult(
+                false,
+                null,
+                $"Sub-agent '{agentName}' not found in AvailableAgents. Available: [{availableAgentIds}]");
+        }
+
+        var (content, success) = await InvokeSubAgentAsync(
+            targetAgent.AgentId,
+            targetAgent,
+            task,
+            runId,
+            sessionId,
+            parentInvocationId: Guid.NewGuid().ToString("N"),
+            parentAgentId,
+            ct).ConfigureAwait(false);
+
+        if (!success)
+        {
+            return new AgentJobWorkerResult(
+                false,
+                null,
+                $"Sub-agent '{targetAgent.AgentId}' failed to complete the task.");
+        }
+
+        return new AgentJobWorkerResult(true, FlattenContentText(content), null);
+    }
+
+    /// <summary>
+    /// 在 mcli_delegate_agent 参数校验通过后，同步调用目标子 Agent，并把执行结果写回 tool result。
+    /// </summary>
+    private async Task<ToolResultContentBlock> RouteDelegateAgentToolAsync(
+        ToolCallContentBlock toolCall,
+        ExpertModeOptions expert,
+        string runId,
+        string sessionId,
+        string parentInvocationId,
+        CancellationToken ct)
+    {
+        if (!TryParseDelegateAgentArguments(
+                toolCall.Arguments.GetRawText(),
+                out var agentName,
+                out var task,
+                out var parseError))
+        {
+            return CreateDelegateToolResult(
+                toolCall,
+                success: false,
+                delegated: false,
+                agentName: agentName,
+                task: task,
+                message: parseError ?? "Invalid delegate agent arguments.",
+                resultText: null);
+        }
+
+        if (string.Equals(agentName, expert.Agent.AgentId, StringComparison.OrdinalIgnoreCase))
+        {
+            return CreateDelegateToolResult(
+                toolCall,
+                success: false,
+                delegated: false,
+                agentName: agentName,
+                task: task,
+                message: $"Cannot delegate to the primary agent '{agentName}'.",
+                resultText: null);
+        }
+
+        if (expert.AvailableAgents is not { Length: > 0 })
+        {
+            return CreateDelegateToolResult(
+                toolCall,
+                success: false,
+                delegated: false,
+                agentName: agentName,
+                task: task,
+                message: "Expert mode has no AvailableAgents configured for delegation.",
+                resultText: null);
+        }
+
+        var targetAgent = Array.Find(
+            expert.AvailableAgents,
+            a => string.Equals(a.AgentId, agentName, StringComparison.OrdinalIgnoreCase));
+        if (targetAgent is null)
+        {
+            var availableAgentIds = string.Join(
+                ", ",
+                expert.AvailableAgents.Select(static a => a.AgentId));
+            return CreateDelegateToolResult(
+                toolCall,
+                success: false,
+                delegated: false,
+                agentName: agentName,
+                task: task,
+                message: $"Sub-agent '{agentName}' not found in AvailableAgents. Available: [{availableAgentIds}]",
+                resultText: null);
+        }
+
+        var resolvedAgentName = targetAgent.AgentId;
+        var (subAgentContent, success) = await InvokeSubAgentAsync(
+            resolvedAgentName,
+            targetAgent,
+            task,
+            runId,
+            sessionId,
+            parentInvocationId,
+            expert.Agent.AgentId,
+            ct).ConfigureAwait(false);
+
+        if (!success)
+        {
+            return CreateDelegateToolResult(
+                toolCall,
+                success: false,
+                delegated: true,
+                agentName: resolvedAgentName,
+                task: task,
+                message: $"Sub-agent '{resolvedAgentName}' failed to complete the task.",
+                resultText: null);
+        }
+
+        await AppendContentAsync(
+            sessionId,
+            parentInvocationId,
+            resolvedAgentName,
+            "assistant",
+            subAgentContent,
+            DateTimeOffset.UtcNow,
+            ct).ConfigureAwait(false);
+
+        var resultText = FlattenContentText(subAgentContent);
+        return CreateDelegateToolResult(
+            toolCall,
+            success: true,
+            delegated: true,
+            agentName: resolvedAgentName,
+            task: task,
+            message: $"Sub-agent '{resolvedAgentName}' completed the task.",
+            resultText: resultText);
+    }
+
+    private static bool TryParseDelegateAgentArguments(
+        string argumentsJson,
+        out string agentName,
+        out string task,
+        out string? error)
+    {
+        agentName = string.Empty;
+        task = string.Empty;
+        error = null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(argumentsJson);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                error = "Tool arguments must be a JSON object.";
+                return false;
+            }
+
+            if (!root.TryGetProperty("agentName", out var agentNameElement)
+                || agentNameElement.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(agentNameElement.GetString()))
+            {
+                error = "Missing or invalid 'agentName' parameter.";
+                return false;
+            }
+
+            if (!root.TryGetProperty("task", out var taskElement)
+                || taskElement.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(taskElement.GetString()))
+            {
+                error = "Missing or invalid 'task' parameter.";
+                return false;
+            }
+
+            agentName = agentNameElement.GetString()!.Trim();
+            task = taskElement.GetString()!.Trim();
+            return true;
+        }
+        catch (JsonException ex)
+        {
+            error = ex.Message;
+            return false;
+        }
+    }
+
+    private static ToolResultContentBlock CreateDelegateToolResult(
+        ToolCallContentBlock toolCall,
+        bool success,
+        bool delegated,
+        string agentName,
+        string task,
+        string message,
+        string? resultText)
+    {
+        var outputJson = BuildDelegateResultJson(
+            delegated,
+            success,
+            agentName,
+            task,
+            message,
+            resultText);
+        return new ToolResultContentBlock(
+            toolCall.CallId,
+            toolCall.ToolId,
+            success,
+            [new TextContentBlock(outputJson)]);
+    }
+
+    private static string BuildDelegateResultJson(
+        bool delegated,
+        bool success,
+        string agentName,
+        string task,
+        string message,
+        string? resultText)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            writer.WriteBoolean("delegated", delegated);
+            writer.WriteBoolean("success", success);
+            if (!string.IsNullOrEmpty(agentName))
+            {
+                writer.WriteString("agentName", agentName);
+            }
+
+            if (!string.IsNullOrEmpty(task))
+            {
+                writer.WriteString("task", task);
+            }
+
+            writer.WriteString("message", message);
+            if (resultText is not null)
+            {
+                writer.WriteString("result", resultText);
+            }
+
+            writer.WriteEndObject();
+        }
+
+        return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    private static string FlattenContentText(ContentBlock[] content)
+    {
+        if (content.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        var builder = new StringBuilder();
+        foreach (var block in content)
+        {
+            if (block is TextContentBlock text
+                && !string.IsNullOrEmpty(text.Text))
+            {
+                if (builder.Length > 0)
+                {
+                    builder.AppendLine();
+                }
+
+                builder.Append(text.Text);
+            }
+        }
+
+        return builder.ToString();
     }
 
     private static long GetContentByteCount(ToolResultContentBlock content) =>
@@ -1403,8 +1908,257 @@ public sealed class ExpertModeOrchestrator(
         _skillCatalogSnapshotProvider?.Invoke(ct)
         ?? Task.FromResult<SkillCatalogSnapshot?>(null);
 
-    private static string ComputeHash(string value) =>
-        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+    private static bool IsSummaryStrategy(string strategy) =>
+        string.Equals(strategy, "Summary", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(strategy, "SummaryCompressed", StringComparison.OrdinalIgnoreCase);
+
+    private static void ValidateCompactionModel(
+        IRuntimeProviderAdapter provider,
+        string modelId)
+    {
+        if (provider.Models.Count == 0 || provider.Models.Any(model =>
+                string.Equals(model.Id, modelId, StringComparison.Ordinal)
+                || string.Equals(model.ProviderModelId, modelId, StringComparison.Ordinal)))
+        {
+            return;
+        }
+
+        throw new KeyNotFoundException(
+            $"Model {modelId} is not available from Provider {provider.ProviderId}.");
+    }
+
+    private static async Task<RuntimeProviderMessage> GenerateSummaryMessageAsync(
+        IRuntimeProviderAdapter provider,
+        string providerId,
+        string modelId,
+        RuntimeProviderMessage[] history,
+        CancellationToken ct)
+    {
+        var request = new RuntimeProviderRequest(
+            "compact-summary-" + Guid.NewGuid().ToString("N"),
+            "session-compactor",
+            providerId,
+            modelId,
+            [
+                new RuntimeProviderMessage(
+                    RuntimeProviderRoles.System,
+                    [new TextContentBlock(
+                        "Summarize this conversation for future context. Preserve decisions, constraints, " +
+                        "unresolved work, identifiers, and tool outcomes. Do not add facts. Return only the summary.")]),
+                .. history
+            ],
+            Tools: null,
+            CancellationToken: ct);
+        var summary = new StringBuilder();
+        var completed = false;
+        await foreach (var providerEvent in ProviderInvocationBoundary.CompleteStreamingAsync(provider, request, ct).ConfigureAwait(false))
+        {
+            switch (providerEvent)
+            {
+                case TextDeltaProviderEvent text:
+                    summary.Append(text.Delta);
+                    break;
+                case InvocationCompletedProviderEvent:
+                    completed = true;
+                    break;
+                case InvocationFailedProviderEvent failed:
+                    throw new InvalidOperationException(
+                        $"Summary Provider failed ({failed.Error.Code}): {failed.Error.Message}");
+                case ToolCallDeltaProviderEvent or ToolCallCompleteProviderEvent:
+                    throw new InvalidDataException(
+                        "The summary Provider returned a tool call for a tool-free request.");
+                case ReasoningDeltaProviderEvent or UsageUpdatedProviderEvent or ProjectionAdjustedProviderEvent:
+                    break;
+                default:
+                    throw new InvalidDataException(
+                        $"The summary Provider returned unsupported event '{providerEvent.GetType().Name}'.");
+            }
+        }
+
+        if (!completed || string.IsNullOrWhiteSpace(summary.ToString()))
+        {
+            throw new InvalidDataException(
+                "The summary Provider completed without returning content.");
+        }
+
+        return new RuntimeProviderMessage(
+            RuntimeProviderRoles.Assistant,
+            [new TextContentBlock(summary.ToString().Trim())]);
+    }
+
+    private static async Task<ContextProjectionBuilder.Result?> BuildSummaryProjectionAsync(
+        IReadOnlyList<ConversationRecordV1> history,
+        RuntimeProviderMessage summaryMessage,
+        int? tailMessageCount,
+        int tokenLimit,
+        Func<RuntimeProviderMessage[], CancellationToken, ValueTask<ProviderTokenEstimate>> estimator,
+        CancellationToken ct)
+    {
+        var maxTailMessageCount = Math.Max(0, tailMessageCount ?? 0);
+        for (var requestedTailCount = maxTailMessageCount;
+             requestedTailCount >= 0;
+             requestedTailCount--)
+        {
+            var tailMessages = requestedTailCount == 0
+                ? []
+                : ContextProjectionBuilder.BuildTailWindow(history, requestedTailCount);
+            var messages = new RuntimeProviderMessage[tailMessages.Length + 1];
+            messages[0] = summaryMessage;
+            tailMessages.CopyTo(messages, 1);
+            var estimate = await estimator(messages, ct).ConfigureAwait(false);
+            var estimatedTokens = estimate.InputTokens
+                ?? ProviderTokenEstimator.Estimate(new RuntimeProviderRequest(
+                    "compact-summary-estimate-" + Guid.NewGuid().ToString("N"),
+                    "session-compactor",
+                    string.Empty,
+                    string.Empty,
+                    messages)).InputTokens
+                ?? 0;
+            var estimateSource = estimate.InputTokens is null
+                ? "runtime.utf8-bytes/4"
+                : $"provider.{estimate.Accuracy.ToString().ToLowerInvariant()}";
+            if (estimatedTokens <= tokenLimit)
+            {
+                return new ContextProjectionBuilder.Result(
+                    messages,
+                    "Summary",
+                    Math.Max(0, history.Count - tailMessages.Length),
+                    estimatedTokens,
+                    estimateSource);
+            }
+        }
+
+        return null;
+    }
+
+    private async Task WriteProjectionCacheAsync(string sessionId,
+        ConversationCompactionSource source,
+        ContextProjectionBuilder.Result projection,
+        int beforeEstimatedTokens,
+        IRuntimeProviderAdapter provider,
+        string providerId,
+        string modelId,
+        string contextPolicyHash,
+        string agentPromptHash,
+        string toolCatalogVersion,
+        string? cacheMissReason,
+        CancellationToken ct)
+    {
+        var cache = new ConversationCompactCacheV1(
+            ConversationCompactCacheV1.CurrentSchema,
+            sessionId,
+            source.HistorySha256,
+            "summary",
+            providerId,
+            modelId,
+            null,
+            source.Records.Count,
+            projection.DroppedMessageCount,
+            beforeEstimatedTokens,
+            projection.EstimatedTokens,
+            projection.EstimateSource,
+            projection.Messages.Select(CreateCompactMessage).ToArray(),
+            DateTimeOffset.UtcNow,
+            RuntimeMode: RuntimeMode.Expert.ToString(),
+            ContextPolicyHash: contextPolicyHash,
+            AgentPromptHash: agentPromptHash,
+            ToolCatalogVersion: toolCatalogVersion,
+            SummaryModelVersion: ResolveModelVersion(provider, modelId),
+            CacheMissReason: cacheMissReason);
+        await _store.WriteCompactCacheAsync(sessionId, cache, ct)
+            .ConfigureAwait(false);
+    }
+
+    private static ConversationCompactMessageV1 CreateCompactMessage(RuntimeProviderMessage message) => new(
+        message.Role,
+        JsonSerializer.SerializeToElement(
+            message.Content,
+            RuntimeJsonContext.Default.ContentBlockArray));
+
+    private static string ResolveModelVersion(
+        IRuntimeProviderAdapter provider,
+        string modelId)
+    {
+        var found = provider.Models.FirstOrDefault(model =>
+            string.Equals(model.Id, modelId, StringComparison.Ordinal)
+            || string.Equals(model.ProviderModelId, modelId, StringComparison.Ordinal));
+        return found?.ProviderModelId ?? found?.Id ?? modelId;
+    }
+
+    private async Task<(ContextProjectionBuilder.Result? Projection, bool CacheHit, string? CacheMissReason)> TryReadProjectionCacheAsync(
+        string sessionId,
+        ConversationCompactionSource source,
+        string providerId,
+        string modelId,
+        string contextPolicyHash,
+        string agentPromptHash,
+        string toolCatalogVersion,
+        string summaryModelVersion,
+        CancellationToken ct)
+    {
+        var cache = await _store.ReadCompactCacheAsync(sessionId, ct).ConfigureAwait(false);
+
+        // 使用统一的缓存键工厂进行匹配
+        if (!CompactionCacheKeyFactory.IsMatchingCache(
+            cache,
+            source.HistorySha256,
+            "summary",
+            providerId,
+            modelId,
+            keepLastTokens: null,
+            contextPolicyHash,
+            agentPromptHash,
+            toolCatalogVersion,
+            summaryModelVersion))
+        {
+            // 额外检查 Expert 模式专属字段
+            if (cache is not null
+                && !string.Equals(cache.RuntimeMode, "Expert", StringComparison.Ordinal))
+            {
+                return (null, false, "cache-identity-mismatch(mode)");
+            }
+
+            var cacheMissReason = CompactionCacheKeyFactory.AnalyzeCacheMismatch(
+                cache,
+                source.HistorySha256,
+                "summary",
+                providerId,
+                modelId,
+                keepLastTokens: null,
+                contextPolicyHash,
+                agentPromptHash,
+                toolCatalogVersion,
+                summaryModelVersion);
+            return (null, false, cacheMissReason);
+        }
+
+        // 再次检查 RuntimeMode（虽然已经通过基础匹配，但为了明确性）
+        if (!string.Equals(cache!.RuntimeMode, "Expert", StringComparison.Ordinal))
+        {
+            return (null, false, "cache-identity-mismatch(mode)");
+        }
+
+        // 缓存匹配成功，反序列化消息
+        var messages = cache!.ProjectionMessages
+            .Select(message => new RuntimeProviderMessage(
+                message.Role,
+                message.Content.Deserialize(RuntimeJsonContext.Default.ContentBlockArray)
+                    ?? throw new InvalidDataException("The compaction cache contains no content.")))
+            .ToArray();
+        return (
+            new ContextProjectionBuilder.Result(
+                messages,
+                "Summary",
+                cache.DroppedMessageCount,
+                cache.AfterEstimatedTokens,
+                cache.EstimateSource),
+            true,
+            null);
+    }
+    private static RuntimeProviderMessage ToRuntimeProviderMessage(ConversationRecordV1 record) => new(
+        record.Role,
+        record.Content.Deserialize(RuntimeJsonContext.Default.ContentBlockArray)
+            ?? throw new InvalidDataException("A conversation record has no content."));
 
     private ToolCatalogSnapshot? CaptureCatalogSnapshot()
     {
@@ -1480,11 +2234,25 @@ public sealed class ExpertModeOrchestrator(
         agentListBuilder.AppendLine();
         agentListBuilder.AppendLine("## Sub-Agent Delegation in Expert Mode");
         agentListBuilder.AppendLine();
-        agentListBuilder.AppendLine("When you need to delegate a task to a specialized agent, use the following syntax:");
+        agentListBuilder.AppendLine("### Synchronous single-agent handoff");
+        agentListBuilder.AppendLine(
+            "Use `mcli_delegate_agent` when you need one specialist and must block for its `result` immediately.");
         agentListBuilder.AppendLine();
-        agentListBuilder.AppendLine("```");
-        agentListBuilder.AppendLine("@agentName <task description>");
-        agentListBuilder.AppendLine("```");
+        agentListBuilder.AppendLine("### Parallel background jobs (no scheduling)");
+        agentListBuilder.AppendLine(
+            "Use these tools to run multiple specialists in parallel without blocking the create call:");
+        agentListBuilder.AppendLine("- `mcli_agent_job_create` / `mcli_agent_job_create_many`: enqueue jobs, get `jobId`(s)");
+        agentListBuilder.AppendLine("- `mcli_agent_job_status`: query state");
+        agentListBuilder.AppendLine(
+            "- `mcli_agent_job_result`: recover finished result(s) (`jobId` or `jobIds`); non-terminal returns ready=false");
+        agentListBuilder.AppendLine(
+            "- `mcli_agent_job_wait`: wait until terminal (or timeout) then recover results — preferred after create_many");
+        agentListBuilder.AppendLine("- `mcli_agent_job_cancel`: request cancel");
+        agentListBuilder.AppendLine(
+            "There is no cron/timer API; long multi-step orchestration belongs in Work mode.");
+        agentListBuilder.AppendLine();
+        agentListBuilder.AppendLine(
+            "Users may also start a turn with `@agentName <task>`; that path is handled before your turn.");
         agentListBuilder.AppendLine();
         agentListBuilder.AppendLine("Available sub-agents:");
         agentListBuilder.AppendLine();
@@ -1497,12 +2265,9 @@ public sealed class ExpertModeOrchestrator(
                 var description = agent.SystemPrompt?.Split('\n', StringSplitOptions.RemoveEmptyEntries)
                     .FirstOrDefault() ?? string.Empty;
                 agentListBuilder.AppendLine(System.Globalization.CultureInfo.InvariantCulture,
-                    $"- **@{agent.AgentId}** - {description}");
+                    $"- **{agent.AgentId}** (`@{agent.AgentId}`) - {description}");
             }
         }
-
-        agentListBuilder.AppendLine();
-        agentListBuilder.AppendLine("The orchestrator will automatically invoke the specified sub-agent and include its result in the conversation.");
 
         return baseInstructions + agentListBuilder.ToString();
     }

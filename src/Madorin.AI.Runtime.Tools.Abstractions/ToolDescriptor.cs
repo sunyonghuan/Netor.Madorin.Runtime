@@ -16,4 +16,5 @@ public sealed record ToolDescriptor(
     IReadOnlyList<string>? Capabilities = null,
     ToolRiskLevel Risk = ToolRiskLevel.Low,
     ToolExecutionTarget ExecutionTarget = ToolExecutionTarget.Builtin,
-    bool IsIdempotent = true);
+    bool IsIdempotent = true,
+    IReadOnlyList<string>? SupportedModes = null);

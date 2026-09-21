@@ -1,8 +1,8 @@
 # Agent 委派功能实现变更日志
 
-> 实现日期：2026-09-12
+> 实现日期：2026-09-12（初版） / 2026-09-20（Expert 工具路由闭环）
 >
-> 功能：支持 `@agentname` 语义的多 Agent 委派机制
+> 功能：支持 `@agentname` 与 `mcli_delegate_agent` 的多 Agent 委派机制
 
 ## 变更概览
 
@@ -13,6 +13,7 @@
 | `c74a296` | feat | Runtime | Work 模式 System Prompt 注入可用 Agent 列表 |
 | `7aa210f` | feat | Runtime | Meeting 模式 System Prompt 注入可用参会者列表 |
 | `927367d` | fix | Runtime | 修正 Agent 委派注入的业务逻辑错误 |
+| （本变更） | fix | Runtime | Expert 编排器消费 `mcli_delegate_agent` 并回写 `result`；契约/Catalog 3.1.0 |
 
 ## 详细变更
 
@@ -415,23 +416,28 @@
 }
 ```
 
-**输出（成功）**:
+**输出（Expert 编排器最终成功）**:
 ```json
 {
   "delegated": true,
+  "success": true,
   "agentName": "Developer",
   "task": "Fix the authentication bug",
-  "message": "Task delegation request accepted. The orchestrator will route to agent 'Developer'."
+  "message": "Sub-agent 'Developer' completed the task.",
+  "result": "…子 Agent 文本输出…"
 }
 ```
 
-**输出（失败）**:
+**输出（参数校验失败）**:
 ```json
 {
   "delegated": false,
-  "message": "Agent name must be a non-empty string."
+  "success": false,
+  "message": "Agent name cannot be empty."
 }
 ```
+
+> CatalogVersion `3.1.0` 起：Expert 工具循环会拦截成功校验并同步路由子 Agent；模型看到的是最终 tool result，不是执行器中间态。
 
 ### ModeOptions 契约
 

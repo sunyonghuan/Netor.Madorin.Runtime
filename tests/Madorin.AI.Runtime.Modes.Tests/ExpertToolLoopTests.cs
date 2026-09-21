@@ -327,6 +327,211 @@ public sealed class ExpertToolLoopTests
         }
     }
 
+    [TestMethod]
+    public async Task RunAsync_DelegateAgentTool_RoutesSubAgentAndReturnsResult()
+    {
+        var dataDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"madorin-expert-delegate-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dataDirectory);
+        try
+        {
+            await using var connection = await DataDirectoryInitializer.InitializeAsync(
+                dataDirectory,
+                TestContext.CancellationToken);
+            var repository = new SqliteSessionRepository(connection);
+            var sessionId = await repository.CreateSessionAsync(
+                RuntimeMode.Expert,
+                "delegate-session",
+                TimeSpan.FromDays(1),
+                TestContext.CancellationToken);
+            var runId = await repository.CreateRunAsync(
+                sessionId,
+                "delegate-run",
+                TimeSpan.FromDays(1),
+                TestContext.CancellationToken);
+            await repository.TransitionRunStatusAsync(
+                runId,
+                RunStatus.Accepted,
+                RunStatus.Preparing,
+                TestContext.CancellationToken);
+            await repository.TransitionRunStatusAsync(
+                runId,
+                RunStatus.Preparing,
+                RunStatus.Running,
+                TestContext.CancellationToken);
+
+            using var outbox = new SqliteEventOutbox(connection);
+            using var toolState = new SqliteToolIntentRepository(connection);
+            var registry = new BuiltinToolRegistry();
+            var validator = new JsonSchemaToolValidator();
+            var catalogStore = new ToolCatalogStore(registry, validator);
+            var catalog = catalogStore.CaptureSnapshot();
+            var authorization = new ToolAuthorizationService(
+                toolState,
+                RuntimeToolPolicy.CreateRestricted(dataDirectory));
+            using var gateway = new ToolGateway(
+                catalogStore,
+                validator,
+                authorization,
+                [new BuiltinDelegateAgentToolExecutor()],
+                toolState,
+                outbox);
+            var provider = new DelegateAgentToolLoopProvider();
+            var orchestrator = new ExpertModeOrchestrator(
+                provider,
+                new ConversationStore(dataDirectory),
+                repository,
+                outbox,
+                toolGateway: gateway,
+                toolAuthorizationService: authorization,
+                toolCatalogSnapshot: catalog);
+
+            var events = new List<RuntimeEventEnvelope>();
+            await foreach (var envelope in orchestrator.RunAsync(
+                runId,
+                sessionId,
+                CreateDelegateRequest(),
+                "runtime-delegate",
+                TestContext.CancellationToken))
+            {
+                events.Add(envelope);
+            }
+
+            Assert.AreEqual(3, provider.CallCount);
+            Assert.AreEqual(1, provider.SubAgentCallCount);
+            Assert.AreEqual(RunStatus.Completed, await repository.GetRunStatusAsync(runId));
+            Assert.IsTrue(events.Any(static item =>
+                item.MessageType == MessageTypes.ToolCallCompleted));
+            Assert.IsTrue(events.Any(static item =>
+                item.MessageType == MessageTypes.RunCompleted));
+            Assert.IsNotNull(provider.MainAgentSecondRequest);
+            var toolResult = provider.MainAgentSecondRequest!.Messages
+                .Where(static message => message.Role == RuntimeProviderRoles.Tool)
+                .SelectMany(static message => message.Content)
+                .OfType<ToolResultContentBlock>()
+                .Single(static item => item.CallId == "delegate-call-1");
+            Assert.IsTrue(toolResult.Success);
+            var resultText = Assert.IsInstanceOfType<TextContentBlock>(
+                Assert.ContainsSingle(toolResult.Content)).Text;
+            using var resultJson = JsonDocument.Parse(resultText);
+            Assert.IsTrue(resultJson.RootElement.GetProperty("delegated").GetBoolean());
+            Assert.IsTrue(resultJson.RootElement.GetProperty("success").GetBoolean());
+            Assert.AreEqual(
+                "developer",
+                resultJson.RootElement.GetProperty("agentName").GetString());
+            Assert.AreEqual(
+                "101",
+                resultJson.RootElement.GetProperty("result").GetString());
+            StringAssert.Contains(
+                resultJson.RootElement.GetProperty("message").GetString(),
+                "completed the task");
+        }
+        finally
+        {
+            if (Directory.Exists(dataDirectory))
+            {
+                Directory.Delete(dataDirectory, recursive: true);
+            }
+        }
+    }
+
+    [TestMethod]
+    public async Task RunAsync_DelegateAgentTool_UnknownAgent_ReturnsFailureResult()
+    {
+        var dataDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"madorin-expert-delegate-missing-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dataDirectory);
+        try
+        {
+            await using var connection = await DataDirectoryInitializer.InitializeAsync(
+                dataDirectory,
+                TestContext.CancellationToken);
+            var repository = new SqliteSessionRepository(connection);
+            var sessionId = await repository.CreateSessionAsync(
+                RuntimeMode.Expert,
+                "delegate-missing-session",
+                TimeSpan.FromDays(1),
+                TestContext.CancellationToken);
+            var runId = await repository.CreateRunAsync(
+                sessionId,
+                "delegate-missing-run",
+                TimeSpan.FromDays(1),
+                TestContext.CancellationToken);
+            await repository.TransitionRunStatusAsync(
+                runId,
+                RunStatus.Accepted,
+                RunStatus.Preparing,
+                TestContext.CancellationToken);
+            await repository.TransitionRunStatusAsync(
+                runId,
+                RunStatus.Preparing,
+                RunStatus.Running,
+                TestContext.CancellationToken);
+
+            using var outbox = new SqliteEventOutbox(connection);
+            using var toolState = new SqliteToolIntentRepository(connection);
+            var registry = new BuiltinToolRegistry();
+            var validator = new JsonSchemaToolValidator();
+            var catalogStore = new ToolCatalogStore(registry, validator);
+            var catalog = catalogStore.CaptureSnapshot();
+            var authorization = new ToolAuthorizationService(
+                toolState,
+                RuntimeToolPolicy.CreateRestricted(dataDirectory));
+            using var gateway = new ToolGateway(
+                catalogStore,
+                validator,
+                authorization,
+                [new BuiltinDelegateAgentToolExecutor()],
+                toolState,
+                outbox);
+            var provider = new DelegateAgentMissingTargetProvider();
+            var orchestrator = new ExpertModeOrchestrator(
+                provider,
+                new ConversationStore(dataDirectory),
+                repository,
+                outbox,
+                toolGateway: gateway,
+                toolAuthorizationService: authorization,
+                toolCatalogSnapshot: catalog);
+
+            await foreach (var _ in orchestrator.RunAsync(
+                runId,
+                sessionId,
+                CreateDelegateRequest(),
+                "runtime-delegate-missing",
+                TestContext.CancellationToken))
+            {
+            }
+
+            Assert.AreEqual(2, provider.CallCount);
+            Assert.AreEqual(RunStatus.Completed, await repository.GetRunStatusAsync(runId));
+            Assert.IsNotNull(provider.SecondRequest);
+            var toolResult = provider.SecondRequest!.Messages
+                .Where(static message => message.Role == RuntimeProviderRoles.Tool)
+                .SelectMany(static message => message.Content)
+                .OfType<ToolResultContentBlock>()
+                .Single(static item => item.CallId == "delegate-call-missing");
+            Assert.IsFalse(toolResult.Success);
+            var resultText = Assert.IsInstanceOfType<TextContentBlock>(
+                Assert.ContainsSingle(toolResult.Content)).Text;
+            using var resultJson = JsonDocument.Parse(resultText);
+            Assert.IsFalse(resultJson.RootElement.GetProperty("delegated").GetBoolean());
+            Assert.IsFalse(resultJson.RootElement.GetProperty("success").GetBoolean());
+            StringAssert.Contains(
+                resultJson.RootElement.GetProperty("message").GetString(),
+                "not found in AvailableAgents");
+        }
+        finally
+        {
+            if (Directory.Exists(dataDirectory))
+            {
+                Directory.Delete(dataDirectory, recursive: true);
+            }
+        }
+    }
+
     private static NewSessionRunRequest CreateRequest() =>
         new(
             "tool-session-key",
@@ -339,6 +544,22 @@ public sealed class ExpertToolLoopTests
                 new ExpertModeOptions(
                     new AgentRef("agent-1", "v1", "Use tools when needed."))),
             [new TextContentBlock("Calculate the answer.")]);
+
+    private static NewSessionRunRequest CreateDelegateRequest()
+    {
+        var primary = new AgentRef("expert", "v1", "You coordinate specialists.");
+        var developer = new AgentRef("developer", "v1", "You only return numeric answers.");
+        return new(
+            "delegate-session-key",
+            "delegate-run-key",
+            RuntimeMode.Expert,
+            new NextTurnSelection(
+                1,
+                RuntimeMode.Expert,
+                new DefaultSelection("tool-loop", "tool-model"),
+                new ExpertModeOptions(primary, [primary, developer])),
+            [new TextContentBlock("Delegate 1+100 to the developer.")]);
+    }
 
     private static NewSessionRunRequest CreateMemoryRequest() =>
         new(
@@ -569,5 +790,120 @@ public sealed class ExpertToolLoopTests
                 true,
                 "{\"value\":42}"));
         }
+    }
+
+    private sealed class DelegateAgentToolLoopProvider : IRuntimeProviderAdapter
+    {
+        public string ProviderId => "tool-loop";
+
+        public ProviderCapabilities Capabilities { get; } = new(
+            Streaming: true,
+            ToolCalling: true);
+
+        public IReadOnlyList<ProviderModel> Models { get; } =
+            [new("tool-model", "Tool Model", ContextWindow: 8192)];
+
+        public int CallCount { get; private set; }
+
+        public int SubAgentCallCount { get; private set; }
+
+        public int MainAgentCallCount { get; private set; }
+
+        public RuntimeProviderRequest? MainAgentSecondRequest { get; private set; }
+
+        public async IAsyncEnumerable<RuntimeProviderEvent> CompleteStreamingAsync(
+            RuntimeProviderRequest request,
+            [EnumeratorCancellation] CancellationToken ct = default)
+        {
+            CallCount++;
+            await Task.Yield();
+            ct.ThrowIfCancellationRequested();
+
+            var isSubAgent = string.Equals(request.AgentId, "developer", StringComparison.Ordinal);
+            if (isSubAgent)
+            {
+                SubAgentCallCount++;
+                yield return new TextDeltaProviderEvent(request.InvocationId, "101");
+                yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
+                yield break;
+            }
+
+            MainAgentCallCount++;
+            if (MainAgentCallCount == 1)
+            {
+                Assert.IsNotNull(request.Tools);
+                Assert.IsTrue(request.Tools.Any(static tool =>
+                    tool.ToolId == BuiltinToolRegistry.DelegateToAgentToolId));
+                yield return new ToolCallCompleteProviderEvent(
+                    request.InvocationId,
+                    "delegate-call-1",
+                    BuiltinToolRegistry.DelegateToAgentToolId,
+                    "delegate_to_agent",
+                    """{"agentName":"developer","task":"计算 1+100，只返回数字"}""");
+                yield return new InvocationCompletedProviderEvent(
+                    request.InvocationId,
+                    "tool_calls");
+                yield break;
+            }
+
+            MainAgentSecondRequest = request;
+            yield return new TextDeltaProviderEvent(
+                request.InvocationId,
+                "Delegated result received.");
+            yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
+        }
+
+        public Task ValidateCapabilitiesAsync(
+            ContentBlock[] input,
+            CancellationToken ct = default) => Task.CompletedTask;
+    }
+
+    private sealed class DelegateAgentMissingTargetProvider : IRuntimeProviderAdapter
+    {
+        public string ProviderId => "tool-loop";
+
+        public ProviderCapabilities Capabilities { get; } = new(
+            Streaming: true,
+            ToolCalling: true);
+
+        public IReadOnlyList<ProviderModel> Models { get; } =
+            [new("tool-model", "Tool Model", ContextWindow: 8192)];
+
+        public int CallCount { get; private set; }
+
+        public RuntimeProviderRequest? SecondRequest { get; private set; }
+
+        public async IAsyncEnumerable<RuntimeProviderEvent> CompleteStreamingAsync(
+            RuntimeProviderRequest request,
+            [EnumeratorCancellation] CancellationToken ct = default)
+        {
+            CallCount++;
+            await Task.Yield();
+            ct.ThrowIfCancellationRequested();
+
+            if (CallCount == 1)
+            {
+                yield return new ToolCallCompleteProviderEvent(
+                    request.InvocationId,
+                    "delegate-call-missing",
+                    BuiltinToolRegistry.DelegateToAgentToolId,
+                    "delegate_to_agent",
+                    """{"agentName":"missing-agent","task":"do something"}""");
+                yield return new InvocationCompletedProviderEvent(
+                    request.InvocationId,
+                    "tool_calls");
+                yield break;
+            }
+
+            SecondRequest = request;
+            yield return new TextDeltaProviderEvent(
+                request.InvocationId,
+                "Delegation failed as expected.");
+            yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
+        }
+
+        public Task ValidateCapabilitiesAsync(
+            ContentBlock[] input,
+            CancellationToken ct = default) => Task.CompletedTask;
     }
 }

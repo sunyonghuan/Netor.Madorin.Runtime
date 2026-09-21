@@ -25,6 +25,12 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
     public const string ProcessRunToolId = "mcli_process";
     public const string HttpRequestToolId = "mcli_http";
     public const string DelegateToAgentToolId = "mcli_delegate_agent";
+    public const string AgentJobCreateToolId = "mcli_agent_job_create";
+    public const string AgentJobCreateManyToolId = "mcli_agent_job_create_many";
+    public const string AgentJobStatusToolId = "mcli_agent_job_status";
+    public const string AgentJobResultToolId = "mcli_agent_job_result";
+    public const string AgentJobWaitToolId = "mcli_agent_job_wait";
+    public const string AgentJobCancelToolId = "mcli_agent_job_cancel";
 
     private static readonly IReadOnlyList<ToolDescriptor> AdvertisedTools = Array.AsReadOnly<ToolDescriptor>(
     [
@@ -149,9 +155,75 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
             DelegateToAgentToolId,
             "mcli",
             "Delegate to agent",
-            "Delegates a task to a specific agent from the available agent pool.",
+            "Delegates a task to a specific agent from the Expert mode available agent pool. The Expert orchestrator runs the target agent and returns its output in result.",
             """{"type":"object","properties":{"agentName":{"type":"string","description":"Name of the target agent (case-insensitive)"},"task":{"type":"string","description":"Task description to delegate"}},"required":["agentName","task"],"additionalProperties":false}""",
-            """{"type":"object","properties":{"delegated":{"type":"boolean"},"agentName":{"type":"string"},"task":{"type":"string"},"message":{"type":"string"}},"required":["delegated","message"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"delegated":{"type":"boolean"},"success":{"type":"boolean"},"agentName":{"type":"string"},"task":{"type":"string"},"message":{"type":"string"},"result":{"type":"string"}},"required":["delegated","success","message"],"additionalProperties":false}""",
+            RiskLevel: "low",
+            Capabilities: ["agent.delegate"],
+            Risk: ToolRiskLevel.Low,
+            IsIdempotent: false),
+        new(
+            AgentJobCreateToolId,
+            "mcli",
+            "Create agent job",
+            "Creates one background parallel sub-agent job and returns jobId immediately. Use mcli_agent_job_result or mcli_agent_job_wait to recover the result.",
+            """{"type":"object","properties":{"agentName":{"type":"string"},"task":{"type":"string"},"timeoutMs":{"type":"integer"}},"required":["agentName","task"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"success":{"type":"boolean"},"jobId":{"type":"string"},"state":{"type":"string"},"agentName":{"type":"string"},"task":{"type":"string"},"terminal":{"type":"boolean"},"message":{"type":"string"}},"required":["success","message"],"additionalProperties":false}""",
+            RiskLevel: "low",
+            Capabilities: ["agent.delegate"],
+            Risk: ToolRiskLevel.Low,
+            IsIdempotent: false),
+        new(
+            AgentJobCreateManyToolId,
+            "mcli",
+            "Create many agent jobs",
+            "Creates multiple background parallel sub-agent jobs and returns jobIds immediately for later recovery.",
+            """{"type":"object","properties":{"jobs":{"type":"array","items":{"type":"object","properties":{"agentName":{"type":"string"},"task":{"type":"string"},"timeoutMs":{"type":"integer"}},"required":["agentName","task"],"additionalProperties":false}}},"required":["jobs"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"success":{"type":"boolean"},"jobs":{"type":"array"},"message":{"type":"string"}},"required":["success","message"],"additionalProperties":false}""",
+            RiskLevel: "low",
+            Capabilities: ["agent.delegate"],
+            Risk: ToolRiskLevel.Low,
+            IsIdempotent: false),
+        new(
+            AgentJobStatusToolId,
+            "mcli",
+            "Agent job status",
+            "Queries the state of a parallel sub-agent job.",
+            """{"type":"object","properties":{"jobId":{"type":"string"}},"required":["jobId"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"success":{"type":"boolean"},"jobId":{"type":"string"},"state":{"type":"string"},"terminal":{"type":"boolean"},"message":{"type":"string"}},"required":["success","message"],"additionalProperties":false}""",
+            RiskLevel: "low",
+            Capabilities: ["agent.delegate"],
+            Risk: ToolRiskLevel.Low,
+            IsIdempotent: true),
+        new(
+            AgentJobResultToolId,
+            "mcli",
+            "Recover agent job result",
+            "Recovers finished job result(s). Use jobId for one job or jobIds for batch. Non-terminal jobs return ready=false.",
+            """{"type":"object","properties":{"jobId":{"type":"string"},"jobIds":{"type":"array","items":{"type":"string"}}},"additionalProperties":false}""",
+            """{"type":"object","properties":{"success":{"type":"boolean"},"ready":{"type":"boolean"},"jobId":{"type":"string"},"state":{"type":"string"},"result":{"type":"string"},"error":{"type":"string"},"jobs":{"type":"array"},"message":{"type":"string"}},"required":["success","message"],"additionalProperties":false}""",
+            RiskLevel: "low",
+            Capabilities: ["agent.delegate"],
+            Risk: ToolRiskLevel.Low,
+            IsIdempotent: true),
+        new(
+            AgentJobWaitToolId,
+            "mcli",
+            "Wait and recover agent jobs",
+            "Waits until listed parallel jobs reach a terminal state (or timeout), then recovers their results.",
+            """{"type":"object","properties":{"jobId":{"type":"string"},"jobIds":{"type":"array","items":{"type":"string"}},"timeoutMs":{"type":"integer"}},"additionalProperties":false}""",
+            """{"type":"object","properties":{"success":{"type":"boolean"},"allTerminal":{"type":"boolean"},"allSucceeded":{"type":"boolean"},"timedOut":{"type":"boolean"},"jobs":{"type":"array"},"message":{"type":"string"}},"required":["success","message"],"additionalProperties":false}""",
+            RiskLevel: "low",
+            Capabilities: ["agent.delegate"],
+            Risk: ToolRiskLevel.Low,
+            IsIdempotent: false),
+        new(
+            AgentJobCancelToolId,
+            "mcli",
+            "Cancel agent job",
+            "Requests cancellation of a parallel sub-agent job. State becomes cancelling until the worker stops, then cancelled.",
+            """{"type":"object","properties":{"jobId":{"type":"string"}},"required":["jobId"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"success":{"type":"boolean"},"cancelRequested":{"type":"boolean"},"jobId":{"type":"string"},"state":{"type":"string"},"message":{"type":"string"}},"required":["success","message"],"additionalProperties":false}""",
             RiskLevel: "low",
             Capabilities: ["agent.delegate"],
             Risk: ToolRiskLevel.Low,
@@ -161,7 +233,7 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
     private static readonly IReadOnlyList<ToolDescriptor> Tools = Array.AsReadOnly(
         [.. AdvertisedTools, .. BuiltinToolAliasCatalog.Tools]);
 
-    public string CatalogVersion => "3.0.0";
+    public string CatalogVersion => "3.2.0";
 
     public IReadOnlyList<ToolDescriptor> GetTools() => Tools;
 

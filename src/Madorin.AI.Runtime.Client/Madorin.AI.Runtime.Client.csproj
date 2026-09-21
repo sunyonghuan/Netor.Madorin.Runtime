@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
-    <PackageReference Include="Madorin.AI.Runtime.Contracts" />
+    <ProjectReference Include="..\Madorin.AI.Runtime.Contracts\Madorin.AI.Runtime.Contracts.csproj" />
     <ProjectReference Include="..\Madorin.AI.Runtime.Transport.Abstractions\Madorin.AI.Runtime.Transport.Abstractions.csproj" PrivateAssets="all" />
     <ProjectReference Include="..\Madorin.AI.Runtime.Transport.NamedPipes\Madorin.AI.Runtime.Transport.NamedPipes.csproj" PrivateAssets="all" />
   </ItemGroup>

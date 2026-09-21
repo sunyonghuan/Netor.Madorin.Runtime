@@ -1,6 +1,7 @@
-﻿using System.Text.Json.Serialization;
+using System.Text.Json.Serialization;
 using Madorin.AI.Runtime.Contracts.Work;
 using Madorin.AI.Runtime.Entities;
+
 
 namespace Madorin.AI.Runtime.Contracts.Serialization;
 
@@ -137,6 +138,8 @@ namespace Madorin.AI.Runtime.Contracts.Serialization;
 [JsonSerializable(typeof(SessionRehydrateResult))]
 [JsonSerializable(typeof(SessionResumeResult))]
 [JsonSerializable(typeof(SessionSelectionUpdateParameters))]
+[JsonSerializable(typeof(SessionCompactionRequest))]
+[JsonSerializable(typeof(SessionCompactionResultDto))]
 [JsonSerializable(typeof(NeededAgentDefinition))]
 [JsonSerializable(typeof(NeededAgentDefinition[]))]
 [JsonSerializable(typeof(RuntimeCapabilities))]
@@ -173,6 +176,7 @@ namespace Madorin.AI.Runtime.Contracts.Serialization;
 [JsonSerializable(typeof(ToolResultQueryResponse))]
 [JsonSerializable(typeof(ToolRiskLevel))]
 [JsonSerializable(typeof(ToolResultContentBlock))]
+[JsonSerializable(typeof(ExpertContextPolicy))]
 [JsonSerializable(typeof(WorkModeOptions))]
 [JsonSerializable(typeof(WorkflowPolicy))]
 [JsonSerializable(typeof(WorkContextPolicy))]
@@ -198,6 +202,8 @@ namespace Madorin.AI.Runtime.Contracts.Serialization;
 [JsonSerializable(typeof(WorkBackgroundJobSnapshot))]
 [JsonSerializable(typeof(WorkBackgroundJobSnapshot[]))]
 [JsonSerializable(typeof(WorkResumeState))]
+[JsonSerializable(typeof(ContextPolicyHashDto))]
 [JsonSerializable(typeof(bool))]
 [JsonSerializable(typeof(long))]
 public sealed partial class RuntimeJsonContext : JsonSerializerContext;
+

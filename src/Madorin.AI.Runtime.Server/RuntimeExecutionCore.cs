@@ -1,4 +1,4 @@
-﻿using System.Runtime.CompilerServices;
+using System.Runtime.CompilerServices;
 using System.Buffers;
 using System.Collections.Concurrent;
 using System.Text.Encodings.Web;
@@ -14,6 +14,7 @@ using Madorin.AI.Runtime.Persistence.Files;
 using Madorin.AI.Runtime.Persistence.Sqlite;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Services;
+using Madorin.AI.Runtime.Services.AgentJobs;
 using Madorin.AI.Runtime.Services.Memory;
 using Madorin.AI.Runtime.Services.Skills;
 using Madorin.AI.Runtime.Services.Tools;
@@ -132,13 +133,16 @@ internal sealed class RuntimeExecutionCore(
                 : new ReverseRpcToolConsentHandler(
                     reverseExecutor.RequestPermissionAsync,
                     reverseExecutor.RequestApprovalAsync));
+        // 并行子 Agent 作业池（无定时）：Run 作用域，Expert 绑定 Worker 后可 create/wait/result 回收。
+        await using var agentJobCoordinator = new AgentJobCoordinator();
         var executors = new List<IToolExecutor>
         {
             new BuiltinFsToolExecutor(_memoryFiles.WorkspaceMutationLock),
             new BuiltinProcessToolExecutor(),
             new BuiltinHttpToolExecutor(),
             new BuiltinMemoryToolExecutor(_memoryFiles),
-            new BuiltinDelegateAgentToolExecutor()
+            new BuiltinDelegateAgentToolExecutor(),
+            new BuiltinAgentJobToolExecutor(agentJobCoordinator)
         };
         if (skillCatalog is not null)
         {
@@ -221,6 +225,21 @@ internal sealed class RuntimeExecutionCore(
                 ct).ConfigureAwait(false);
         }
 
+        Func<string, IRuntimeProviderAdapter> expertProviderResolver = requestedProviderId =>
+        {
+            if (providerFactory is not null)
+            {
+                return providerFactory(requestedProviderId);
+            }
+
+            if (string.Equals(requestedProviderId, provider.ProviderId, StringComparison.Ordinal))
+            {
+                return provider;
+            }
+
+            throw new InvalidOperationException(
+                $"Provider {requestedProviderId} is not available in the current Runtime execution.");
+        };
         IModeOrchestrator orchestrator = request.Mode switch
         {
             RuntimeMode.Expert => new ExpertModeOrchestrator(
@@ -244,7 +263,9 @@ internal sealed class RuntimeExecutionCore(
                 scriptInvoker,
                 liveCatalogProvider: liveCatalogProvider,
                 isHostModeSkills: isHostModeSkills,
-                skillActivationStore: skillActivationStore),
+                skillActivationStore: skillActivationStore,
+                agentJobCoordinator: agentJobCoordinator,
+                providerResolver: expertProviderResolver),
 
             RuntimeMode.Meeting => new MeetingModeOrchestrator(
                 providerFactory: requestedProviderId =>

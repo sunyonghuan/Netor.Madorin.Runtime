@@ -37,4 +37,8 @@ public sealed record ContextProjectionSnapshot(
     int EstimatedTokens,
     string EstimateSource,
     int TokenLimit,
-    int SummarizedUnitCount = 0);
+    int SummarizedUnitCount = 0,
+    string? CompactionProviderId = null,
+    string? CompactionModelId = null,
+    bool CacheHit = false,
+    string? CacheMissReason = null);

@@ -35,7 +35,8 @@ internal static class RuntimeRunMetadata
                 RemovePromptContent(expert.Agent),
                 expert.AvailableAgents is null
                     ? null
-                    : [.. expert.AvailableAgents.Select(RemovePromptContent)]),
+                    : [.. expert.AvailableAgents.Select(RemovePromptContent)],
+                expert.ContextPolicy),
             MeetingModeOptions meeting => meeting with
             {
                 Participants = [.. meeting.Participants.Select(

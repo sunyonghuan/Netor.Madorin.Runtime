@@ -47,9 +47,11 @@ public sealed class BuiltinDelegateAgentToolExecutorTests
         Assert.IsTrue(result.Success);
         Assert.IsNotNull(result.OutputJson);
         StringAssert.Contains(result.OutputJson, "\"delegated\":true");
+        StringAssert.Contains(result.OutputJson, "\"success\":false");
         StringAssert.Contains(result.OutputJson, "Developer");
         StringAssert.Contains(result.OutputJson, "Fix the bug in authentication");
-        StringAssert.Contains(result.OutputJson, "Task delegation request accepted");
+        StringAssert.Contains(result.OutputJson, "Delegation arguments accepted");
+        StringAssert.Contains(result.OutputJson, "Expert orchestrator will execute");
     }
 
     [TestMethod]

@@ -15,7 +15,8 @@ public sealed record SessionCompactionOptions(
     string? ModelId = null,
     int? KeepLastTokens = null,
     bool DryRun = false,
-    bool Force = false)
+    bool Force = false,
+    string? SelectionSource = null)
 {
     public const int DefaultKeepLastTokens = 4096;
 }

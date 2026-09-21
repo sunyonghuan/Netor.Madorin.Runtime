@@ -1159,6 +1159,19 @@ public sealed class RuntimeClient : IRuntimeClient
             cancellationToken).ConfigureAwait(false);
     }
 
+    public ValueTask<SessionCompactionResultDto> CompactSessionAsync(
+        SessionCompactionRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.SessionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.Strategy);
+        return SendControlRequestAsync(
+            MessageTypes.SessionCompaction,
+            request,
+            RuntimeJsonContext.Default.SessionCompactionResultDto,
+            cancellationToken);
+    }
     public async ValueTask<NextTurnSelection> UpdateSessionSelectionAsync(
         SessionSelectionUpdateParameters parameters,
         CancellationToken cancellationToken = default)

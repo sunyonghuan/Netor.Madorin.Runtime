@@ -1,4 +1,4 @@
-﻿using System.Text.Json.Serialization;
+using System.Text.Json.Serialization;
 
 namespace Madorin.AI.Runtime.Contracts;
 
@@ -7,6 +7,17 @@ namespace Madorin.AI.Runtime.Contracts;
 [JsonDerivedType(typeof(MeetingModeOptions), "meeting")]
 [JsonDerivedType(typeof(WorkModeOptions), "work")]
 public abstract record ModeOptions;
+
+/// <summary>Expert context-window and optional summary policy.</summary>
+public sealed record ExpertContextPolicy(
+    string Strategy = "TailWindow",
+    int? MaxTokens = null,
+    int? TailMessageCount = null,
+    bool PreserveToolResults = true,
+    bool PreserveReasoning = false,
+    string? SummaryProviderId = null,
+    string? SummaryModelId = null,
+    bool SummaryRequired = false);
 
 /// <summary>
 /// Expert mode configuration with a primary agent and optional sub-agents for delegation.
@@ -22,11 +33,17 @@ public sealed record ExpertModeOptions : ModeOptions
     /// </summary>
     public AgentRef[]? AvailableAgents { get; init; }
 
+    public ExpertContextPolicy? ContextPolicy { get; init; }
+
     [JsonConstructor]
-    public ExpertModeOptions(AgentRef agent, AgentRef[]? availableAgents = null)
+    public ExpertModeOptions(
+        AgentRef agent,
+        AgentRef[]? availableAgents = null,
+        ExpertContextPolicy? contextPolicy = null)
     {
         Agent = agent;
         AvailableAgents = availableAgents;
+        ContextPolicy = contextPolicy;
     }
 }
 

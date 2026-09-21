@@ -2,7 +2,12 @@
 
 ## 设计目标
 
-为Expert模式实现内置的`@子智能体`委派机制，**不依赖`mcli_delegate_agent`工具**，参考Work和Meeting模式的设计思路。
+为 Expert 模式提供两条互补委派路径：
+
+1. **用户开场 `@agentId <task>`**：编排器在 Run 入口解析并同步调用子 Agent（不经过工具）。
+2. **对话中途 `mcli_delegate_agent`**：主 Agent 调工具 → 执行器校验参数 → Expert 编排器同步路由子 Agent → 最终 tool result 带回 `success`/`result`。
+
+参考 Work/Meeting 的「编排器拥有上下文」原则；工具层只做无状态校验。
 
 ## 背景
 
@@ -10,13 +15,15 @@
 
 | 模式 | 委派时机 | 委派方式 | 实现层 | 工具依赖 |
 |------|---------|----------|--------|---------|
-| Work | Planning阶段 | GM在Plan中设置`targetAgentId` | Orchestrator | ❌ 无 |
-| Meeting | 每轮开始 | Host输出JSON `{"participantId": "..."}` | Orchestrator | ❌ 无 |
-| Expert | 运行时 | ❌ **已删除的工具** | 工具层 | ✅ mcli_delegate_agent |
+| Work | Planning 阶段 | GM 在 Plan 中设置 `targetAgentId` | Orchestrator | ❌ 无（勿用本工具做步骤分配） |
+| Meeting | 每轮开始 | Host/Selector 输出 JSON `participantId` | Orchestrator | ❌ 无（勿用本工具选发言者） |
+| Expert | 用户开场 / 对话中途 | `@agentId` 或 `mcli_delegate_agent` | Orchestrator（+ 工具校验段） | ✅ 工具路径已闭环 |
 
-### 问题
+### 历史问题（已修复）
 
-Expert模式原本通过`mcli_delegate_agent`工具实现委派，但该工具已被删除（commit feceb66），导致Expert模式的`@子智能体`语法**完全失效**。
+1. Expert 曾依赖 `mcli_delegate_agent`，后在 feceb66 删除工具，`@` 路径一度失效；随后补了入口 `@` 解析。
+2. f594755 重新加入元数据工具后，编排器未消费 tool result，模型只看到 `delegated: true` / accepted，**没有子 Agent 真实输出**。
+3. 现已在 Expert 工具循环中增加 `RouteDelegateAgentToolAsync`，成功时回写 `result`。
 
 ## 设计方案B：为Expert模式设计内置机制
 

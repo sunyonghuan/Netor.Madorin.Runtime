@@ -17,6 +17,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\tools\Madorin.AI.Runtime.MConsole\Madorin.AI.Runtime.MConsole.csproj" />
+    <ProjectReference Include="..\..\src\Madorin.AI.Runtime.Entities\Madorin.AI.Runtime.Entities.csproj" />
   </ItemGroup>
 
 </Project>

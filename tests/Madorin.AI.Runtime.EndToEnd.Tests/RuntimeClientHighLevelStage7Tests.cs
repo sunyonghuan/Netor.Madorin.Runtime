@@ -17,6 +17,53 @@ public sealed class RuntimeClientHighLevelStage7Tests
     public TestContext TestContext { get; set; }
 
     [TestMethod]
+    [Timeout(60_000, CooperativeCancellation = true)]
+    public async Task SessionCompaction_ConnectedRuntime_WritesCacheAndExpertReusesIt()
+    {
+        var provider = new SummaryCompactionProvider();
+        await using var fixture = await RuntimeFixture.StartAsync(provider);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(TestContext.CancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(30));
+
+        var runId = await fixture.Client.StartNewSessionRunAsync(
+            CreateSummaryRunRequest(),
+            timeout.Token);
+        var firstTerminal = await ReadTerminalEventAsync(fixture.Client, runId, timeout.Token);
+        Assert.AreEqual(MessageTypes.RunCompleted, firstTerminal.MessageType);
+        var firstRun = await fixture.Client.QueryRunAsync(runId, timeout.Token);
+        Assert.IsFalse(string.IsNullOrWhiteSpace(firstRun.SessionId));
+
+        var compacted = await fixture.Client.CompactSessionAsync(
+            new SessionCompactionRequest(
+                firstRun.SessionId!,
+                Strategy: "summary",
+                ProviderId: provider.ProviderId,
+                ModelId: "stage7-model"),
+            timeout.Token);
+
+        Assert.IsTrue(compacted.CacheWritten);
+        Assert.IsFalse(compacted.CacheHit);
+        Assert.IsTrue(compacted.SummaryGenerated);
+        Assert.AreEqual(1, provider.SummaryCallCount);
+
+        var secondRunId = await fixture.Client.StartExistingSessionRunAsync(
+            new ExistingSessionRunRequest(
+                firstRun.SessionId!,
+                Guid.NewGuid().ToString("N"),
+                InputOverride: [new TextContentBlock("use the compacted context")]),
+            timeout.Token);
+        var secondEvents = await ReadInvocationStartedAndTerminalAsync(
+            fixture.Client,
+            secondRunId,
+            timeout.Token);
+        Assert.AreEqual(MessageTypes.RunCompleted, secondEvents.Terminal.MessageType);
+        var secondProjection = secondEvents.Started.Snapshot.ContextProjection;
+        Assert.IsNotNull(secondProjection);
+        Console.WriteLine($"CacheHit={secondProjection!.CacheHit}; Miss={secondProjection.CacheMissReason}; Strategy={secondProjection.Strategy}; Provider={secondProjection.CompactionProviderId}; Model={secondProjection.CompactionModelId}");
+        Assert.IsTrue(secondProjection.CacheHit);        Assert.AreEqual(1, provider.SummaryCallCount);
+        Assert.IsGreaterThanOrEqualTo(2, provider.MainCallCount);
+    }
+    [TestMethod]
     public async Task HostCallbackDispatcher_RoutesAllTypedCallbacks()
     {
         var callbacks = new RuntimeHostCallbacks
@@ -515,6 +562,28 @@ public sealed class RuntimeClientHighLevelStage7Tests
         RequiresApproval: false,
         IsIdempotent: true);
 
+    private static NewSessionRunRequest CreateSummaryRunRequest() => new(
+        Guid.NewGuid().ToString("N"),
+        Guid.NewGuid().ToString("N"),
+        RuntimeMode.Expert,
+        new NextTurnSelection(
+            1,
+            RuntimeMode.Expert,
+            new DefaultSelection(SummaryCompactionProvider.Id, "stage7-model"),
+            new ExpertModeOptions(
+                new AgentRef(
+                    "stage7-summary-agent",
+                    "v1",
+                    "Use the configured summary policy.",
+                    SummaryCompactionProvider.Id,
+                    "stage7-model"),
+                contextPolicy: new ExpertContextPolicy(
+                    Strategy: "Summary",
+                    MaxTokens: 8_192,
+                    TailMessageCount: 2,
+                    SummaryRequired: true)),
+            ToolCatalogVersion: "summary-stage7-v1"),
+        [new TextContentBlock("seed the session before compaction")]);
     private static NewSessionRunRequest CreateRunRequest(
         string toolCatalogVersion,
         string providerId = SingleToolProvider.Id,
@@ -536,6 +605,38 @@ public sealed class RuntimeClientHighLevelStage7Tests
                 ToolCatalogVersion: toolCatalogVersion),
             input ?? [new TextContentBlock("Run the test operation.")]);
 
+    private static async Task<(InvocationStartedEvent Started, RuntimeEventEnvelope Terminal)>
+        ReadInvocationStartedAndTerminalAsync(
+            RuntimeClient client,
+            string runId,
+            CancellationToken cancellationToken)
+    {
+        InvocationStartedEvent? started = null;
+        await foreach (var envelope in client.ReadEventsAsync(0, cancellationToken))
+        {
+            if (!string.Equals(envelope.RunId, runId, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (envelope.MessageType == MessageTypes.InvocationStarted)
+            {
+                started = envelope.Payload.Deserialize(RuntimeJsonContext.Default.InvocationStartedEvent)
+                    ?? throw new InvalidDataException("The invocation.started payload was empty.");
+            }
+
+            if (envelope.MessageType is MessageTypes.RunCompleted
+                or MessageTypes.RunFailed
+                or MessageTypes.RunCancelled)
+            {
+                return (
+                    started ?? throw new InvalidDataException("The Run emitted no invocation.started event."),
+                    envelope);
+            }
+        }
+
+        throw new InvalidOperationException($"Run '{runId}' did not emit a terminal event.");
+    }
     private static async Task<RuntimeEventEnvelope> ReadTerminalEventAsync(
         RuntimeClient client,
         string runId,
@@ -661,6 +762,45 @@ public sealed class RuntimeClientHighLevelStage7Tests
             CancellationToken ct = default) => Task.CompletedTask;
     }
 
+    private sealed class SummaryCompactionProvider : IRuntimeProviderAdapter
+    {
+        public const string Id = "summary-stage7-provider";
+
+        public string ProviderId => Id;
+
+        public ProviderCapabilities Capabilities { get; } = new(Streaming: true);
+
+        public IReadOnlyList<ProviderModel> Models { get; } =
+            [new("stage7-model", "Stage 7 Model", ContextWindow: 8_192)];
+
+        public int SummaryCallCount { get; private set; }
+
+        public int MainCallCount { get; private set; }
+
+        public async IAsyncEnumerable<RuntimeProviderEvent> CompleteStreamingAsync(
+            RuntimeProviderRequest request,
+            [EnumeratorCancellation] CancellationToken ct = default)
+        {
+            await Task.Yield();
+            ct.ThrowIfCancellationRequested();
+            if (string.Equals(request.AgentId, "session-compactor", StringComparison.Ordinal))
+            {
+                SummaryCallCount++;
+                yield return new TextDeltaProviderEvent(request.InvocationId, "summary from connected runtime");
+            }
+            else
+            {
+                MainCallCount++;
+                yield return new TextDeltaProviderEvent(request.InvocationId, "main response");
+            }
+
+            yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
+        }
+
+        public Task ValidateCapabilitiesAsync(
+            ContentBlock[] input,
+            CancellationToken ct = default) => Task.CompletedTask;
+    }
     private sealed class CapturingProvider : IRuntimeProviderAdapter
     {
         public string ProviderId => "capturing-stage7-provider";

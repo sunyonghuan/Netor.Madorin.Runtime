@@ -89,6 +89,11 @@ public interface IRuntimeClient : IAsyncDisposable
         SessionHistoryReadParameters parameters,
         CancellationToken cancellationToken = default);
 
+    public ValueTask<SessionCompactionResultDto> CompactSessionAsync(
+        SessionCompactionRequest request,
+        CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("This Runtime client implementation does not support Session compaction.");
+
     public ValueTask<NextTurnSelection> UpdateSessionSelectionAsync(
         SessionSelectionUpdateParameters parameters,
         CancellationToken cancellationToken = default);

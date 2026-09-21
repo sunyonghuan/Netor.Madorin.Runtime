@@ -27,7 +27,14 @@ public sealed record ConversationCompactCacheV1(
     int AfterEstimatedTokens,
     string EstimateSource,
     ConversationCompactMessageV1[] ProjectionMessages,
-    DateTimeOffset CreatedAt)
+    DateTimeOffset CreatedAt,
+    string RuntimeMode = "Expert",
+    string ContextPolicyHash = "",
+    string AgentPromptHash = "",
+    string ToolCatalogVersion = "0",
+    string ProjectionSchemaVersion = "madorin.context-projection.v1",
+    string SummaryModelVersion = "",
+    string? CacheMissReason = null)
 {
-    public const string CurrentSchema = "madorin.conversation.compact.v1";
+    public const string CurrentSchema = "madorin.conversation.compact.v2";
 }

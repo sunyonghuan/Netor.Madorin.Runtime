@@ -4,8 +4,9 @@ using Madorin.AI.Runtime.Tools.Abstractions;
 namespace Madorin.AI.Runtime.Tools.Builtin;
 
 /// <summary>
-/// Validates agent-delegation tool arguments and returns structured metadata.
-/// Actual sub-agent invocation stays in the mode orchestrator (Work/Meeting/Expert).
+/// Validates agent-delegation tool arguments and returns structured acceptance metadata.
+/// Expert mode orchestrator consumes a successful result and synchronously routes the sub-agent;
+/// Work/Meeting keep their built-in assignment mechanisms and do not execute via this tool.
 /// </summary>
 public sealed class BuiltinDelegateAgentToolExecutor : IToolExecutor
 {
@@ -66,9 +67,10 @@ public sealed class BuiltinDelegateAgentToolExecutor : IToolExecutor
                 writer.WriteBoolean("delegated", true);
                 writer.WriteString("agentName", trimmedName);
                 writer.WriteString("task", trimmedTask);
+                writer.WriteBoolean("success", false);
                 writer.WriteString(
                     "message",
-                    $"Task delegation request accepted. The orchestrator will route to agent '{trimmedName}'.");
+                    $"Delegation arguments accepted for agent '{trimmedName}'. Expert orchestrator will execute the sub-agent and replace this intermediate result.");
                 writer.WriteEndObject();
             });
 
@@ -86,6 +88,7 @@ public sealed class BuiltinDelegateAgentToolExecutor : IToolExecutor
         {
             writer.WriteStartObject();
             writer.WriteBoolean("delegated", false);
+            writer.WriteBoolean("success", false);
             writer.WriteString("message", errorMessage);
             writer.WriteEndObject();
         });

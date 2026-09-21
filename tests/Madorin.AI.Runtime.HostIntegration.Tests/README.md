@@ -58,23 +58,19 @@
 
 ### 场景3：Expert模式 - 主Agent通过@委派子Agent
 
-**状态**：⚠️ **待实现**
+**状态**：✅ **已实现**
 
-**设计方案**：
-Expert模式需要新的内置委派机制（方案B），参考Work/Meeting模式的设计：
+**实现方案**：
+Expert 模式两条委派路径均由编排器落地：
 
-1. ExpertModeOrchestrator在执行前解析用户输入
-2. 检测`@agentName`语法（如`@developer do something`）
-3. 提取`agentName`和`task`
-4. 创建子Agent调用上下文
-5. 调用指定的子Agent
-6. 将子Agent的结果合并回主对话
+1. **用户 `@agentName` 开场**：`TryParseDelegationSyntax` → `InvokeSubAgentAsync` → 结果写入会话后继续主 Agent
+2. **`mcli_delegate_agent` 工具**：执行器校验参数 → `RouteDelegateAgentToolAsync` 同步路由 → tool result 含 `success`/`result`
 
 **实现要点**：
-- 不依赖`mcli_delegate_agent`工具
-- 在Orchestrator层拦截和解析@语法
-- 支持子Agent调用工具
-- 保持与Work/Meeting模式的一致性
+- 工具层只校验，不直接跑子 Agent
+- Expert 编排器负责真正调用并回写结果
+- 子 Agent 可走完整工具循环
+- Work/Meeting 仍用各自内置机制，不依赖本工具做步骤/发言者分配
 
 ---
 

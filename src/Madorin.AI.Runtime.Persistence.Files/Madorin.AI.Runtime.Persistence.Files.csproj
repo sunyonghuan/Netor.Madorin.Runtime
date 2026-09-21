@@ -1,6 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <ProjectReference Include="..\Madorin.AI.Runtime.Contracts\Madorin.AI.Runtime.Contracts.csproj" />
+    <ProjectReference Include="..\Madorin.AI.Runtime.Entities\Madorin.AI.Runtime.Entities.csproj" />
     <ProjectReference Include="..\Madorin.AI.Runtime.Persistence.Abstractions\Madorin.AI.Runtime.Persistence.Abstractions.csproj" />
   </ItemGroup>
 
