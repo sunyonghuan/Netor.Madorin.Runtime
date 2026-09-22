@@ -1243,7 +1243,8 @@ public sealed class LocalRuntime : IAsyncDisposable
                 request.RunIdempotencyKey,
                 snapshot.Mode,
                 effectiveSelection,
-                request.InputOverride);
+                request.InputOverride,
+                Language: request.Language);
             ValidateRequest(executionRequest);
             if (request.TurnOverride is null
                 && effectiveSelection.ModeOptions is ExpertModeOptions

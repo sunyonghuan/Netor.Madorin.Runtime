@@ -156,7 +156,8 @@ await eventPipeClient.ConnectAsync(timeout: 10000);
         "type": "text",
         "text": "你好，请介绍一下自己"
       }
-    ]
+    ],
+    "language": "zh-CN"
   }
 }
 ```
@@ -191,7 +192,8 @@ await eventPipeClient.ConnectAsync(timeout: 10000);
         "type": "text",
         "text": "继续刚才的话题"
       }
-    ]
+    ],
+    "language": "zh-CN"
   }
 }
 ```
@@ -207,6 +209,28 @@ await eventPipeClient.ConnectAsync(timeout: 10000);
   }
 }
 ```
+
+### 对话语言与环境信息
+
+`run.new_session` 和 `run.existing_session` 都接受可选字段 `language`（BCP 47，例如 `zh-CN`、`en-US`）。
+
+- 传入非空白值时，Runtime 用它作为本轮对话语言。
+- 省略字段、JSON `null` 或空白字符串时，Runtime 使用当前操作系统的界面语言。
+- 独立 CLI 没有语言设置，因此不传该字段。
+- 主程序在用户已保存语言设置时传入该值；未保存时传 `null`。
+
+Runtime 会在专家、工作和会议三种模式的系统提示词末尾追加一段环境信息，供模型知道自己跑在哪：
+
+```text
+## Environment
+os: windows 10.0.26100 x64
+locale: zh-CN
+date: 2026-09-22 +08:00
+cli: madorin 0.1.50
+workspace: E:\work\demo
+```
+
+`locale` 来自上面的语言规则。`date` 是本地日期和时区偏移，不包含时分秒。Unix 上能确定交互式 shell 时多一行 `shell`；Windows 上省略。
 
 ### 取消运行
 

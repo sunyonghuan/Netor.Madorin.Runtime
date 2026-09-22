@@ -16,6 +16,7 @@ using Madorin.AI.Runtime.Persistence.Sqlite;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Services.AgentJobs;
 using Madorin.AI.Runtime.Services.Memory;
+using Madorin.AI.Runtime.Services.Prompt;
 using Madorin.AI.Runtime.Services.Skills;
 using Madorin.AI.Runtime.Services.Tools;
 using Madorin.AI.Runtime.Tools.Abstractions;
@@ -114,6 +115,7 @@ public sealed class ExpertModeOrchestrator(
     private IReadOnlyDictionary<string, string>? _hostCatalogDescriptionsByName;
     private IReadOnlyList<SkillScopeSourceRoot>? _hostScopeSourceRoots;
     private ExpertPlanManager? _planManager;
+    private string? _conversationLanguage;
 
     public RuntimeMode Mode => RuntimeMode.Expert;
 
@@ -130,6 +132,7 @@ public sealed class ExpertModeOrchestrator(
         ArgumentException.ThrowIfNullOrWhiteSpace(runtimeInstanceId);
         ValidateToolCallLimit(_runtimeLimits.MaxToolCallsPerRound);
         var expert = ValidateAndGetOptions(request);
+        _conversationLanguage = request.Language;
         var providerId = expert.Agent.ProviderId ?? request.Selection.DefaultSelection.ProviderId;
         var modelId = expert.Agent.ModelId ?? request.Selection.DefaultSelection.ModelId;
         if (!string.Equals(_provider.ProviderId, providerId, StringComparison.Ordinal))
@@ -169,6 +172,13 @@ public sealed class ExpertModeOrchestrator(
             ? AgentContextComposer.WithoutMemory(enhancedSystemPrompt)
             : await _agentContextComposer.ComposeAsync(enhancedSystemPrompt, ct)
                 .ConfigureAwait(false);
+        agentContext = agentContext with
+        {
+            Instructions = ConversationEnvironmentPrompt.Append(
+                agentContext.Instructions,
+                _workspaceRoot,
+                request.Language)
+        };
         using var memorySnapshotLease = CaptureMemorySnapshot(invocationId, agentContext);
         var fullSkillCatalog = await CaptureSkillCatalogSnapshotAsync(ct).ConfigureAwait(false);
         var skillCatalogSnapshot = fullSkillCatalog?.FilterBySkillIds(expert.Agent.SkillIds);
@@ -3012,11 +3022,15 @@ public sealed class ExpertModeOrchestrator(
         var subAgentContext = _agentContextComposer is null
             ? AgentContextComposer.WithoutMemory(subAgent.SystemPrompt)
             : await _agentContextComposer.ComposeAsync(subAgent.SystemPrompt, ct).ConfigureAwait(false);
+        var subAgentInstructions = ConversationEnvironmentPrompt.Append(
+            subAgentContext.Instructions,
+            _workspaceRoot,
+            _conversationLanguage);
 
         // Create initial messages for sub-agent: system + user task
         var systemMessage = new RuntimeProviderMessage(
             RuntimeProviderRoles.System,
-            [new TextContentBlock(subAgentContext.Instructions)]);
+            [new TextContentBlock(subAgentInstructions)]);
 
         var userTaskMessage = new RuntimeProviderMessage(
             RuntimeProviderRoles.User,

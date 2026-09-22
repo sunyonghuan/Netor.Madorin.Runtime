@@ -14,6 +14,7 @@ using Madorin.AI.Runtime.Persistence.Files;
 using Madorin.AI.Runtime.Persistence.Sqlite;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Services.Memory;
+using Madorin.AI.Runtime.Services.Prompt;
 using Madorin.AI.Runtime.Services.Skills;
 using Madorin.AI.Runtime.Services.Tools;
 using Madorin.AI.Runtime.Tools.Abstractions;
@@ -50,6 +51,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
     private readonly RuntimeLimits _runtimeLimits;
     private readonly bool _isHostModeSkills;
     private readonly SkillActivationStore? _skillActivationStore;
+    private readonly string? _workspaceRoot;
 
     public WorkModeOrchestrator(
         Func<string, IRuntimeProviderAdapter> providerFactory,
@@ -74,7 +76,8 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         Func<RuntimeSkillScriptInvocation, CancellationToken, Task<RuntimeSkillScriptResult>>? scriptInvoker = null,
         Func<ToolCatalogSnapshot>? liveCatalogProvider = null,
         bool isHostModeSkills = false,
-        SkillActivationStore? skillActivationStore = null)
+        SkillActivationStore? skillActivationStore = null,
+        string? workspaceRoot = null)
     {
         _providerFactory = providerFactory ?? throw new ArgumentNullException(nameof(providerFactory));
         _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -97,6 +100,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         _scriptInvoker = scriptInvoker;
         _isHostModeSkills = isHostModeSkills;
         _skillActivationStore = skillActivationStore;
+        _workspaceRoot = workspaceRoot;
         _runtimeLimits = runtimeLimits ?? new RuntimeLimits(
             MaxToolResultBytesPerInvocation: 4 * 1024 * 1024);
         if (workRepo is not null)
@@ -1819,6 +1823,11 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         || string.Equals(error.Category, "authentication", StringComparison.Ordinal);
 
 
+    private string ResolveWorkspaceRoot() =>
+        string.IsNullOrWhiteSpace(_workspaceRoot)
+            ? Directory.GetCurrentDirectory()
+            : _workspaceRoot;
+
     private async Task<AgentInvocationRequest> CreateInvocationRequestAsync(
         string runId,
         string sessionId,
@@ -1856,6 +1865,11 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         {
             systemInstructions = AppendAvailableAgentsList(systemInstructions, workOpts.AvailableAgents);
         }
+
+        systemInstructions = ConversationEnvironmentPrompt.Append(
+            systemInstructions,
+            ResolveWorkspaceRoot(),
+            request.Language);
 
         var systemMessage = new RuntimeProviderMessage(
             RuntimeProviderRoles.System,

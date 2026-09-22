@@ -86,7 +86,8 @@ var request = new NewSessionRunRequest(
 );
 
 var runId = await client.StartNewSessionRunAsync(request);
-// Session 和 Run 同时创建
+// Session 和 Run 同时创建。
+// request.Language 可传宿主界面语言；省略、null 或空白时 Runtime 使用操作系统界面语言。
 ```
 
 #### 显式创建

@@ -22,10 +22,18 @@ public interface IRuntimeClient : IAsyncDisposable
 
     public ValueTask ConnectAsync(CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// 创建新会话并启动 Run。
+    /// <see cref="NewSessionRunRequest.Language"/> 传入宿主界面语言；省略、null 或空白时由 Runtime 使用操作系统界面语言。
+    /// </summary>
     public ValueTask<string> StartNewSessionRunAsync(
         NewSessionRunRequest request,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// 在已有会话上启动下一轮 Run。
+    /// <see cref="ExistingSessionRunRequest.Language"/> 的缺省规则与新会话相同。
+    /// </summary>
     public ValueTask<string> StartExistingSessionRunAsync(
         ExistingSessionRunRequest request,
         CancellationToken cancellationToken = default);

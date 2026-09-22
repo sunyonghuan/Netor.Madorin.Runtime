@@ -77,7 +77,8 @@ var request = new NewSessionRunRequest(
     InitialInput: new[]
     {
         ContentBlock.CreateText("你好，请介绍一下自己")
-    }
+    },
+    Language: "zh-CN"
 );
 
 var runId = await client.StartNewSessionRunAsync(request);
@@ -192,12 +193,12 @@ public interface IRuntimeClient : IAsyncDisposable
     // 连接
     ValueTask ConnectAsync(CancellationToken cancellationToken = default);
     
-    // 启动新会话
+    // 启动新会话。request.Language 为宿主界面语言；省略、null 或空白时 Runtime 使用操作系统界面语言。
     ValueTask<string> StartNewSessionRunAsync(
         NewSessionRunRequest request,
         CancellationToken cancellationToken = default);
     
-    // 继续已有会话
+    // 继续已有会话。Language 的缺省规则与新会话相同。
     ValueTask<string> StartExistingSessionRunAsync(
         ExistingSessionRunRequest request,
         CancellationToken cancellationToken = default);

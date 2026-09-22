@@ -2842,7 +2842,8 @@ public sealed class RuntimeServer : IAsyncDisposable
             snapshot.Mode,
             effectiveSelection,
             existingRun.InputOverride,
-            ProviderConfigs: existingRun.ProviderConfigs);
+            ProviderConfigs: existingRun.ProviderConfigs,
+            Language: existingRun.Language);
         var plan = new RunStartPlan(
             $"session:{existingRun.SessionId}",
             RuntimeRunMetadata.ComputeRequestHash(existingRun),

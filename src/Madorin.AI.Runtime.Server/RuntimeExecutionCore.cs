@@ -313,7 +313,8 @@ internal sealed class RuntimeExecutionCore(
                 scriptInvoker: scriptInvoker,
                 isHostModeSkills: isHostModeSkills,
                 skillActivationStore: skillActivationStore,
-                liveCatalogProvider: liveCatalogProvider),
+                liveCatalogProvider: liveCatalogProvider,
+                workspaceRoot: _workspaceRoot),
             RuntimeMode.Work => new WorkModeOrchestrator(
                 providerFactory: requestedProviderId =>
                 {
@@ -352,7 +353,8 @@ internal sealed class RuntimeExecutionCore(
                 scriptInvoker: scriptInvoker,
                 liveCatalogProvider: liveCatalogProvider,
                 isHostModeSkills: isHostModeSkills,
-                skillActivationStore: skillActivationStore),
+                skillActivationStore: skillActivationStore,
+                workspaceRoot: _workspaceRoot),
 
             _ => throw new NotSupportedException(
                 $"Runtime mode '{request.Mode}' is not supported.")

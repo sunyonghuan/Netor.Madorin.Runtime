@@ -15,6 +15,7 @@ using Madorin.AI.Runtime.Persistence.Sqlite;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Services;
 using Madorin.AI.Runtime.Services.Memory;
+using Madorin.AI.Runtime.Services.Prompt;
 using Madorin.AI.Runtime.Services.Skills;
 using Madorin.AI.Runtime.Services.Tools;
 using Madorin.AI.Runtime.Tools.Abstractions;
@@ -52,6 +53,7 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
     private readonly RuntimeError? _resumedFailure;
     private readonly bool _isHostModeSkills;
     private readonly SkillActivationStore? _skillActivationStore;
+    private readonly string? _workspaceRoot;
 
     /// <summary>Initializes the meeting orchestrator and its V1 persistence dependencies.</summary>
     /// <param name="providerFactory">Resolves a provider by its ID.</param>
@@ -94,7 +96,8 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
         Func<RuntimeSkillScriptInvocation, CancellationToken, Task<RuntimeSkillScriptResult>>? scriptInvoker = null,
         bool isHostModeSkills = false,
         SkillActivationStore? skillActivationStore = null,
-        Func<ToolCatalogSnapshot>? liveCatalogProvider = null)
+        Func<ToolCatalogSnapshot>? liveCatalogProvider = null,
+        string? workspaceRoot = null)
     {
         ArgumentNullException.ThrowIfNull(providerFactory);
         _providerFactory = providerFactory;
@@ -102,6 +105,7 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
         _store = store;
         _isHostModeSkills = isHostModeSkills;
         _skillActivationStore = skillActivationStore;
+        _workspaceRoot = workspaceRoot;
         _liveCatalogProvider = liveCatalogProvider;
         _invocationExecutor = new MeetingInvocationExecutor(
             new ProviderAgentInvocationExecutor(providerFactory, scriptInvoker),
@@ -2609,7 +2613,7 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                 .ConfigureAwait(false);
         var systemMessage = new RuntimeProviderMessage(
             RuntimeProviderRoles.System,
-            [new TextContentBlock(context.Instructions)]);
+            [new TextContentBlock(WithEnvironment(context.Instructions, request.Language))]);
         var projection = await BuildProjectedMessagesAsync(
             sessionId,
             invocationId,
@@ -2695,7 +2699,7 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                 .ConfigureAwait(false);
         var systemMessage = new RuntimeProviderMessage(
             RuntimeProviderRoles.System,
-            [new TextContentBlock(context.Instructions)]);
+            [new TextContentBlock(WithEnvironment(context.Instructions, request.Language))]);
         var projection = await BuildProjectedMessagesAsync(
             sessionId,
             invocationId,
@@ -4245,6 +4249,8 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             systemInstructions = AppendAvailableParticipantsList(systemInstructions, options.Participants);
         }
 
+        systemInstructions = WithEnvironment(systemInstructions, request.Language);
+
         var systemMessage = new RuntimeProviderMessage(
             RuntimeProviderRoles.System,
             [new TextContentBlock(systemInstructions)]);
@@ -4351,6 +4357,8 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
         {
             systemInstructions = AppendAvailableParticipantsList(systemInstructions, options.Participants);
         }
+
+        systemInstructions = WithEnvironment(systemInstructions, request.Language);
 
         var systemMessage = new RuntimeProviderMessage(
             RuntimeProviderRoles.System,
@@ -4822,6 +4830,14 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
     private sealed record ReconciledCanonicalText(
         ConversationRecordV1 Record,
         string Text);
+
+    private string WithEnvironment(string instructions, string? language) =>
+        ConversationEnvironmentPrompt.Append(instructions, ResolveWorkspaceRoot(), language);
+
+    private string ResolveWorkspaceRoot() =>
+        string.IsNullOrWhiteSpace(_workspaceRoot)
+            ? Directory.GetCurrentDirectory()
+            : _workspaceRoot;
 
     private static string AppendAvailableParticipantsList(string baseInstructions, MeetingParticipant[] participants)
     {
