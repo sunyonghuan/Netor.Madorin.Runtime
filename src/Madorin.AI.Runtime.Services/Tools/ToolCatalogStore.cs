@@ -247,6 +247,7 @@ public sealed partial class ToolCatalogStore : IToolCatalogStore
                 WriteSortedStrings(writer, "capabilities", descriptor.Capabilities);
                 writer.WriteString("executionTarget", descriptor.ExecutionTarget.ToString());
                 writer.WriteBoolean("isIdempotent", descriptor.IsIdempotent);
+                WriteSortedStrings(writer, "supportedModes", descriptor.SupportedModes);
                 writer.WriteEndObject();
             }
 
@@ -322,6 +323,9 @@ public sealed partial class ToolCatalogStore : IToolCatalogStore
                 : Array.AsReadOnly(descriptor.Tags.ToArray()),
             Capabilities = descriptor.Capabilities is null
                 ? Array.Empty<string>()
-                : Array.AsReadOnly(descriptor.Capabilities.ToArray())
+                : Array.AsReadOnly(descriptor.Capabilities.ToArray()),
+            SupportedModes = descriptor.SupportedModes is null
+                ? null
+                : Array.AsReadOnly(descriptor.SupportedModes.ToArray())
         };
 }

@@ -5,7 +5,7 @@ namespace Madorin.AI.Runtime.Persistence.Sqlite;
 /// <summary>Creates and migrates the Runtime SQLite metadata schema.</summary>
 public static class SqliteSchema
 {
-    public const int CurrentVersion = 16;
+    public const int CurrentVersion = 19;
 
     private static readonly string[] RequiredTables =
     [
@@ -23,6 +23,7 @@ public static class SqliteSchema
         "work_step_dependencies",
         "work_step_attempts",
         "work_background_jobs",
+        "work_pending_inputs",
         "message_index",
         "session_selections",
         "agent_snapshots",
@@ -33,7 +34,8 @@ public static class SqliteSchema
         "meeting_sessions",
         "meeting_rounds",
         "meeting_participants",
-        "meeting_invocations"
+        "meeting_invocations",
+        "meeting_pending_inputs"
     ];
 
     private static readonly string[] RequiredIndexes =
@@ -72,6 +74,8 @@ public static class SqliteSchema
         "idx_work_step_attempts_step",
         "idx_work_background_jobs_session",
         "idx_work_background_jobs_step",
+        "idx_work_pending_inputs_session_state",
+        "idx_meeting_pending_inputs_session_state",
         "idx_tool_intents_work_step"
     ];
 
@@ -165,6 +169,8 @@ public static class SqliteSchema
         ("work_steps", "reuses_step_id"),
         ("work_steps", "replaces_step_id"),
         ("work_steps", "checkpoint_json"),
+        ("work_step_dependencies", "session_id"),
+        ("work_step_attempts", "session_id"),
         ("tool_intents", "work_step_id"),
         ("tool_intents", "plan_version"),
         ("sessions", "title")
@@ -324,6 +330,15 @@ public static class SqliteSchema
                     break;
                 case 16:
                     await ApplyVersionSixteenAsync(conn, ct).ConfigureAwait(false);
+                    break;
+                case 17:
+                    await ApplyVersionSeventeenAsync(conn, ct).ConfigureAwait(false);
+                    break;
+                case 18:
+                    await ApplyVersionEighteenAsync(conn, ct).ConfigureAwait(false);
+                    break;
+                case 19:
+                    await ApplyVersionNineteenAsync(conn, ct).ConfigureAwait(false);
                     break;
                 default:
                     throw new InvalidOperationException($"No migration is registered for schema version {version}.");
@@ -1072,6 +1087,185 @@ public static class SqliteSchema
             VALUES(16, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
             """;
         await versionCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        transaction.Commit();
+    }
+
+    private static async Task ApplyVersionSeventeenAsync(SqliteConnection conn, CancellationToken ct)
+    {
+        using var transaction = conn.BeginTransaction(deferred: false);
+
+        await using var createCommand = conn.CreateCommand();
+        createCommand.Transaction = transaction;
+        createCommand.CommandText = """
+            CREATE TABLE IF NOT EXISTS work_pending_inputs (
+                input_id TEXT NOT NULL PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                content_text TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'user',
+                state TEXT NOT NULL DEFAULT 'pending',
+                enqueued_at TEXT NOT NULL,
+                consumed_at TEXT,
+                consumed_by_run_id TEXT,
+                UNIQUE(session_id, ordinal)
+            );
+            CREATE INDEX IF NOT EXISTS idx_work_pending_inputs_session_state
+            ON work_pending_inputs(session_id, state, ordinal);
+            INSERT OR IGNORE INTO schema_versions(version, applied_at)
+            VALUES(17, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            """;
+        await createCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        transaction.Commit();
+    }
+
+    /// <summary>
+    /// Work 步骤主键纳入 session_id，避免同库多 Work 会话共用 s1@v1 时 UNIQUE 冲突。
+    /// </summary>
+    private static async Task ApplyVersionEighteenAsync(SqliteConnection conn, CancellationToken ct)
+    {
+        using var transaction = conn.BeginTransaction(deferred: false);
+        await using var command = conn.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            CREATE TABLE work_steps_v18 (
+                session_id TEXT NOT NULL,
+                step_id TEXT NOT NULL,
+                plan_version TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                target_agent_id TEXT,
+                status TEXT DEFAULT 'pending',
+                step_input_hash TEXT,
+                result_json TEXT,
+                created_at TEXT,
+                completed_at TEXT,
+                parent_step_id TEXT,
+                invocation_id TEXT,
+                depth INTEGER NOT NULL DEFAULT 0,
+                step_index INTEGER NOT NULL DEFAULT 0,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                error_message TEXT,
+                started_at TEXT,
+                title TEXT,
+                goal TEXT,
+                is_background INTEGER NOT NULL DEFAULT 0,
+                depends_json TEXT,
+                step_message_id TEXT,
+                reuses_step_id TEXT,
+                replaces_step_id TEXT,
+                checkpoint_json TEXT,
+                PRIMARY KEY (session_id, step_id, plan_version)
+            );
+            INSERT INTO work_steps_v18 (
+                session_id, step_id, plan_version, run_id, target_agent_id, status,
+                step_input_hash, result_json, created_at, completed_at, parent_step_id,
+                invocation_id, depth, step_index, attempt_count, error_message, started_at,
+                title, goal, is_background, depends_json, step_message_id, reuses_step_id,
+                replaces_step_id, checkpoint_json)
+            SELECT
+                session_id, step_id, plan_version, run_id, target_agent_id, status,
+                step_input_hash, result_json, created_at, completed_at, parent_step_id,
+                invocation_id, COALESCE(depth, 0), COALESCE(step_index, 0),
+                COALESCE(attempt_count, 0), error_message, started_at,
+                title, goal, COALESCE(is_background, 0), depends_json, step_message_id,
+                reuses_step_id, replaces_step_id, checkpoint_json
+            FROM work_steps;
+
+            CREATE TABLE work_step_dependencies_v18 (
+                session_id TEXT NOT NULL,
+                step_id TEXT NOT NULL,
+                plan_version TEXT NOT NULL,
+                depends_on_step_id TEXT NOT NULL,
+                PRIMARY KEY (session_id, step_id, plan_version, depends_on_step_id)
+            );
+            INSERT INTO work_step_dependencies_v18 (
+                session_id, step_id, plan_version, depends_on_step_id)
+            SELECT s.session_id, d.step_id, d.plan_version, d.depends_on_step_id
+            FROM work_step_dependencies d
+            INNER JOIN work_steps s
+                ON s.step_id = d.step_id
+               AND s.plan_version = d.plan_version;
+
+            CREATE TABLE work_step_attempts_v18 (
+                session_id TEXT NOT NULL,
+                step_id TEXT NOT NULL,
+                plan_version TEXT NOT NULL,
+                attempt_number INTEGER NOT NULL,
+                invocation_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                error_message TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                PRIMARY KEY (session_id, step_id, plan_version, attempt_number)
+            );
+            INSERT INTO work_step_attempts_v18 (
+                session_id, step_id, plan_version, attempt_number, invocation_id,
+                status, error_message, started_at, completed_at)
+            SELECT s.session_id, a.step_id, a.plan_version, a.attempt_number, a.invocation_id,
+                   a.status, a.error_message, a.started_at, a.completed_at
+            FROM work_step_attempts a
+            INNER JOIN work_steps s
+                ON s.step_id = a.step_id
+               AND s.plan_version = a.plan_version;
+
+            DROP TABLE work_step_dependencies;
+            DROP TABLE work_step_attempts;
+            DROP TABLE work_steps;
+            ALTER TABLE work_steps_v18 RENAME TO work_steps;
+            ALTER TABLE work_step_dependencies_v18 RENAME TO work_step_dependencies;
+            ALTER TABLE work_step_attempts_v18 RENAME TO work_step_attempts;
+
+            CREATE INDEX IF NOT EXISTS idx_work_steps_session
+            ON work_steps(session_id, plan_version, status);
+            CREATE INDEX IF NOT EXISTS idx_work_steps_run
+            ON work_steps(run_id, status);
+            CREATE INDEX IF NOT EXISTS idx_work_steps_status
+            ON work_steps(status, session_id);
+            CREATE INDEX IF NOT EXISTS idx_work_steps_agent
+            ON work_steps(target_agent_id, status);
+            CREATE INDEX IF NOT EXISTS idx_work_step_dependencies_step
+            ON work_step_dependencies(session_id, step_id, plan_version);
+            CREATE INDEX IF NOT EXISTS idx_work_step_dependencies_depends
+            ON work_step_dependencies(session_id, depends_on_step_id, plan_version);
+            CREATE INDEX IF NOT EXISTS idx_work_step_attempts_step
+            ON work_step_attempts(session_id, step_id, plan_version, attempt_number);
+
+            INSERT OR IGNORE INTO schema_versions(version, applied_at)
+            VALUES(18, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            """;
+        await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        transaction.Commit();
+    }
+
+    /// <summary>
+    /// Meeting 用户插话 FIFO 账本；check_pending 在 Meeting 侧 Peek，编排器处理后再 Consume。
+    /// </summary>
+    private static async Task ApplyVersionNineteenAsync(SqliteConnection conn, CancellationToken ct)
+    {
+        using var transaction = conn.BeginTransaction(deferred: false);
+
+        await using var createCommand = conn.CreateCommand();
+        createCommand.Transaction = transaction;
+        createCommand.CommandText = """
+            CREATE TABLE IF NOT EXISTS meeting_pending_inputs (
+                input_id TEXT NOT NULL PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                content_text TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'user',
+                state TEXT NOT NULL DEFAULT 'pending',
+                enqueued_at TEXT NOT NULL,
+                consumed_at TEXT,
+                consumed_by_run_id TEXT,
+                UNIQUE(session_id, ordinal)
+            );
+            CREATE INDEX IF NOT EXISTS idx_meeting_pending_inputs_session_state
+            ON meeting_pending_inputs(session_id, state, ordinal);
+            INSERT OR IGNORE INTO schema_versions(version, applied_at)
+            VALUES(19, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            """;
+        await createCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         transaction.Commit();
     }
 

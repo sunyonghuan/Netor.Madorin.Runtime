@@ -101,6 +101,46 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
                 "agent:delegate",
                 "delegate task to agent",
                 canGrantForRun: true),
+            BuiltinToolRegistry.WorkListPlanTemplatesToolId => Create(
+                "work-templates:list",
+                "list work plan templates",
+                canGrantForRun: true),
+            BuiltinToolRegistry.WorkLoadPlanFromTemplateToolId => Create(
+                "work-templates:load",
+                "load work plan template",
+                canGrantForRun: true),
+            BuiltinToolRegistry.WorkReadTemplateFileToolId => Create(
+                "work-templates:read",
+                "read work template file",
+                canGrantForRun: true),
+            BuiltinToolRegistry.WorkSetPlanToolId => Create(
+                "work:set-plan",
+                "set work plan",
+                canGrantForRun: false),
+            BuiltinToolRegistry.WorkDispatchStepToolId => Create(
+                "work:dispatch-step",
+                "dispatch work step",
+                canGrantForRun: false),
+            BuiltinToolRegistry.WorkLoadPlanFromChatHistoryToolId => Create(
+                "work-history:chat",
+                "load plan materials from chat history",
+                canGrantForRun: true),
+            BuiltinToolRegistry.WorkLoadPlanFromGroupchatToolId => Create(
+                "work-history:groupchat",
+                "load plan materials from groupchat",
+                canGrantForRun: true),
+            BuiltinToolRegistry.WorkGetRecentCompletedTaskPlanToolId => Create(
+                "work-history:recent",
+                "get recent completed task plan",
+                canGrantForRun: true),
+            BuiltinToolRegistry.AskUserToolId => Create(
+                "mode:ask-user",
+                "ask user a decision question",
+                canGrantForRun: false),
+            BuiltinToolRegistry.CheckPendingUserInputToolId => Create(
+                "mode:check-pending-user-input",
+                "check pending user input",
+                canGrantForRun: true),
             SkillScriptAuthorization.ToolId => ScriptScope(arguments, workspaceRoot),
             SkillRuntimeTools.LoadToolId => FileReadScope(workspaceRoot, ".", "load skill"),
             SkillRuntimeTools.ReadToolId => SkillReadScope(arguments, workspaceRoot),

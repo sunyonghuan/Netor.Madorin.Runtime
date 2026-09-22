@@ -190,8 +190,52 @@ Work 模式的计划和步骤通过以下数据结构表达：
 
 ---
 
+## 12. 规划轮与计划修订（运行时行为）
+
+1. **讨论轮**：总经理输出若无法解析为合法 `WorkPlanDraft`（含校验失败），本轮只结束 Run，不发布 `work.plan.updated`，不调度任何步骤。会话保持 `Planning`（若此前已有计划，则恢复进入本轮前的会话状态；若正在等计划确认，则保持 `WaitingForPlanConfirmation`）。
+2. **可执行计划**：仅在解析且校验通过后，才 `SavePlanRevision` 并发出 `work.plan.updated`。
+3. **计划确认门**（`WorkflowPolicy.RequirePlanConfirmation`）：
+   - 发布计划后，若用户本轮未给出明确执行确认，会话进入 `WaitingForPlanConfirmation`，**本轮不调度步骤**。
+   - 后续用户输入明确确认（如「确认执行」「批准」）且未要求修订时，Runtime **跳过总经理**，直接按已发布计划执行。
+   - 若用户在确认语句中同时给出新计划 JSON，则按修订保存后执行。
+   - 独立 CLI 的 Work 模式默认开启该开关。
+4. **版本自愈**：若会话已有已发布计划，Runtime 会把 GM 给出的 `planVersion` / `previousPlanVersion` 规范为「当前版本 + 1」并回填 `previousPlanVersion`，避免多轮对话重复发布 `1` 导致失败。
+5. **规划上下文**：多轮规划时会向总经理注入已发布版本、下一步期望版本、确认等待提示，以及当前步骤状态摘要。
+6. **失败策略**：`Continue` 会把失败步骤落为 `Failed` 后继续；`Retry` 先落 `Failed` 再重置为 `Pending` 重试。依赖失败挡住的后续 Pending 步骤会落盘为 `Skipped` 并发送 `work.step.skipped`。
+7. **步骤并发**：`MaxConcurrentSteps` 控制每波就绪步骤上限。同波就绪步骤可在 Provider/工具环并行执行；步骤准备与结果落盘仍串行。生产路径对 Session/Work、ToolIntent、Outbox 使用分连接；同连接对象须经连接级闸门串行化。
+8. **用户插话队列（Work 可交付切片，非完整 Run Control）**：
+   - 持久化表 `work_pending_inputs`；API：`SqliteWorkRepository.EnqueuePendingUserInputAsync` / `PeekPendingUserInputsAsync` / `ConsumePendingUserInputsAsync`，以及编排器 `WorkModeOrchestrator.EnqueueUserInputAsync`。
+   - 规划轮开始时按 FIFO 消费未读插话，注入总经理上下文后标记 `consumed`。
+   - Continue / 新输入若明确要求改目标，或携带新计划 JSON / 修订关键词，走版本自愈 + `SavePlanRevision(N+1)`；`reusesStepId` 指向已完成历史步骤时直接落 `completed`，不重跑。
+   - 步骤间隙若仍有未消费插话，本轮停靠为 `Paused`（`paused-for-pending-input`），保留未完成步骤，交下一轮规划消费。
+   - **缺口**：尚未提供 Server JSON-RPC `run.pause/interrupt/resume` 或 Client SDK 专用方法；宿主可用同会话 `run.existing_session` 的 `InputOverride` 作为下一轮目标文本，或进程内调用上述入队 API。完整控制面见 `docs/备档/工作流暂停与恢复/`。
+9. **Work 工具路径（与编排器路径并存）**：
+   - `mcli_work_list_plan_templates` / `load_plan_from_template` / `read_template_file`：内置扫盘，只供材料。
+   - `mcli_work_set_plan`：校验并返回规范化 `WorkPlanDraft`（支持原生 `planVersion/goal/steps` 或 `main_steps/sub_steps`）。编排器在总经理工具环成功后优先采用该 `plan` 落盘并发 `work.plan.updated`；仍保留裸 JSON 文本计划作为兼容回退。禁止参数含 `{{placeholders}}`。
+   - 计划确认门仍由 `RequirePlanConfirmation` / `WaitingForPlanConfirmation` 控制；`set_plan` 本身不代替用户确认。
+   - `mcli_work_dispatch_step`：要求会话已有已确认计划；按 `stepIndex`/`subStepIndex` 解析目标步骤；经 `WorkStepDispatchBridge` **同步**拉起 `targetAgentId` 子 Agent（编排器内 `ExecuteInvocationAsync`），返回 `{executed,stepId,outputText,...}`。未确认或无计划时拒绝。无绑定桥时仅返回校验通过（`executed=false`）。
+   - 目录：`SupportedModes=["work"]`；`project-lead` 仅可见 `dispatch_step` + `read_template_file` + 通用工具。
+   - 历史材料：`mcli_work_load_plan_from_chat_history` / `mcli_work_load_plan_from_groupchat` 读取 `ConversationStore` transcript（groupchat 要求 `meetingId` 对应 `meeting_sessions`）；仍须 `set_plan` 发布。
+10. **共享交互工具（Work/Meeting）**：
+   - `mcli_check_pending_user_input`：按 Session 模式分发。Work **消费** `work_pending_inputs`；Meeting **Peek** `meeting_pending_inputs`（Schema V19）。返回 `{hasPending,consumed,inputs,message}`。`ask_user` 前应先调用。
+   - `mcli_ask_user`：向宿主发起审批/HITL（`ApprovalRequest.ToolId=mcli_ask_user`，`Reason=question`）；宿主在 `ApprovalResponse.Reason` 回传答案文本后，工具结果返回 `{answered,question,answer}`。无宿主审批通道时返回 `ask_user_unavailable`。
+   - `SupportedModes=["work","meeting"]`；Expert 不可见。Work 仅 `general-manager` 可见；Meeting 仅 `meeting-host` 可见。
+
+---
+
 ## 修订记录
 
 | 日期 | 说明 |
 | --- | --- |
+| 2026-09-22 | chat_history/groupchat 读 transcript；dispatch_step 同步子 Agent；Meeting pending Peek（V19）；ask_user/check_pending 冒烟场景 |
+| 2026-09-22 | 历史材料：`get_recent_completed_task_plan` 可读本会话已完成计划；chat_history / groupchat 已登记，本轮返回 not_implemented |
+| 2026-09-22 | §12.10：共享 `mcli_ask_user` / `mcli_check_pending_user_input`（Work 队列消费 + 宿主审批通道作答） |
+| 2026-09-22 | §12.9：`mcli_work_set_plan` / `dispatch_step` 接通；编排器优先消费 set_plan；模板三件套 + A/B 目录过滤 |
+| 2026-09-22 | Schema V18：`work_steps` / dependencies / attempts 主键纳入 `session_id`，同库多 Work 会话可并行落盘 |
+| 2026-09-22 | §12.8：Work 插话队列 / 步骤间隙停靠 / 修订复用；标明与完整 Run Control 边界 |
+| 2026-03-22 | §12.8：Work 插话 FIFO（V17 `work_pending_inputs`）；步骤间隙遇插话停靠；规划轮消费后注入总经理 |
+| 2026-03-22 | §12.7：有工具波次亦可并发（分连接 + 连接级闸门） |
+| 2026-03-22 | §12.6–§12.7：依赖失败 Skipped 落盘；无工具波次并发 |
+| 2026-03-22 | §12：计划确认门 `WaitingForPlanConfirmation`；CLI 默认开启 RequirePlanConfirmation |
+| 2026-03-22 | §12：讨论轮不自动 fallback 执行；计划版本自愈；Continue/Retry 失败落盘 |
 | 2026-09-07 | §2.1 SkillIds 过滤；§2.2 宿主 Skills + live catalog（allowlist 不因 initial 缺失放大） |

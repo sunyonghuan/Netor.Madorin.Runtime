@@ -25,7 +25,9 @@ public sealed record HelloFrame(
 public sealed record HelloOkFrame(
     int IpcVersion,
     string Slug,
-    string Protocol) : ProviderWorkerFrame;
+    string Protocol,
+    /// <summary>Worker 内真实适配器声明的能力；宿主侧投影/校验优先用它，避免配置缺 capabilities 时误判。</summary>
+    ProviderCapabilities? Capabilities = null) : ProviderWorkerFrame;
 
 public sealed record HelloRejectedFrame(
     string Code,

@@ -88,7 +88,16 @@ Thumbs.db
 Desktop.ini
 $RECYCLE.BIN/
 
-# Local agent state
+# Root-level dot directories (all untracked)
+/.*/
+
+# Local AI constraint docs (worktree-local only)
+/AGENTS.md
+/AGENT.md
+/Agent.md
+/Agents.md
+
+# Local agent state (kept for clarity; covered by /.*/ above)
 /.artifacts/
 /.codemap/
 .agents/

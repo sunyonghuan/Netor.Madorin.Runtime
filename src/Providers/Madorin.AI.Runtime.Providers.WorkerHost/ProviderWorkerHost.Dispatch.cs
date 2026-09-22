@@ -68,7 +68,11 @@ public static partial class ProviderWorkerHost
 
             _helloCompleted = true;
             await WriteAsync(
-                    new HelloOkFrame(ProviderWorkerIpc.Version, slug, protocol),
+                    new HelloOkFrame(
+                        ProviderWorkerIpc.Version,
+                        slug,
+                        protocol,
+                        declaredCapabilities),
                     _shutdownCts.Token)
                 .ConfigureAwait(false);
             return null;

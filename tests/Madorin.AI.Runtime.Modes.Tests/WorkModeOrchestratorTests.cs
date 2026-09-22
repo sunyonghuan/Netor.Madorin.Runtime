@@ -19,6 +19,9 @@ namespace Madorin.AI.Runtime.Modes.Tests;
 public sealed class WorkModeOrchestratorTests
 {
     private static readonly string[] ExpectedAgentIds = ["manager", "worker"];
+    private static readonly string[] ExpectedManagerOnlyAgentIds = ["manager"];
+    private static readonly string[] ExpectedManagerThenWorkerAgentIds = ["manager", "worker"];
+    private static readonly string[] ExpectedTwoManagerAgentIds = ["manager", "manager"];
     private static readonly string[] ExpectedRetryAgentIds = ["manager", "worker", "worker"];
     private static readonly string[] ExpectedCredentialRetryAgentIds = ["manager", "worker", "worker"];
     private static readonly string[] ExpectedReplayDeltas = ["result:worker"];
@@ -288,7 +291,9 @@ public sealed class WorkModeOrchestratorTests
         var result = await RunAsync(
             repetitionCount: 1,
             workflowApprovalDecision: ToolAuthorizationDecision.Granted,
-            managerOutput: DuplicateGoalPlanJson);
+            managerOutput: DuplicateGoalPlanJson,
+            loopDetection: WorkLoopDetection.Strict,
+            requireHumanConfirmationOnLoop: true);
 
         Assert.AreEqual(RunStatus.Completed, result.RunStatus);
         Assert.HasCount(2, result.WorkSteps);
@@ -431,20 +436,182 @@ public sealed class WorkModeOrchestratorTests
     }
 
     [TestMethod]
-    public async Task WorkPlanUpdated_FallbackPlan_EmitsEvent()
+    public async Task DiscussionOnlyManagerOutput_DoesNotPublishOrExecutePlan()
     {
-        // 使用无效的 manager 输出触发 fallback
-        var result = await RunAsync(repetitionCount: 1, managerOutput: "invalid json");
+        var result = await RunAsync(repetitionCount: 1, managerOutput: "我们先讨论范围，还没有可执行计划。");
         var events = Assert.ContainsSingle(result.EventBatches);
 
-        var planEvent = events.FirstOrDefault(e => e.MessageType == MessageTypes.WorkPlanUpdated);
-        Assert.IsNotNull(planEvent, "work.plan.updated should be emitted even for fallback plan");
+        Assert.AreEqual(RunStatus.Completed, result.RunStatus);
+        Assert.IsEmpty(
+            events.Where(static item => item.MessageType == MessageTypes.WorkPlanUpdated).ToArray(),
+            "Discussion turns must not emit work.plan.updated");
+        Assert.IsEmpty(result.WorkSteps);
+        Assert.IsEmpty(result.PlanRevisions);
+        CollectionAssert.AreEqual(ExpectedManagerOnlyAgentIds, result.InvokedAgentIds);
+        Assert.AreEqual(MessageTypes.RunCompleted, events[^1].MessageType);
+    }
 
-        var payload = planEvent.Payload;
-        Assert.IsTrue(payload.TryGetProperty("workPlanVersion", out var version));
-        Assert.AreEqual(1, version.GetInt32());
-        Assert.IsTrue(payload.TryGetProperty("steps", out var steps));
-        Assert.AreEqual(1, steps.GetArrayLength(), "Fallback plan should have 1 step");
+    [TestMethod]
+    public async Task InvalidStructuredPlan_DoesNotFallbackToExecutableStep()
+    {
+        const string invalidPlanJson =
+            "{\"planVersion\":\"1\",\"goal\":\"Ship\",\"steps\":["
+            + "{\"stepId\":\"step-a\",\"goal\":\"Do work\",\"targetAgentId\":\"missing-agent\"}]}";
+
+        var result = await RunAsync(repetitionCount: 1, managerOutput: invalidPlanJson);
+        var events = Assert.ContainsSingle(result.EventBatches);
+
+        Assert.AreEqual(RunStatus.Completed, result.RunStatus);
+        Assert.IsEmpty(
+            events.Where(static item => item.MessageType == MessageTypes.WorkPlanUpdated).ToArray());
+        Assert.IsEmpty(result.WorkSteps);
+        CollectionAssert.AreEqual(ExpectedManagerOnlyAgentIds, result.InvokedAgentIds);
+    }
+
+    [TestMethod]
+    public async Task SecondTurnRepublishingVersionOne_AutoHealsToNextRevision()
+    {
+        const string firstPlanJson =
+            "{\"planVersion\":\"1\",\"goal\":\"Ship v1\",\"steps\":["
+            + "{\"stepId\":\"step-a\",\"goal\":\"Prepare notes\",\"targetAgentId\":\"worker\"}]}";
+        const string secondPlanJson =
+            "{\"planVersion\":\"1\",\"goal\":\"Ship v2\",\"steps\":["
+            + "{\"stepId\":\"step-b\",\"goal\":\"Rewrite notes\",\"targetAgentId\":\"worker\"}]}";
+
+        var result = await RunMultiTurnAsync(
+            [
+                new WorkTurnScript("run-1", firstPlanJson, "Prepare the release notes."),
+                new WorkTurnScript("run-2", secondPlanJson, "Revise the release notes.")
+            ]);
+
+        Assert.AreEqual(RunStatus.Completed, result.RunStatus);
+        Assert.HasCount(2, result.PlanRevisions);
+        Assert.AreEqual("1", result.PlanRevisions[0].PlanVersion);
+        Assert.AreEqual("2", result.PlanRevisions[1].PlanVersion);
+        Assert.AreEqual("1", result.PlanRevisions[1].PreviousPlanVersion);
+
+        var secondBatch = result.EventBatches[1];
+        var planEvent = secondBatch.First(static item => item.MessageType == MessageTypes.WorkPlanUpdated);
+        Assert.IsTrue(planEvent.Payload.TryGetProperty("workPlanVersion", out var version));
+        Assert.AreEqual(2, version.GetInt32());
+        Assert.IsTrue(planEvent.Payload.TryGetProperty("goal", out var goal));
+        Assert.AreEqual("Ship v2", goal.GetString());
+    }
+
+    [TestMethod]
+    public async Task RequirePlanConfirmation_PublishesPlanAndWaitsWithoutExecuting()
+    {
+        const string planJson =
+            "{\"planVersion\":\"1\",\"goal\":\"Ship\",\"steps\":["
+            + "{\"stepId\":\"step-a\",\"goal\":\"Prepare notes\",\"targetAgentId\":\"worker\"}]}";
+
+        var result = await RunMultiTurnAsync(
+            [new WorkTurnScript("run-1", planJson, "请先制定计划，先不要执行。")],
+            requirePlanConfirmation: true);
+
+        Assert.AreEqual(RunStatus.Completed, result.RunStatus);
+        Assert.AreEqual(WorkSessionStatus.WaitingForPlanConfirmation, result.WorkSessionStatus);
+        Assert.HasCount(1, result.PlanRevisions);
+        Assert.HasCount(1, result.WorkSteps);
+        Assert.AreEqual(WorkStepLifecycleStatus.Pending, result.WorkSteps[0].Status);
+        CollectionAssert.AreEqual(ExpectedManagerOnlyAgentIds, result.InvokedAgentIds);
+        Assert.IsTrue(
+            result.EventBatches[0].Any(static item => item.MessageType == MessageTypes.WorkPlanUpdated));
+    }
+
+    [TestMethod]
+    public async Task RequirePlanConfirmation_ConfirmTurn_ExecutesPendingPlanWithoutManager()
+    {
+        const string planJson =
+            "{\"planVersion\":\"1\",\"goal\":\"Ship\",\"steps\":["
+            + "{\"stepId\":\"step-a\",\"goal\":\"Prepare notes\",\"targetAgentId\":\"worker\"}]}";
+
+        var result = await RunMultiTurnAsync(
+            [
+                new WorkTurnScript("run-1", planJson, "请先制定计划，先不要执行。"),
+                new WorkTurnScript("run-2", null, "确认执行")
+            ],
+            requirePlanConfirmation: true);
+
+        Assert.AreEqual(RunStatus.Completed, result.RunStatus);
+        Assert.AreEqual(WorkSessionStatus.Completed, result.WorkSessionStatus);
+        Assert.HasCount(1, result.PlanRevisions);
+        Assert.HasCount(1, result.WorkSteps);
+        Assert.AreEqual(WorkStepLifecycleStatus.Completed, result.WorkSteps[0].Status);
+        CollectionAssert.AreEqual(ExpectedManagerThenWorkerAgentIds, result.InvokedAgentIds);
+        Assert.IsFalse(
+            result.EventBatches[1].Any(static item => item.MessageType == MessageTypes.WorkPlanUpdated),
+            "Confirm turn should execute the pending plan without republishing.");
+    }
+
+    [TestMethod]
+    public async Task RequirePlanConfirmation_DiscussionWhileWaiting_KeepsWaitingStatus()
+    {
+        const string planJson =
+            "{\"planVersion\":\"1\",\"goal\":\"Ship\",\"steps\":["
+            + "{\"stepId\":\"step-a\",\"goal\":\"Prepare notes\",\"targetAgentId\":\"worker\"}]}";
+
+        var result = await RunMultiTurnAsync(
+            [
+                new WorkTurnScript("run-1", planJson, "请先制定计划，先不要执行。"),
+                new WorkTurnScript("run-2", "还想再讨论一下范围，先不要执行。", "还想再讨论一下范围，先不要执行。")
+            ],
+            requirePlanConfirmation: true);
+
+        Assert.AreEqual(WorkSessionStatus.WaitingForPlanConfirmation, result.WorkSessionStatus);
+        Assert.AreEqual(WorkStepLifecycleStatus.Pending, result.WorkSteps[0].Status);
+        CollectionAssert.AreEqual(ExpectedTwoManagerAgentIds, result.InvokedAgentIds);
+    }
+
+    [TestMethod]
+    public async Task RunAsync_IndependentReadySteps_ExecuteConcurrentWaveWithoutTools()
+    {
+        const string planJson =
+            "{\"planVersion\":\"1\",\"goal\":\"Ship\",\"steps\":["
+            + "{\"stepId\":\"step-a\",\"goal\":\"Prepare A\",\"targetAgentId\":\"worker\"},"
+            + "{\"stepId\":\"step-b\",\"goal\":\"Prepare B\",\"targetAgentId\":\"worker\"}]}";
+
+        var result = await RunAsync(
+            repetitionCount: 1,
+            managerOutput: planJson,
+            maxConcurrentSteps: 2,
+            workerDelay: TimeSpan.FromMilliseconds(80));
+
+        Assert.AreEqual(RunStatus.Completed, result.RunStatus);
+        Assert.HasCount(2, result.WorkSteps);
+        Assert.IsTrue(result.WorkSteps.All(static step =>
+            step.Status == WorkStepLifecycleStatus.Completed));
+        Assert.IsNotNull(result.WorkerStartTimestampsUtc);
+        Assert.HasCount(2, result.WorkerStartTimestampsUtc);
+        var ordered = result.WorkerStartTimestampsUtc.OrderBy(static value => value).ToArray();
+        var overlap = ordered[1] - ordered[0];
+        Assert.IsTrue(
+            overlap < TimeSpan.FromMilliseconds(80),
+            $"Independent ready steps should start concurrently; start delta was {overlap.TotalMilliseconds}ms.");
+    }
+
+    [TestMethod]
+    public async Task RunAsync_ContinuePolicy_MarksDependencyBlockedStepsSkipped()
+    {
+        const string planJson =
+            "{\"planVersion\":\"1\",\"goal\":\"Ship\",\"steps\":["
+            + "{\"stepId\":\"step-a\",\"goal\":\"Primary\",\"targetAgentId\":\"worker\"},"
+            + "{\"stepId\":\"step-b\",\"goal\":\"Depends\",\"targetAgentId\":\"worker\",\"dependsOn\":[\"step-a\"]}]}";
+
+        var result = await RunAsync(
+            repetitionCount: 1,
+            failurePolicy: WorkStepFailurePolicy.Continue,
+            failWorker: true,
+            managerOutput: planJson);
+
+        Assert.AreEqual(RunStatus.Completed, result.RunStatus);
+        Assert.HasCount(2, result.WorkSteps);
+        var primary = result.WorkSteps.Single(static step => step.StepId == "step-a");
+        var dependent = result.WorkSteps.Single(static step => step.StepId == "step-b");
+        Assert.AreEqual(WorkStepLifecycleStatus.Failed, primary.Status);
+        Assert.AreEqual(WorkStepLifecycleStatus.Skipped, dependent.Status);
+        Assert.IsTrue(
+            result.EventBatches[0].Any(static item => item.MessageType == MessageTypes.WorkStepSkipped));
     }
 
     [TestMethod]
@@ -597,7 +764,11 @@ public sealed class WorkModeOrchestratorTests
         bool refreshSkillsBetweenInvocations = false,
         bool emitReasoningDelta = false,
         bool emitToolCallDelta = false,
-        bool emitUsageUpdated = false)
+        bool emitUsageUpdated = false,
+        WorkLoopDetection? loopDetection = null,
+        bool? requireHumanConfirmationOnLoop = null,
+        int? maxConcurrentSteps = null,
+        TimeSpan? workerDelay = null)
     {
         var ct = _testContext.CancellationToken;
         var dataDirectory = Path.Combine(
@@ -624,7 +795,8 @@ public sealed class WorkModeOrchestratorTests
                 requireWorkerCredentialRefresh,
                 emitReasoningDelta,
                 emitToolCallDelta,
-                emitUsageUpdated);
+                emitUsageUpdated,
+                workerDelay);
             var memoryFiles = new MemoryFileService(
                 Path.Join(dataDirectory, "home"),
                 Path.Join(dataDirectory, "workspace"));
@@ -725,7 +897,10 @@ public sealed class WorkModeOrchestratorTests
                 failurePolicy,
                 maxRetriesPerStep,
                 retryBackoffMilliseconds,
-                contextPolicy);
+                contextPolicy,
+                loopDetection,
+                requireHumanConfirmationOnLoop,
+                maxConcurrentSteps: maxConcurrentSteps);
             await EnsureSessionRunAsync(connection, "session-1", "run-1", ct);
             if (createPendingWorkStepToolIntent)
             {
@@ -791,7 +966,9 @@ public sealed class WorkModeOrchestratorTests
                 planRevisions,
                 workflowApprovalRequests,
                 credentialRefreshRequests,
-                credentialWaitStates);
+                credentialWaitStates,
+                WorkSessionStatus: null,
+                provider.WorkerStartTimestampsUtc.ToArray());
         }
         finally
         {
@@ -850,22 +1027,32 @@ public sealed class WorkModeOrchestratorTests
         string runId,
         CancellationToken ct)
     {
-        await using var command = connection.CreateCommand();
-        command.CommandText = """
-            INSERT INTO sessions(session_id, mode, status, created_at, updated_at)
+        await using var sessionCommand = connection.CreateCommand();
+        sessionCommand.CommandText = """
+            INSERT OR IGNORE INTO sessions(session_id, mode, status, created_at, updated_at)
             VALUES($sessionId, 'Work', 'Active', '2026-07-23T00:00:00.000Z', '2026-07-23T00:00:00.000Z');
+            """;
+        sessionCommand.Parameters.AddWithValue("$sessionId", sessionId);
+        await sessionCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+
+        await using var runCommand = connection.CreateCommand();
+        runCommand.CommandText = """
             INSERT INTO runs(run_id, session_id, status, run_sequence, created_at, updated_at)
             VALUES($runId, $sessionId, 'Running', 1, '2026-07-23T00:00:00.000Z', '2026-07-23T00:00:00.000Z');
             """;
-        command.Parameters.AddWithValue("$sessionId", sessionId);
-        command.Parameters.AddWithValue("$runId", runId);
-        await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        runCommand.Parameters.AddWithValue("$runId", runId);
+        runCommand.Parameters.AddWithValue("$sessionId", sessionId);
+        await runCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
     private static NewSessionRunRequest CreateRequest(
         WorkStepFailurePolicy failurePolicy = WorkStepFailurePolicy.Stop,
         int? maxRetriesPerStep = null,
         int? retryBackoffMilliseconds = null,
-        WorkContextPolicy? contextPolicy = null)
+        WorkContextPolicy? contextPolicy = null,
+        WorkLoopDetection? loopDetection = null,
+        bool? requireHumanConfirmationOnLoop = null,
+        bool requirePlanConfirmation = false,
+        int? maxConcurrentSteps = null)
     {
         var manager = new AgentRef(
             "manager",
@@ -879,13 +1066,32 @@ public sealed class WorkModeOrchestratorTests
             "Execute the assigned step.",
             "fake",
             "test-model");
-        var policy = WorkflowPolicy.Default with { FailurePolicy = failurePolicy };
+        var policy = WorkflowPolicy.Default with
+        {
+            FailurePolicy = failurePolicy,
+            RequirePlanConfirmation = requirePlanConfirmation
+        };
         if (maxRetriesPerStep is not null || retryBackoffMilliseconds is not null)
         {
             policy = policy with
             {
                 MaxRetriesPerStep = maxRetriesPerStep ?? policy.MaxRetriesPerStep,
                 RetryBackoffMilliseconds = retryBackoffMilliseconds ?? policy.RetryBackoffMilliseconds
+            };
+        }
+
+        if (maxConcurrentSteps is not null)
+        {
+            policy = policy with { MaxConcurrentSteps = maxConcurrentSteps.Value };
+        }
+
+        if (loopDetection is not null || requireHumanConfirmationOnLoop is not null)
+        {
+            policy = policy with
+            {
+                LoopDetection = loopDetection ?? policy.LoopDetection,
+                RequireHumanConfirmationOnLoop =
+                    requireHumanConfirmationOnLoop ?? policy.RequireHumanConfirmationOnLoop
             };
         }
 
@@ -918,6 +1124,8 @@ public sealed class WorkModeOrchestratorTests
         private readonly bool _emitReasoningDelta;
         private readonly bool _emitToolCallDelta;
         private readonly bool _emitUsageUpdated;
+        private readonly TimeSpan? _workerDelay;
+        private readonly List<DateTimeOffset> _workerStartTimestampsUtc = [];
         private int _workerFailureCount;
 
         public FakeProviderAdapter(
@@ -927,7 +1135,8 @@ public sealed class WorkModeOrchestratorTests
             bool requireWorkerCredentialRefresh = false,
             bool emitReasoningDelta = false,
             bool emitToolCallDelta = false,
-            bool emitUsageUpdated = false)
+            bool emitUsageUpdated = false,
+            TimeSpan? workerDelay = null)
         {
             _workerFailuresBeforeSuccess = failWorker
                 ? int.MaxValue
@@ -937,7 +1146,10 @@ public sealed class WorkModeOrchestratorTests
             _emitReasoningDelta = emitReasoningDelta;
             _emitToolCallDelta = emitToolCallDelta;
             _emitUsageUpdated = emitUsageUpdated;
+            _workerDelay = workerDelay;
         }
+
+        public IReadOnlyList<DateTimeOffset> WorkerStartTimestampsUtc => _workerStartTimestampsUtc;
 
         public string ProviderId => "fake";
 
@@ -963,6 +1175,19 @@ public sealed class WorkModeOrchestratorTests
             ct.ThrowIfCancellationRequested();
             _invokedAgentIds.Add(request.AgentId);
             _capturedRequests.Add(request);
+            if (string.Equals(request.AgentId, "worker", StringComparison.Ordinal))
+            {
+                lock (_workerStartTimestampsUtc)
+                {
+                    _workerStartTimestampsUtc.Add(DateTimeOffset.UtcNow);
+                }
+
+                if (_workerDelay is { } delay && delay > TimeSpan.Zero)
+                {
+                    await Task.Delay(delay, ct);
+                }
+            }
+
             await Task.Yield();
             if (_requireWorkerCredentialRefresh
                 && string.Equals(request.AgentId, "worker", StringComparison.Ordinal)
@@ -1015,8 +1240,7 @@ public sealed class WorkModeOrchestratorTests
             yield return new TextDeltaProviderEvent(
                 request.InvocationId,
                 string.Equals(request.AgentId, "manager", StringComparison.Ordinal)
-                    && _managerOutput is not null
-                    ? _managerOutput
+                    ? _managerOutput ?? DefaultManagerPlanJson
                     : $"result:{request.AgentId}");
 
             if (_emitUsageUpdated)
@@ -1040,6 +1264,122 @@ public sealed class WorkModeOrchestratorTests
         }
     }
 
+    private const string DefaultManagerPlanJson =
+        "{\"planVersion\":\"1\",\"goal\":\"Prepare the release notes.\",\"steps\":["
+        + "{\"stepId\":\"run-1:step-1\",\"goal\":\"Prepare the release notes.\",\"targetAgentId\":\"worker\",\"title\":\"Execute\"}]}";
+
+    private async Task<WorkRunResult> RunMultiTurnAsync(
+        IReadOnlyList<WorkTurnScript> turns,
+        bool requirePlanConfirmation = false)
+    {
+        ArgumentNullException.ThrowIfNull(turns);
+        Assert.IsGreaterThan(0, turns.Count);
+
+        var ct = _testContext.CancellationToken;
+        var dataDirectory = Path.Combine(
+            _testContext.TestRunDirectory ?? Path.GetTempPath(),
+            $"work-multi-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dataDirectory);
+
+        try
+        {
+            var connectionString = new SqliteConnectionStringBuilder
+            {
+                DataSource = Path.Combine(dataDirectory, "state.db"),
+                Pooling = false
+            }.ToString();
+            await using var connection = new SqliteConnection(connectionString);
+            await SqliteSchema.EnsureCreatedAsync(connection, ct);
+            using var outbox = new SqliteEventOutbox(connection);
+            using var toolStateStore = new SqliteToolIntentRepository(connection);
+            var sessionRepo = new SqliteSessionRepository(connection);
+            var workRepo = new SqliteWorkRepository(connection);
+            var store = new ConversationStore(dataDirectory);
+            var memoryFiles = new MemoryFileService(
+                Path.Join(dataDirectory, "home"),
+                Path.Join(dataDirectory, "workspace"));
+            await memoryFiles.ReplaceAsync(
+                MemoryScope.Global,
+                "# Memory\n\n- Shared global rule.\n",
+                ct);
+            await memoryFiles.ReplaceAsync(
+                MemoryScope.Project,
+                "# Memory\n\n- Shared project rule.\n",
+                ct);
+
+            var eventBatches = new List<IReadOnlyList<RuntimeEventEnvelope>>();
+            var invokedAgentIds = new List<string>();
+            var capturedRequests = new List<RuntimeProviderRequest>();
+            RunStatus lastRunStatus = RunStatus.Running;
+
+            foreach (var turn in turns)
+            {
+                var provider = new FakeProviderAdapter(managerOutput: turn.ManagerOutput);
+                var orchestrator = new WorkModeOrchestrator(
+                    _ => provider,
+                    store,
+                    sessionRepo,
+                    outbox,
+                    new AgentContextComposer(memoryFiles),
+                    toolStateStore: toolStateStore,
+                    workRepo: workRepo,
+                    connection: connection);
+                await EnsureSessionRunAsync(connection, "session-1", turn.RunId, ct);
+                var request = CreateRequest(
+                    WorkStepFailurePolicy.Stop,
+                    maxRetriesPerStep: null,
+                    retryBackoffMilliseconds: null,
+                    contextPolicy: null,
+                    requirePlanConfirmation: requirePlanConfirmation) with
+                {
+                    InitialInput = [new TextContentBlock(turn.UserText)]
+                };
+
+                var events = new List<RuntimeEventEnvelope>();
+                await foreach (var envelope in orchestrator.RunAsync(
+                    turn.RunId,
+                    "session-1",
+                    request,
+                    "runtime-1",
+                    ct))
+                {
+                    events.Add(envelope);
+                }
+
+                eventBatches.Add(events);
+                invokedAgentIds.AddRange(provider.InvokedAgentIds);
+                capturedRequests.AddRange(provider.CapturedRequests);
+                lastRunStatus = await sessionRepo.GetRunStatusAsync(turn.RunId, ct);
+            }
+
+            var workSteps = await workRepo.ListStepsAsync("session-1", ct: ct);
+            var planRevisions = await workRepo.ListPlanRevisionsAsync("session-1", ct);
+            var canonicalHistory = await store.ReadAllAsync("session-1", ct);
+            var resume = await workRepo.GetResumeStateAsync("session-1", ct);
+            return new WorkRunResult(
+                invokedAgentIds.ToArray(),
+                capturedRequests.ToArray(),
+                eventBatches,
+                CompletedStepResultJson: null,
+                lastRunStatus,
+                workSteps,
+                new Dictionary<string, InvocationSnapshot>(StringComparer.Ordinal),
+                canonicalHistory,
+                planRevisions,
+                [],
+                [],
+                [],
+                resume?.Status);
+        }
+        finally
+        {
+            if (Directory.Exists(dataDirectory))
+            {
+                Directory.Delete(dataDirectory, recursive: true);
+            }
+        }
+    }
+
     private static string ComputeHash(ContentBlock[] input)
     {
         var bytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(
@@ -1047,6 +1387,8 @@ public sealed class WorkModeOrchestratorTests
             RuntimeJsonContext.Default.ContentBlockArray);
         return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
     }
+
+    private sealed record WorkTurnScript(string RunId, string? ManagerOutput, string UserText);
 
     private sealed record WorkRunResult(
         string[] InvokedAgentIds,
@@ -1060,5 +1402,7 @@ public sealed class WorkModeOrchestratorTests
         IReadOnlyList<WorkPlanRevisionSnapshot> PlanRevisions,
         IReadOnlyList<ApprovalRequest> WorkflowApprovalRequests,
         IReadOnlyList<CredentialsRefreshRequestedEvent> CredentialRefreshRequests,
-        IReadOnlyList<WorkResumeState> CredentialWaitStates);
+        IReadOnlyList<WorkResumeState> CredentialWaitStates,
+        WorkSessionStatus? WorkSessionStatus = null,
+        IReadOnlyList<DateTimeOffset>? WorkerStartTimestampsUtc = null);
 }

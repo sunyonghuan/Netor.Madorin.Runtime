@@ -76,7 +76,8 @@ public sealed class SqliteToolIntentRepository(SqliteConnection connection) : IT
 
     private readonly SqliteConnection _connection = connection
         ?? throw new ArgumentNullException(nameof(connection));
-    private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly SemaphoreSlim _gate = SqliteConnectionSync.Get(
+        connection ?? throw new ArgumentNullException(nameof(connection)));
 
     public async Task<bool> InsertPendingAsync(
         string callId,
@@ -1338,7 +1339,7 @@ public sealed class SqliteToolIntentRepository(SqliteConnection connection) : IT
 
     public void Dispose()
     {
-        _gate.Dispose();
+        // 连接级闸门由 SqliteConnectionSync 持有，跨仓储共享，此处不 Dispose。
     }
 
     private static string FormatTimestamp(DateTimeOffset value) =>

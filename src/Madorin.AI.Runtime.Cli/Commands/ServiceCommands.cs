@@ -1927,7 +1927,7 @@ internal static class ServiceCommands
                         selectedAgent.AgentId,
                         StringComparison.Ordinal))
                     .ToArray(),
-                WorkflowPolicy.Default),
+                WorkflowPolicy.Default with { RequirePlanConfirmation = true }),
             _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, null)
         };
         return new NextTurnSelection(

@@ -38,8 +38,12 @@ internal static partial class Smoke
             ct.ThrowIfCancellationRequested();
             File.AppendAllText(Path.Combine(_root, "approvals.jsonl"), JsonSerializer.Serialize(request) + "\n");
             var grant = Grant(request.RunId, request.AgentId, request.ToolId, request.CallId, request.ApprovalRequestId);
+            // ask_user 约定：宿主把用户答案放在 ApprovalResponse.Reason。
+            var reason = string.Equals(request.ToolId, "mcli_ask_user", StringComparison.Ordinal)
+                ? "冒烟默认答复：按当前目标继续，不做额外限制。"
+                : "本次冒烟测试的工作区工具授权";
             return ValueTask.FromResult(new ApprovalResponse(request.CorrelationId, request.ApprovalRequestId,
-                ToolAuthorizationDecision.Granted, grant, "本次冒烟测试的工作区工具授权"));
+                ToolAuthorizationDecision.Granted, grant, reason));
         }
     };
 
@@ -68,7 +72,13 @@ internal static partial class Smoke
             {
                 var request = e.Payload.Deserialize(RuntimeJsonContext.Default.MeetingHitlRequest)!;
                 var context = string.Join("\n", (request.Context ?? []).OfType<TextContentBlock>().Select(block => block.Text));
-                var ending = context.Contains("可以结束会议", StringComparison.Ordinal);
+                // 首轮门禁/继续讨论：Supplement；用户明确收口或主持人征询结束且无“先不要结束”：Approve。
+                var ending = (context.Contains("可以结束会议", StringComparison.Ordinal)
+                        || context.Contains("认可修订后的结论，可以结束", StringComparison.Ordinal)
+                        || (context.Contains("可以结束", StringComparison.Ordinal)
+                            && !context.Contains("当前没有同意结束", StringComparison.Ordinal)
+                            && !context.Contains("先不要结束", StringComparison.Ordinal)))
+                    && !context.Contains("先不要结束", StringComparison.Ordinal);
                 var changed = context.Contains("50元", StringComparison.Ordinal);
                 var response = new MeetingHitlResponse(request.ApprovalRequestId,
                     ending ? MeetingHitlAction.Approve : MeetingHitlAction.Supplement,
@@ -143,7 +153,8 @@ internal static partial class Smoke
         try
         {
             var completion = Ends.GetOrAdd(runId, _ => new(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
-            var timeout = Task.Delay(TimeSpan.FromMinutes(7));
+            // 会议多轮点名 + reasoning 流事件量大；Work/Expert 通常远短于此。
+            var timeout = Task.Delay(TimeSpan.FromMinutes(20));
             var completed = await Task.WhenAny(completion, _eventReader, timeout);
             if (completed == _eventReader) { await _eventReader; throw new IOException("事件读取循环意外结束"); }
             if (completed == timeout) { throw new TimeoutException(); }
@@ -162,8 +173,8 @@ internal static partial class Smoke
         }
         catch (TimeoutException)
         {
-            await _client.CancelRunAsync(runId, "冒烟测试7分钟超时");
-            Save(label + ".timeout.json", new { runId, timeoutSeconds = 420 });
+            await _client.CancelRunAsync(runId, "冒烟测试回合超时");
+            Save(label + ".timeout.json", new { runId, timeoutSeconds = 1200 });
             Console.WriteLine($"TIMEOUT {label}");
             try { await Ends[runId].Task.WaitAsync(TimeSpan.FromSeconds(30)); }
             catch (TimeoutException) { Save(label + ".cancel-timeout.json", new { runId }); }

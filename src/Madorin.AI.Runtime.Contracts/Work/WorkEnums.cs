@@ -25,6 +25,8 @@ public enum WorkSessionStatus
     Paused,
     WaitingForApproval,
     WaitingForCredentials,
+    /// <summary>Plan revision published; waiting for host/user confirmation before step execution.</summary>
+    WaitingForPlanConfirmation,
     Completed,
     Failed,
     Cancelled,

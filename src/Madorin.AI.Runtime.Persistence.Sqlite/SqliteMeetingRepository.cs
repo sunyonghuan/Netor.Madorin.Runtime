@@ -1,4 +1,7 @@
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
+using Madorin.AI.Runtime.Contracts;
 using Microsoft.Data.Sqlite;
 
 namespace Madorin.AI.Runtime.Persistence.Sqlite;
@@ -2053,6 +2056,220 @@ public sealed class SqliteMeetingRepository(
             DateTimeStyles.RoundtripKind);
 
     #endregion
+
+    /// <summary>将用户插话写入 Meeting FIFO 账本。</summary>
+    public async Task<MeetingPendingUserInput> EnqueuePendingUserInputAsync(
+        string sessionId,
+        string contentText,
+        string source = "user",
+        string? inputId = null,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(contentText);
+        ArgumentException.ThrowIfNullOrWhiteSpace(source);
+
+        var id = string.IsNullOrWhiteSpace(inputId)
+            ? Guid.NewGuid().ToString("N")
+            : inputId.Trim();
+        var now = DateTimeOffset.UtcNow;
+        var hash = Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(contentText)))
+            .ToLowerInvariant();
+
+        using var transaction = _connection.BeginTransaction(deferred: false);
+        await using (var nextOrdinal = _connection.CreateCommand())
+        {
+            nextOrdinal.Transaction = transaction;
+            nextOrdinal.CommandText = """
+                SELECT COALESCE(MAX(ordinal), 0) + 1
+                FROM meeting_pending_inputs
+                WHERE session_id = $sessionId;
+                """;
+            nextOrdinal.Parameters.AddWithValue("$sessionId", sessionId);
+            var ordinalValue = await nextOrdinal.ExecuteScalarAsync(ct).ConfigureAwait(false);
+            var ordinal = Convert.ToInt32(ordinalValue, CultureInfo.InvariantCulture);
+
+            await using var insert = _connection.CreateCommand();
+            insert.Transaction = transaction;
+            insert.CommandText = """
+                INSERT INTO meeting_pending_inputs(
+                    input_id, session_id, ordinal, content_text, content_hash,
+                    source, state, enqueued_at)
+                VALUES(
+                    $inputId, $sessionId, $ordinal, $contentText, $contentHash,
+                    $source, 'pending', $enqueuedAt);
+                """;
+            insert.Parameters.AddWithValue("$inputId", id);
+            insert.Parameters.AddWithValue("$sessionId", sessionId);
+            insert.Parameters.AddWithValue("$ordinal", ordinal);
+            insert.Parameters.AddWithValue("$contentText", contentText);
+            insert.Parameters.AddWithValue("$contentHash", hash);
+            insert.Parameters.AddWithValue("$source", source);
+            insert.Parameters.AddWithValue("$enqueuedAt", FormatTimestamp(now));
+            await insert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+
+            transaction.Commit();
+            return new MeetingPendingUserInput(
+                id,
+                sessionId,
+                ordinal,
+                contentText,
+                hash,
+                MeetingPendingUserInputState.Pending,
+                now,
+                source);
+        }
+    }
+
+    public async Task<IReadOnlyList<MeetingPendingUserInput>> PeekPendingUserInputsAsync(
+        string sessionId,
+        int? limit = null,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        await using var command = _connection.CreateCommand();
+        command.CommandText = """
+            SELECT input_id, session_id, ordinal, content_text, content_hash,
+                   source, state, enqueued_at, consumed_at, consumed_by_run_id
+            FROM meeting_pending_inputs
+            WHERE session_id = $sessionId
+              AND state = 'pending'
+            ORDER BY ordinal ASC
+            """ + (limit is null ? ";" : " LIMIT $limit;");
+        command.Parameters.AddWithValue("$sessionId", sessionId);
+        if (limit is not null)
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThan(limit.Value, 1);
+            command.Parameters.AddWithValue("$limit", limit.Value);
+        }
+
+        return await ReadPendingUserInputsAsync(command, ct).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<MeetingPendingUserInput>> ConsumePendingUserInputsAsync(
+        string sessionId,
+        string runId,
+        int? limit = null,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(runId);
+
+        using var transaction = _connection.BeginTransaction(deferred: false);
+        await using var selectCommand = _connection.CreateCommand();
+        selectCommand.Transaction = transaction;
+        selectCommand.CommandText = """
+            SELECT input_id, session_id, ordinal, content_text, content_hash,
+                   source, state, enqueued_at, consumed_at, consumed_by_run_id
+            FROM meeting_pending_inputs
+            WHERE session_id = $sessionId
+              AND state = 'pending'
+            ORDER BY ordinal ASC
+            """ + (limit is null ? ";" : " LIMIT $limit;");
+        selectCommand.Parameters.AddWithValue("$sessionId", sessionId);
+        if (limit is not null)
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThan(limit.Value, 1);
+            selectCommand.Parameters.AddWithValue("$limit", limit.Value);
+        }
+
+        var pending = await ReadPendingUserInputsAsync(selectCommand, ct).ConfigureAwait(false);
+        if (pending.Count == 0)
+        {
+            transaction.Commit();
+            return pending;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var consumed = new List<MeetingPendingUserInput>(pending.Count);
+        foreach (var item in pending)
+        {
+            await using var update = _connection.CreateCommand();
+            update.Transaction = transaction;
+            update.CommandText = """
+                UPDATE meeting_pending_inputs
+                SET state = 'consumed',
+                    consumed_at = $consumedAt,
+                    consumed_by_run_id = $runId
+                WHERE input_id = $inputId
+                  AND state = 'pending';
+                """;
+            update.Parameters.AddWithValue("$consumedAt", FormatTimestamp(now));
+            update.Parameters.AddWithValue("$runId", runId);
+            update.Parameters.AddWithValue("$inputId", item.InputId);
+            var rows = await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            if (rows != 1)
+            {
+                throw new InvalidOperationException(
+                    $"Pending meeting input '{item.InputId}' was already consumed.");
+            }
+
+            consumed.Add(item with
+            {
+                State = MeetingPendingUserInputState.Consumed,
+                ConsumedAt = now,
+                ConsumedByRunId = runId
+            });
+        }
+
+        transaction.Commit();
+        return consumed;
+    }
+
+    public async Task<int> CountPendingUserInputsAsync(
+        string sessionId,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        await using var command = _connection.CreateCommand();
+        command.CommandText = """
+            SELECT COUNT(1)
+            FROM meeting_pending_inputs
+            WHERE session_id = $sessionId
+              AND state = 'pending';
+            """;
+        command.Parameters.AddWithValue("$sessionId", sessionId);
+        var value = await command.ExecuteScalarAsync(ct).ConfigureAwait(false);
+        return Convert.ToInt32(value, CultureInfo.InvariantCulture);
+    }
+
+    public async Task<bool> HasPendingUserInputsAsync(
+        string sessionId,
+        CancellationToken ct = default) =>
+        await CountPendingUserInputsAsync(sessionId, ct).ConfigureAwait(false) > 0;
+
+    private static async Task<IReadOnlyList<MeetingPendingUserInput>> ReadPendingUserInputsAsync(
+        SqliteCommand command,
+        CancellationToken ct)
+    {
+        var items = new List<MeetingPendingUserInput>();
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            items.Add(new MeetingPendingUserInput(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetInt32(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                ParsePendingInputState(reader.GetString(6)),
+                ParseTimestamp(reader.GetString(7)),
+                reader.GetString(5),
+                reader.IsDBNull(8) ? null : ParseTimestamp(reader.GetString(8)),
+                reader.IsDBNull(9) ? null : reader.GetString(9)));
+        }
+
+        return items;
+    }
+
+    private static MeetingPendingUserInputState ParsePendingInputState(string value) =>
+        value.ToLowerInvariant() switch
+        {
+            "pending" => MeetingPendingUserInputState.Pending,
+            "consumed" => MeetingPendingUserInputState.Consumed,
+            _ => Enum.Parse<MeetingPendingUserInputState>(value, ignoreCase: true)
+        };
 
     private ValueTask InjectFailureAsync(SqliteMeetingRepositoryFailurePoint point) =>
         _options.FailureInjector is { } injector

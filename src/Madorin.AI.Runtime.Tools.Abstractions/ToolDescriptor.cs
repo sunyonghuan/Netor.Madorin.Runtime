@@ -16,4 +16,9 @@ public sealed record ToolDescriptor(
     IReadOnlyList<string>? Capabilities = null,
     ToolRiskLevel Risk = ToolRiskLevel.Low,
     ToolExecutionTarget ExecutionTarget = ToolExecutionTarget.Builtin,
-    bool IsIdempotent = true);
+    bool IsIdempotent = true,
+    /// <summary>
+    /// 适用模式：null/空=全模式；否则仅列出的模式可见（如 work / meeting / expert）。
+    /// 仅 Runtime 内部使用，不进入宿主协议字段。
+    /// </summary>
+    IReadOnlyList<string>? SupportedModes = null);

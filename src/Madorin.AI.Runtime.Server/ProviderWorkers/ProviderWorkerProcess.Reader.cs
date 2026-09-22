@@ -48,8 +48,9 @@ public sealed partial class ProviderWorkerProcess
     {
         switch (frame)
         {
-            case HelloOkFrame:
-                _hello?.TrySetResult(new HelloFrameResult(true, null, null));
+            case HelloOkFrame helloOk:
+                _negotiatedCapabilities = helloOk.Capabilities;
+                _hello?.TrySetResult(new HelloFrameResult(true, null, null, helloOk.Capabilities));
                 break;
             case HelloRejectedFrame rejected:
                 _hello?.TrySetResult(new HelloFrameResult(false, rejected.Code, rejected.Message));

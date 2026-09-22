@@ -16,7 +16,12 @@ public sealed record WorkflowPolicy(
     int MaxRetriesPerStep = 2,
     int RetryBackoffMilliseconds = 1000,
     WorkLoopDetection LoopDetection = WorkLoopDetection.Lenient,
-    bool RequireHumanConfirmationOnLoop = false)
+    bool RequireHumanConfirmationOnLoop = false,
+    /// <summary>
+    /// When true, publishing a plan leaves the session in
+    /// <see cref="WorkSessionStatus.WaitingForPlanConfirmation"/> until the user confirms execution.
+    /// </summary>
+    bool RequirePlanConfirmation = false)
 {
     public static WorkflowPolicy Default { get; } = new();
 

@@ -25,6 +25,19 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
     public const string ProcessRunToolId = "mcli_process";
     public const string HttpRequestToolId = "mcli_http";
     public const string DelegateToAgentToolId = "mcli_delegate_agent";
+    public const string WorkListPlanTemplatesToolId = "mcli_work_list_plan_templates";
+    public const string WorkLoadPlanFromTemplateToolId = "mcli_work_load_plan_from_template";
+    public const string WorkReadTemplateFileToolId = "mcli_work_read_template_file";
+    public const string WorkSetPlanToolId = "mcli_work_set_plan";
+    public const string WorkDispatchStepToolId = "mcli_work_dispatch_step";
+    public const string WorkLoadPlanFromChatHistoryToolId = "mcli_work_load_plan_from_chat_history";
+    public const string WorkLoadPlanFromGroupchatToolId = "mcli_work_load_plan_from_groupchat";
+    public const string WorkGetRecentCompletedTaskPlanToolId = "mcli_work_get_recent_completed_task_plan";
+    public const string AskUserToolId = "mcli_ask_user";
+    public const string CheckPendingUserInputToolId = "mcli_check_pending_user_input";
+
+    private static readonly IReadOnlyList<string> WorkOnlyModes = Array.AsReadOnly(["work"]);
+    private static readonly IReadOnlyList<string> WorkAndMeetingModes = Array.AsReadOnly(["work", "meeting"]);
 
     private static readonly IReadOnlyList<ToolDescriptor> AdvertisedTools = Array.AsReadOnly<ToolDescriptor>(
     [
@@ -155,13 +168,122 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
             RiskLevel: "low",
             Capabilities: ["agent.delegate"],
             Risk: ToolRiskLevel.Low,
-            IsIdempotent: false)
+            IsIdempotent: false),
+        new(
+            WorkListPlanTemplatesToolId,
+            "mcli",
+            "List work plan templates",
+            "Lists valid work-plan templates under user/system work-templates roots. Empty list is success.",
+            """{"type":"object","properties":{"keyword":{"type":"string"},"category":{"type":"string"}},"additionalProperties":false}""",
+            """{"type":"object","properties":{"ok":{"type":"boolean"},"templates":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"},"path":{"type":"string"},"category":{"type":"string"},"version":{"type":"string"}},"required":["name","description","path","category","version"],"additionalProperties":false}}},"required":["ok","templates"],"additionalProperties":false}""",
+            Capabilities: ["work.templates"],
+            Risk: ToolRiskLevel.SensitiveRead,
+            SupportedModes: WorkOnlyModes),
+        new(
+            WorkLoadPlanFromTemplateToolId,
+            "mcli",
+            "Load work plan template",
+            "Loads TEMPLATE.md materials from an absolute template directory path. Does not call set_plan.",
+            """{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"ok":{"type":"boolean"},"error":{"type":"string"},"message":{"type":"string"},"path":{"type":"string"},"name":{"type":"string"},"description":{"type":"string"},"category":{"type":"string"},"version":{"type":"string"},"instructions":{"type":"string"},"planSkeleton":{"type":"string"},"files":{"type":"array"},"note":{"type":"string"}},"required":["ok"],"additionalProperties":false}""",
+            Capabilities: ["work.templates"],
+            Risk: ToolRiskLevel.SensitiveRead,
+            SupportedModes: WorkOnlyModes),
+        new(
+            WorkReadTemplateFileToolId,
+            "mcli",
+            "Read work template file",
+            "Reads one indexed UTF-8 file inside a work-plan template directory.",
+            """{"type":"object","properties":{"path":{"type":"string"},"relativePath":{"type":"string"}},"required":["path","relativePath"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"ok":{"type":"boolean"},"error":{"type":"string"},"message":{"type":"string"},"path":{"type":"string"},"relativePath":{"type":"string"},"content":{"type":"string"}},"required":["ok"],"additionalProperties":false}""",
+            Capabilities: ["work.templates"],
+            Risk: ToolRiskLevel.SensitiveRead,
+            SupportedModes: WorkOnlyModes),
+        new(
+            WorkSetPlanToolId,
+            "mcli",
+            "Set work plan",
+            "Validates and returns an executable WorkPlanDraft (native planVersion/goal/steps or main_steps/sub_steps). Runtime persists it and waits for user confirmation before dispatch.",
+            """{"type":"object","properties":{"planVersion":{"type":"string"},"goal":{"type":"string"},"steps":{"type":"array"},"main_steps":{"type":"array"},"previousPlanVersion":{"type":"string"},"summary":{"type":"string"},"plan":{"type":"object"}},"additionalProperties":true}""",
+            """{"type":"object","properties":{"ok":{"type":"boolean"},"error":{"type":"string"},"message":{"type":"string"},"planVersion":{"type":"string"},"goal":{"type":"string"},"stepCount":{"type":"integer"},"plan":{"type":"object"},"requiresConfirmation":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}""",
+            RiskLevel: "medium",
+            RequiresApproval: false,
+            Capabilities: ["work.plan"],
+            Risk: ToolRiskLevel.Write,
+            IsIdempotent: false,
+            SupportedModes: WorkOnlyModes),
+        new(
+            WorkDispatchStepToolId,
+            "mcli",
+            "Dispatch work step",
+            "Validates one confirmed work sub-step and synchronously runs the target agent through the Work orchestrator. Rejects when plan is missing or waiting for confirmation.",
+            """{"type":"object","properties":{"stepIndex":{"type":"integer","minimum":1},"subStepIndex":{"type":"integer","minimum":1},"instruction":{"type":"string"}},"required":["stepIndex","subStepIndex","instruction"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"ok":{"type":"boolean"},"executed":{"type":"boolean"},"error":{"type":"string"},"message":{"type":"string"},"planVersion":{"type":"string"},"stepId":{"type":"string"},"targetAgentId":{"type":"string"},"goal":{"type":"string"},"instruction":{"type":"string"},"childInvocationId":{"type":"string"},"outputText":{"type":"string"}},"required":["ok"],"additionalProperties":false}""",
+            RiskLevel: "medium",
+            Capabilities: ["work.dispatch"],
+            Risk: ToolRiskLevel.Write,
+            IsIdempotent: false,
+            SupportedModes: WorkOnlyModes),
+        new(
+            WorkLoadPlanFromChatHistoryToolId,
+            "mcli",
+            "Load plan from chat history",
+            "Loads recent chat/session transcript as planning materials. Still requires mcli_work_set_plan to publish.",
+            """{"type":"object","properties":{"sessionId":{"type":"string"},"limit":{"type":"integer","minimum":1}},"additionalProperties":false}""",
+            """{"type":"object","properties":{"ok":{"type":"boolean"},"source":{"type":"string"},"sessionId":{"type":"string"},"count":{"type":"integer"},"messages":{"type":"array"},"note":{"type":"string"},"error":{"type":"string"},"message":{"type":"string"}},"required":["ok"],"additionalProperties":false}""",
+            Capabilities: ["work.history"],
+            Risk: ToolRiskLevel.SensitiveRead,
+            SupportedModes: WorkOnlyModes),
+        new(
+            WorkLoadPlanFromGroupchatToolId,
+            "mcli",
+            "Load plan from groupchat",
+            "Loads groupchat/meeting transcript as planning materials. Still requires mcli_work_set_plan to publish.",
+            """{"type":"object","properties":{"meetingId":{"type":"string"},"limit":{"type":"integer","minimum":1}},"additionalProperties":false}""",
+            """{"type":"object","properties":{"ok":{"type":"boolean"},"source":{"type":"string"},"sessionId":{"type":"string"},"count":{"type":"integer"},"messages":{"type":"array"},"note":{"type":"string"},"error":{"type":"string"},"message":{"type":"string"}},"required":["ok"],"additionalProperties":false}""",
+            Capabilities: ["work.history"],
+            Risk: ToolRiskLevel.SensitiveRead,
+            SupportedModes: WorkOnlyModes),
+        new(
+            WorkGetRecentCompletedTaskPlanToolId,
+            "mcli",
+            "Get recent completed task plan",
+            "Returns the current session plan when the Work session is completed, as materials for redo/revise. Still requires mcli_work_set_plan.",
+            """{"type":"object","properties":{},"additionalProperties":false}""",
+            """{"type":"object","properties":{"ok":{"type":"boolean"},"found":{"type":"boolean"},"status":{"type":"string"},"planVersion":{"type":"string"},"plan":{"type":"object"},"note":{"type":"string"},"message":{"type":"string"},"error":{"type":"string"}},"required":["ok"],"additionalProperties":false}""",
+            Capabilities: ["work.history"],
+            Risk: ToolRiskLevel.SensitiveRead,
+            SupportedModes: WorkOnlyModes),
+        new(
+            AskUserToolId,
+            "mcli",
+            "Ask user",
+            "Asks the host/user a short decision question and waits for the answer. Call mcli_check_pending_user_input first. Do not invent the answer.",
+            """{"type":"object","properties":{"question":{"type":"string"}},"required":["question"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"ok":{"type":"boolean"},"answered":{"type":"boolean"},"question":{"type":"string"},"answer":{"type":"string"},"error":{"type":"string"},"message":{"type":"string"}},"required":["ok"],"additionalProperties":false}""",
+            RiskLevel: "medium",
+            RequiresApproval: false,
+            Capabilities: ["mode.ask_user"],
+            Risk: ToolRiskLevel.Write,
+            IsIdempotent: false,
+            SupportedModes: WorkAndMeetingModes),
+        new(
+            CheckPendingUserInputToolId,
+            "mcli",
+            "Check pending user input",
+            "Checks unread pending user inputs for the current session. Work consumes FIFO; Meeting peeks. Call before mcli_ask_user.",
+            """{"type":"object","properties":{},"additionalProperties":false}""",
+            """{"type":"object","properties":{"ok":{"type":"boolean"},"hasPending":{"type":"boolean"},"consumed":{"type":"boolean"},"inputs":{"type":"array","items":{"type":"string"}},"count":{"type":"integer"},"error":{"type":"string"},"message":{"type":"string"}},"required":["ok"],"additionalProperties":false}""",
+            Capabilities: ["mode.pending_input"],
+            Risk: ToolRiskLevel.SensitiveRead,
+            IsIdempotent: false,
+            SupportedModes: WorkAndMeetingModes)
     ]);
 
     private static readonly IReadOnlyList<ToolDescriptor> Tools = Array.AsReadOnly(
         [.. AdvertisedTools, .. BuiltinToolAliasCatalog.Tools]);
 
-    public string CatalogVersion => "3.0.0";
+    public string CatalogVersion => "3.3.0";
 
     public IReadOnlyList<ToolDescriptor> GetTools() => Tools;
 

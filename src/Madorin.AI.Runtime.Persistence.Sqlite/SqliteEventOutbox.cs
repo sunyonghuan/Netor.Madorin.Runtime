@@ -22,7 +22,7 @@ public sealed class SqliteEventOutbox : IEventOutbox, IDisposable
     private readonly long _maxMemoryReplayBytes;
     private readonly string? _replayDirectory;
     private readonly long _maxReplayBytes;
-    private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly SemaphoreSlim _gate;
     private long _backpressureCount;
     private long _droppedDeltaCount;
     private long _memoryReplayBytes;
@@ -36,6 +36,7 @@ public sealed class SqliteEventOutbox : IEventOutbox, IDisposable
         long maxMemoryReplayBytes = DefaultMaxMemoryReplayBytes)
     {
         _connection = connection ?? throw new ArgumentNullException(nameof(connection));
+        _gate = SqliteConnectionSync.Get(_connection);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxReplayBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxMemoryReplayBytes);
 
@@ -391,7 +392,7 @@ public sealed class SqliteEventOutbox : IEventOutbox, IDisposable
 
     public void Dispose()
     {
-        _gate.Dispose();
+        // 连接级闸门由 SqliteConnectionSync 持有，跨仓储共享，此处不 Dispose。
     }
 
     private static string FormatTimestamp(DateTimeOffset value) =>

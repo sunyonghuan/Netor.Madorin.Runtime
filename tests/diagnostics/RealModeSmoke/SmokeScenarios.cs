@@ -66,6 +66,104 @@ internal static partial class Smoke
             "确认执行。请输出裸JSON计划，交给worker一个步骤：实际读取sales.csv，计算总销售额，写work-confirmed.md并读回核验，然后总结。不要再讨论需求。", session);
     }
 
+    private static NextTurnSelection WorkSetPlanSelection()
+    {
+        var manager = new AgentRef(
+            "gm",
+            "smoke-v1",
+            """
+            你是总经理。制定工作计划时必须调用工具 mcli_work_set_plan，禁止只在回复里输出裸JSON冒充已发布计划。
+            set_plan 参数使用 WorkPlanDraft：planVersion/goal/steps；steps 含 stepId、goal、targetAgentId、dependsOn、depth。
+            可用员工：worker（读写分析）、reviewer（核验总结）。
+            未获明确「确认执行/批准执行」前只讨论或只发布计划，不要执行文件写入。
+            需要落盘计划时调用 mcli_work_set_plan，然后等待 Runtime 确认门；不要假装步骤已完成。
+            """,
+            _provider,
+            _model,
+            AllowedToolIds:
+            [
+                "mcli_work_set_plan",
+                "mcli_work_list_plan_templates",
+                "mcli_work_load_plan_from_template",
+                "mcli_work_read_template_file",
+                "mcli_fs_read",
+                "mcli_fs_write",
+                "mcli_fs_inspect",
+                "mcli_fs_list"
+            ]);
+        var worker = Agent("worker", "你是执行员工，严格按当前步骤目标执行，实际调用文件工具读写，不要只描述操作。完成后简洁报告。");
+        var reviewer = Agent("reviewer", "你是验收员工，实际调用文件工具读取产物并核验数字，写总结文件。不编造。");
+        return Select(
+            RuntimeMode.Work,
+            new WorkModeOptions(
+                manager,
+                [worker, reviewer],
+                new WorkflowPolicy(
+                    MaxConcurrentSteps: 2,
+                    StepTimeoutSeconds: 180,
+                    MaxRetriesPerStep: 0,
+                    RequirePlanConfirmation: true)));
+    }
+
+    private static async Task WorkSetPlanAsync()
+    {
+        var selection = WorkSetPlanSelection();
+        var session = await TurnAsync("SP1-discuss", selection,
+            "总经理，先讨论：读取sales.csv计算总额并写 work-setplan.md。现在只讨论三句话，禁止调用任何工具，禁止set_plan。");
+        session = await TurnAsync("SP2-set-plan", selection,
+            """
+            现在请调用 mcli_work_set_plan 发布工作计划，禁止只输出裸JSON。这不是执行批准。
+            计划要求：planVersion=1；一个步骤 s1，targetAgentId=worker；
+            目标：实际读取 sales.csv，计算销售总额，写 work-setplan.md 并读回核验后简短总结。
+            本轮只发布计划后停住；禁止执行任何步骤，禁止写文件。
+            """, session);
+        await TurnAsync("SP3-confirm-execute", selection,
+            "确认执行刚才 set_plan 发布的计划。不要再讨论，不要再调用 set_plan，直接按已发布计划执行 s1。", session);
+    }
+
+    private static NextTurnSelection WorkAskPendingSelection()
+    {
+        var manager = new AgentRef(
+            "gm",
+            "smoke-v1",
+            """
+            你是总经理。本轮只做交互工具验证，禁止 set_plan，禁止写文件。
+            必须先调用 mcli_check_pending_user_input；拿到结果后再调用 mcli_ask_user。
+            ask_user 的 question 固定为：本次冒烟是否按当前目标继续？
+            收到用户答复后，用一句话中文复述答案，然后结束。不要编造答案。
+            """,
+            _provider,
+            _model,
+            AllowedToolIds:
+            [
+                "mcli_check_pending_user_input",
+                "mcli_ask_user"
+            ]);
+        var worker = Agent("worker", "你是执行员工，本场景不会被调度。");
+        return Select(
+            RuntimeMode.Work,
+            new WorkModeOptions(
+                manager,
+                [worker],
+                new WorkflowPolicy(
+                    MaxConcurrentSteps: 1,
+                    StepTimeoutSeconds: 120,
+                    MaxRetriesPerStep: 0,
+                    RequirePlanConfirmation: true)));
+    }
+
+    private static async Task WorkAskPendingAsync()
+    {
+        var selection = WorkAskPendingSelection();
+        await TurnAsync("AP1-check-ask", selection,
+            """
+            请严格按顺序调用工具：
+            1) mcli_check_pending_user_input
+            2) mcli_ask_user，question=本次冒烟是否按当前目标继续？
+            然后用一句话复述宿主返回的答案。禁止 set_plan，禁止写文件。
+            """);
+    }
+
     private static async Task DiscussWorkAsync(NextTurnSelection selection)
     {
         var discussion = await TurnAsync("W1-discuss", selection,
@@ -113,7 +211,8 @@ internal static partial class Smoke
             你是会议主持人，以中文主持老板、财务和风控讨论。按协议选择发言者，安排finance先读数据分析收益、risk再读退款数据讨论风险。
             后续请参会者回应不同意见，至少安排四次参会发言。老板不是可点名参会者。
             你必须吸收老板的预算上限等补充。讨论充分后总结，再明确征询老板是否可以结束；老板明确同意后才正式结束。
-            选择发言者时输出协议要求的JSON。总结时用简短中文列出数字、分歧、决议与行动项。
+            选择发言者时只输出裸JSON对象，例如{"participantId":"finance","conclude":false}或{"conclude":true}，禁止Markdown代码围栏、禁止解释或前后缀；可用participantId只有finance和risk。
+            总结时用简短中文列出数字、分歧、决议与行动项。
             """);
         if (strict)
         {
@@ -130,8 +229,8 @@ internal static partial class Smoke
             hostAgent: host,
             selectorPolicy: new MeetingSelectorPolicyOptions(MeetingSelectorPolicy.HostDriven, MaxRounds: interrupt ? 2 : 4),
             policy: new MeetingPolicy(SummaryMode: MeetingSummaryMode.FinalOnly, Summarizer: host,
-                HitlEnabled: true, HitlTimeoutSeconds: 60, InvocationTimeoutSeconds: 120,
-                MaxRetriesPerInvocation: 0));
+                HitlEnabled: true, HitlTimeoutSeconds: 120, InvocationTimeoutSeconds: 300,
+                MaxRetriesPerInvocation: 2));
         var selection = Select(RuntimeMode.Meeting, options);
         var session = await TurnAsync(interrupt ? "MI1-running-interrupt" : "M1-discussion", selection,
             "开会讨论：依据sales.csv和refunds.csv决定是否扩大跨境销售推广。请主持人安排财务与风控有序讨论，必要时调用工具核实信息。先讨论收益，再讨论退款风险和试投预算，至少四次发言，最后总结并询问我是否结束，等待我明确答复。当前没有同意结束。");

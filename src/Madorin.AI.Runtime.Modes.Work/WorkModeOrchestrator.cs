@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Globalization;
 using System.Security.Cryptography;
@@ -17,6 +18,7 @@ using Madorin.AI.Runtime.Services.Memory;
 using Madorin.AI.Runtime.Services.Skills;
 using Madorin.AI.Runtime.Services.Tools;
 using Madorin.AI.Runtime.Tools.Abstractions;
+using Madorin.AI.Runtime.Tools.Builtin.Work;
 using Microsoft.Data.Sqlite;
 
 namespace Madorin.AI.Runtime.Modes.Work;
@@ -26,8 +28,12 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
 {
     private const string PlanProjectionVersion = "work-plan-v1";
     private const string StepProjectionVersion = "work-step-v2";
+    private const string WorkSetPlanToolId = "mcli_work_set_plan";
 
     private readonly Func<string, IRuntimeProviderAdapter> _providerFactory;
+    private WorkPlanDraft? _capturedSetPlanDraft;
+    private WorkStepDispatchBridge? _dispatchBridge;
+    private DispatchRunContext? _dispatchContext;
     private readonly ConversationStore _store;
     private readonly SqliteSessionRepository _sessionRepo;
     private readonly SqliteWorkRepository _workRepo;
@@ -116,6 +122,22 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
 
     public RuntimeMode Mode => RuntimeMode.Work;
 
+    /// <summary>绑定本轮 Run 的 dispatch_step 同步调度桥。</summary>
+    public void AttachDispatchBridge(WorkStepDispatchBridge bridge)
+    {
+        ArgumentNullException.ThrowIfNull(bridge);
+        _dispatchBridge = bridge;
+    }
+
+    /// <summary>进程内入队用户插话；完整 JSON-RPC run.interrupt 仍属 Run Control 范围。</summary>
+    public Task<WorkPendingUserInput> EnqueueUserInputAsync(
+        string sessionId,
+        string contentText,
+        string source = "user",
+        string? inputId = null,
+        CancellationToken ct = default) =>
+        _workRepo.EnqueuePendingUserInputAsync(sessionId, contentText, source, inputId, ct);
+
     public async IAsyncEnumerable<RuntimeEventEnvelope> RunAsync(
         string runId,
         string sessionId,
@@ -132,6 +154,44 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         var options = (WorkModeOptions)request.Selection.ModeOptions;
         var policy = options.EffectiveWorkflowPolicy;
         policy.Validate();
+        _dispatchContext = new DispatchRunContext(
+            runId,
+            sessionId,
+            runtimeInstanceId,
+            request,
+            options,
+            new RunSequenceAllocator(_startRunSequence));
+        if (_dispatchBridge is not null)
+        {
+            _dispatchBridge.Bind(HandleDispatchStepAsync);
+        }
+
+        try
+        {
+        await foreach (var envelope in RunCoreAsync(runId, sessionId, request, runtimeInstanceId, options, policy, ct)
+            .ConfigureAwait(false))
+        {
+            yield return envelope;
+        }
+        }
+        finally
+        {
+            _dispatchBridge?.Unbind();
+            _dispatchContext = null;
+        }
+    }
+
+    private async IAsyncEnumerable<RuntimeEventEnvelope> RunCoreAsync(
+        string runId,
+        string sessionId,
+        NewSessionRunRequest request,
+        string runtimeInstanceId,
+        WorkModeOptions options,
+        WorkflowPolicy policy,
+        [EnumeratorCancellation] CancellationToken ct)
+    {
+        var sequence = _dispatchContext?.Sequence
+            ?? new RunSequenceAllocator(_startRunSequence);
         var goal = ExtractGoalText(request.InitialInput);
         var fallbackStepId = $"{runId}:step-1";
         var legacyInputHash = ComputeLegacyStepInputHash(request.InitialInput);
@@ -142,11 +202,10 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             ct).ConfigureAwait(false);
         if (completedEarly is not null)
         {
-            long earlySequence = _startRunSequence;
             if (_emitAccepted)
             {
                 yield return await CreateAcceptedEnvelopeAsync(
-                    runId, sessionId, runtimeInstanceId, earlySequence++, ct).ConfigureAwait(false);
+                    runId, sessionId, runtimeInstanceId, sequence.Take(), ct).ConfigureAwait(false);
             }
 
             var replayAgent = options.AvailableAgents[0];
@@ -154,7 +213,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 runId, sessionId, request, replayAgent, StepProjectionVersion, ct,
                 stepGoal: goal).ConfigureAwait(false);
             yield return await CreateInvocationStartedEnvelopeAsync(
-                replayInvocation, runtimeInstanceId, earlySequence++, ct).ConfigureAwait(false);
+                replayInvocation, runtimeInstanceId, sequence.Take(), ct).ConfigureAwait(false);
             var cached = JsonSerializer.Deserialize(
                 completedEarly,
                 RuntimeJsonContext.Default.TextContentBlock)
@@ -164,7 +223,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             {
                 yield return await CreateTextDeltaEnvelopeAsync(
                     runId, runtimeInstanceId, replayInvocation.InvocationId, cached.Text,
-                    earlySequence++, ct).ConfigureAwait(false);
+                    sequence.Take(), ct).ConfigureAwait(false);
             }
 
             await EnsureWorkStepToolIntentsTerminalAsync(
@@ -173,11 +232,11 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 "1",
                 ct).ConfigureAwait(false);
             yield return await CreateInvocationCompletedEnvelopeAsync(
-                runId, runtimeInstanceId, replayInvocation.InvocationId, earlySequence++, ct)
+                runId, runtimeInstanceId, replayInvocation.InvocationId, sequence.Take(), ct)
                 .ConfigureAwait(false);
             await CompleteRunAsync(runId, ct).ConfigureAwait(false);
             var replayCompleted = await CreateCompletedEnvelopeAsync(
-                runId, sessionId, runtimeInstanceId, earlySequence, ct).ConfigureAwait(false);
+                runId, sessionId, runtimeInstanceId, sequence.Take(), ct).ConfigureAwait(false);
             if (replayCompleted is not null)
             {
                 yield return replayCompleted;
@@ -185,138 +244,259 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             yield break;
         }
 
-        await _workRepo.UpsertSessionAsync(
+        var priorResume = await _workRepo.GetResumeStateAsync(sessionId, ct).ConfigureAwait(false);
+        var publishedPlanVersion = await _workRepo
+            .GetLatestPublishedPlanVersionAsync(sessionId, ct)
+            .ConfigureAwait(false);
+        var priorSessionStatus = priorResume?.Status;
+        var waitingForPlanConfirmation = priorSessionStatus
+            is WorkSessionStatus.WaitingForPlanConfirmation;
+
+        // 规划轮先消费 FIFO 插话，再决定确认/修订分支。
+        var consumedPendingInputs = await _workRepo
+            .ConsumePendingUserInputsAsync(sessionId, runId, ct: ct)
+            .ConfigureAwait(false);
+        var pendingTexts = consumedPendingInputs
+            .Select(static item => item.ContentText)
+            .ToArray();
+        var planningGoal = CombineGoalWithPendingInputs(goal, pendingTexts);
+        var userConfirmsPlan = IsExplicitPlanConfirmation(planningGoal)
+            || pendingTexts.Any(IsExplicitPlanConfirmation);
+        var userRequestsRevision = IsPlanRevisionRequest(planningGoal)
+            || pendingTexts.Any(IsPlanRevisionRequest)
+            || ContainsPlanJson(planningGoal)
+            || pendingTexts.Any(ContainsPlanJson);
+        await _workRepo.BeginPlanningTurnAsync(
             sessionId,
             runId,
-            WorkSessionStatus.Planning,
             options.GeneralManager.AgentId,
             policy,
             options.EffectiveContextPolicy,
-            planVersion: "1",
-            planMessageId: null,
-            plan: null,
             ct).ConfigureAwait(false);
 
-        long runSequence = _startRunSequence;
         if (_emitAccepted)
         {
             yield return await CreateAcceptedEnvelopeAsync(
-                runId, sessionId, runtimeInstanceId, runSequence++, ct).ConfigureAwait(false);
+                runId, sessionId, runtimeInstanceId, sequence.Take(), ct).ConfigureAwait(false);
         }
 
-        var managerInvocation = await CreateInvocationRequestAsync(
-            runId, sessionId, request, options.GeneralManager, PlanProjectionVersion, ct)
-            .ConfigureAwait(false);
-        yield return await CreateInvocationStartedEnvelopeAsync(
-            managerInvocation, runtimeInstanceId, runSequence++, ct).ConfigureAwait(false);
+        WorkPlanDraft plan;
+        string? parentInvocationId = null;
+        var skipManagerPlanning = policy.RequirePlanConfirmation
+            && waitingForPlanConfirmation
+            && userConfirmsPlan
+            && !userRequestsRevision
+            && pendingTexts.Length == 0;
 
-        var managerText = new StringBuilder();
-        await foreach (var providerEvent in ExecuteInvocationAsync(managerInvocation, ct)
-            .ConfigureAwait(false))
+        if (skipManagerPlanning)
         {
-            switch (providerEvent)
+            plan = await _workRepo.GetCurrentPlanDraftAsync(sessionId, ct).ConfigureAwait(false)
+                ?? throw new InvalidOperationException(
+                    $"Session '{sessionId}' is waiting for plan confirmation but has no published plan.");
+            await _workRepo.UpdateSessionStatusAsync(
+                sessionId,
+                WorkSessionStatus.Executing,
+                ct).ConfigureAwait(false);
+            yield return await CreateStatusEnvelopeAsync(
+                runtimeInstanceId,
+                runId,
+                sequence.Take(),
+                RunStatus.Running,
+                ct,
+                workPhase: "executing").ConfigureAwait(false);
+        }
+        else
+        {
+            _capturedSetPlanDraft = null;
+            var managerInvocation = await CreateInvocationRequestAsync(
+                runId,
+                sessionId,
+                request,
+                options.GeneralManager,
+                PlanProjectionVersion,
+                ct,
+                publishedPlanVersion: publishedPlanVersion,
+                priorResume: priorResume,
+                pendingUserInputs: pendingTexts)
+                .ConfigureAwait(false);
+            parentInvocationId = managerInvocation.InvocationId;
+            yield return await CreateInvocationStartedEnvelopeAsync(
+                managerInvocation, runtimeInstanceId, sequence.Take(), ct).ConfigureAwait(false);
+
+            var managerText = new StringBuilder();
+            await foreach (var providerEvent in ExecuteInvocationAsync(managerInvocation, ct)
+                .ConfigureAwait(false))
             {
-                case TextDeltaProviderEvent textDelta:
-                    managerText.Append(textDelta.Delta);
-                    yield return await CreateTextDeltaEnvelopeAsync(
-                        runId, runtimeInstanceId, textDelta.InvocationId, textDelta.Delta,
-                        runSequence++, ct).ConfigureAwait(false);
-                    break;
-                case ReasoningDeltaProviderEvent reasoningDelta:
-                    yield return await CreateReasoningDeltaEnvelopeAsync(
-                        runId, runtimeInstanceId, reasoningDelta.InvocationId, reasoningDelta.Delta,
-                        runSequence++, ct).ConfigureAwait(false);
-                    break;
-                case ToolCallDeltaProviderEvent toolCallDelta:
-                    yield return await CreateToolCallDeltaEnvelopeAsync(
-                        runId, runtimeInstanceId, toolCallDelta.InvocationId, toolCallDelta.CallId,
-                        toolCallDelta.Name, toolCallDelta.ArgumentsDelta,
-                        runSequence++, ct).ConfigureAwait(false);
-                    break;
-                case UsageUpdatedProviderEvent usage:
-                    yield return await CreateUsageUpdatedEnvelopeAsync(
-                        runId, runtimeInstanceId, usage.InvocationId, usage.InputTokens, usage.OutputTokens,
-                        runSequence++, ct).ConfigureAwait(false);
-                    break;
-                case InvocationFailedProviderEvent failed:
-                    await _workRepo.UpdateSessionStatusAsync(
-                        sessionId, WorkSessionStatus.Failed, ct).ConfigureAwait(false);
-                    throw new InvalidOperationException(
-                        $"General-manager invocation '{failed.InvocationId}' failed: {failed.Error.Message}");
-                case WorkRunStatusProviderEvent statusChanged:
-                    yield return await CreateStatusEnvelopeAsync(
-                        runtimeInstanceId,
-                        runId,
-                        runSequence++,
-                        statusChanged.Status,
-                        ct,
-                        workPhase: "planning").ConfigureAwait(false);
-                    break;
+                switch (providerEvent)
+                {
+                    case TextDeltaProviderEvent textDelta:
+                        managerText.Append(textDelta.Delta);
+                        yield return await CreateTextDeltaEnvelopeAsync(
+                            runId, runtimeInstanceId, textDelta.InvocationId, textDelta.Delta,
+                            sequence.Take(), ct).ConfigureAwait(false);
+                        break;
+                    case ReasoningDeltaProviderEvent reasoningDelta:
+                        yield return await CreateReasoningDeltaEnvelopeAsync(
+                            runId, runtimeInstanceId, reasoningDelta.InvocationId, reasoningDelta.Delta,
+                            sequence.Take(), ct).ConfigureAwait(false);
+                        break;
+                    case ToolCallDeltaProviderEvent toolCallDelta:
+                        yield return await CreateToolCallDeltaEnvelopeAsync(
+                            runId, runtimeInstanceId, toolCallDelta.InvocationId, toolCallDelta.CallId,
+                            toolCallDelta.Name, toolCallDelta.ArgumentsDelta,
+                            sequence.Take(), ct).ConfigureAwait(false);
+                        break;
+                    case UsageUpdatedProviderEvent usage:
+                        yield return await CreateUsageUpdatedEnvelopeAsync(
+                            runId, runtimeInstanceId, usage.InvocationId, usage.InputTokens, usage.OutputTokens,
+                            sequence.Take(), ct).ConfigureAwait(false);
+                        break;
+                    case InvocationFailedProviderEvent failed:
+                        await _workRepo.UpdateSessionStatusAsync(
+                            sessionId, WorkSessionStatus.Failed, ct).ConfigureAwait(false);
+                        throw new InvalidOperationException(
+                            $"General-manager invocation '{failed.InvocationId}' failed: {failed.Error.Message}");
+                    case WorkRunStatusProviderEvent statusChanged:
+                        yield return await CreateStatusEnvelopeAsync(
+                            runtimeInstanceId,
+                            runId,
+                            sequence.Take(),
+                            statusChanged.Status,
+                            ct,
+                            workPhase: "planning").ConfigureAwait(false);
+                        break;
+                }
+            }
+
+            yield return await CreateInvocationCompletedEnvelopeAsync(
+                runId, runtimeInstanceId, managerInvocation.InvocationId, sequence.Take(), ct)
+                .ConfigureAwait(false);
+
+            // Prefer mcli_work_set_plan tool payload; fall back to bare JSON in manager text.
+            var parsedPlan = _capturedSetPlanDraft ?? TryParsePlan(managerText.ToString());
+            _capturedSetPlanDraft = null;
+            WorkPlanDraft? validatedPlan = null;
+            if (parsedPlan is not null)
+            {
+                try
+                {
+                    validatedPlan = WorkPlanValidator.ValidateOrThrow(parsedPlan, options);
+                }
+                catch (ArgumentException)
+                {
+                    validatedPlan = null;
+                }
+            }
+
+            if (validatedPlan is null)
+            {
+                var resumeStatus = waitingForPlanConfirmation
+                    ? WorkSessionStatus.WaitingForPlanConfirmation
+                    : priorSessionStatus ?? WorkSessionStatus.Planning;
+                await _workRepo.UpdateSessionStatusAsync(sessionId, resumeStatus, ct)
+                    .ConfigureAwait(false);
+                await CompleteRunAsync(runId, ct).ConfigureAwait(false);
+                var discussionCompleted = await CreateCompletedEnvelopeAsync(
+                    runId, sessionId, runtimeInstanceId, sequence.Current, ct).ConfigureAwait(false);
+                if (discussionCompleted is not null)
+                {
+                    yield return discussionCompleted;
+                }
+
+                yield break;
+            }
+
+            plan = WorkPlanValidator.NormalizePlanRevision(validatedPlan, publishedPlanVersion);
+            plan = WorkPlanValidator.ValidateOrThrow(plan, options);
+            var canonicalMessages = await AppendPlanRevisionAsync(
+                sessionId,
+                managerInvocation.InvocationId,
+                options.GeneralManager.AgentId,
+                plan,
+                ct).ConfigureAwait(false);
+            await _workRepo.SavePlanRevisionAsync(
+                sessionId,
+                runId,
+                options.GeneralManager.AgentId,
+                policy,
+                options.EffectiveContextPolicy,
+                plan,
+                canonicalMessages.PlanMessageId,
+                canonicalMessages.StepMessageIds,
+                ct).ConfigureAwait(false);
+
+            var workPlanEvent = MapToWorkPlanUpdatedEvent(plan);
+            var eventJson = JsonSerializer.Serialize(
+                workPlanEvent,
+                RuntimeJsonContext.Default.WorkPlanUpdatedEvent);
+            var gsn = await _outbox.AppendAsync(
+                runId,
+                sequence.Current,
+                MessageTypes.WorkPlanUpdated,
+                eventJson,
+                ct).ConfigureAwait(false);
+
+            yield return CreateWorkPlanUpdatedEnvelope(
+                runtimeInstanceId,
+                gsn,
+                runId,
+                sequence.Take(),
+                workPlanEvent);
+
+            // Plan confirmation gate: publish plan, wait for an explicit confirm turn.
+            if (policy.RequirePlanConfirmation && !userConfirmsPlan)
+            {
+                await _workRepo.UpdateSessionStatusAsync(
+                    sessionId,
+                    WorkSessionStatus.WaitingForPlanConfirmation,
+                    ct).ConfigureAwait(false);
+                yield return await CreateStatusEnvelopeAsync(
+                    runtimeInstanceId,
+                    runId,
+                    sequence.Take(),
+                    RunStatus.Running,
+                    ct,
+                    workPhase: "waiting-for-plan-confirmation").ConfigureAwait(false);
+                await CompleteRunAsync(runId, ct).ConfigureAwait(false);
+                var waitingCompleted = await CreateCompletedEnvelopeAsync(
+                    runId, sessionId, runtimeInstanceId, sequence.Current, ct).ConfigureAwait(false);
+                if (waitingCompleted is not null)
+                {
+                    yield return waitingCompleted;
+                }
+
+                yield break;
             }
         }
-
-        yield return await CreateInvocationCompletedEnvelopeAsync(
-            runId, runtimeInstanceId, managerInvocation.InvocationId, runSequence++, ct)
-            .ConfigureAwait(false);
-
-        var plan = TryParsePlan(managerText.ToString())
-            ?? WorkPlanValidator.CreateFallbackPlan(
-                goal, options, planVersion: "1", stepId: fallbackStepId);
-        try
-        {
-            plan = WorkPlanValidator.ValidateOrThrow(plan, options);
-        }
-        catch (ArgumentException)
-        {
-            // GM 结构化计划经常带未知 agentId / 非法父子；回退单步，保证 work.plan.updated 一定发出。
-            plan = WorkPlanValidator.CreateFallbackPlan(
-                goal, options, planVersion: "1", stepId: fallbackStepId);
-            plan = WorkPlanValidator.ValidateOrThrow(plan, options);
-        }
-        var canonicalMessages = await AppendPlanRevisionAsync(
-            sessionId,
-            managerInvocation.InvocationId,
-            options.GeneralManager.AgentId,
-            plan,
-            ct).ConfigureAwait(false);
-        await _workRepo.SavePlanRevisionAsync(
-            sessionId,
-            runId,
-            options.GeneralManager.AgentId,
-            policy,
-            options.EffectiveContextPolicy,
-            plan,
-            canonicalMessages.PlanMessageId,
-            canonicalMessages.StepMessageIds,
-            ct).ConfigureAwait(false);
-
-        // ✅ 新增：发送 work.plan.updated 事件
-        var workPlanEvent = MapToWorkPlanUpdatedEvent(plan);
-        var eventJson = JsonSerializer.Serialize(
-            workPlanEvent,
-            RuntimeJsonContext.Default.WorkPlanUpdatedEvent);
-        var gsn = await _outbox.AppendAsync(
-            runId,
-            runSequence,
-            MessageTypes.WorkPlanUpdated,
-            eventJson,
-            ct).ConfigureAwait(false);
-
-        yield return CreateWorkPlanUpdatedEnvelope(
-            runtimeInstanceId,
-            gsn,
-            runId,
-            runSequence++,
-            workPlanEvent);
 
         var agentById = options.AvailableAgents.ToDictionary(
             static a => a.AgentId, StringComparer.Ordinal);
         var completedCount = 0;
         var approvedLoopRisks = new HashSet<string>(StringComparer.Ordinal);
+        var stoppedForPendingInput = false;
 
         while (true)
         {
             ct.ThrowIfCancellationRequested();
+
+            // 步骤间隙：发现未消费插话则停靠本轮，保留未完成步骤，交下一轮规划消费。
+            if (await _workRepo.HasPendingUserInputsAsync(sessionId, ct).ConfigureAwait(false))
+            {
+                stoppedForPendingInput = true;
+                await _workRepo.UpdateSessionStatusAsync(
+                    sessionId,
+                    WorkSessionStatus.Paused,
+                    ct).ConfigureAwait(false);
+                yield return await CreateStatusEnvelopeAsync(
+                    runtimeInstanceId,
+                    runId,
+                    sequence.Take(),
+                    RunStatus.Running,
+                    ct,
+                    workPhase: "paused-for-pending-input").ConfigureAwait(false);
+                break;
+            }
+
             var steps = await _workRepo.ListStepsAsync(sessionId, plan.PlanVersion, ct)
                 .ConfigureAwait(false);
             if (steps.All(static s => s.Status is WorkStepLifecycleStatus.Completed
@@ -344,9 +524,12 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
 
                 foreach (var step in blockedSteps)
                 {
-                    // Mark step as skipped in repository (no UpdateStepStatusAsync method, skip for now)
-                    // await _workRepo.UpdateStepStatusAsync(
-                    //     sessionId, step.StepId, WorkStepLifecycleStatus.Skipped, ct).ConfigureAwait(false);
+                    await _workRepo.MarkStepSkippedAsync(
+                        sessionId,
+                        step.StepId,
+                        step.PlanVersion,
+                        "dependency_failed",
+                        ct).ConfigureAwait(false);
 
                     var skippedEvent = new WorkStepSkippedEvent(step.StepId, "dependency_failed");
                     var skippedEventJson = JsonSerializer.Serialize(
@@ -354,7 +537,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                         RuntimeJsonContext.Default.WorkStepSkippedEvent);
                     var skippedGsn = await _outbox.AppendAsync(
                         runId,
-                        runSequence,
+                        sequence.Current,
                         MessageTypes.WorkStepSkipped,
                         skippedEventJson,
                         ct).ConfigureAwait(false);
@@ -363,17 +546,41 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                         runtimeInstanceId,
                         skippedGsn,
                         runId,
-                        runSequence++,
+                        sequence.Take(),
                         MessageTypes.WorkStepSkipped,
                         DateTimeOffset.UtcNow,
                         JsonSerializer.SerializeToElement(
                             skippedEvent,
                             RuntimeJsonContext.Default.WorkStepSkippedEvent));
+                    completedCount++;
+                }
+
+                // Refresh after skips so terminal-state checks see updated statuses.
+                steps = await _workRepo.ListStepsAsync(sessionId, plan.PlanVersion, ct)
+                    .ConfigureAwait(false);
+                if (steps.All(static s => s.Status is WorkStepLifecycleStatus.Completed
+                        or WorkStepLifecycleStatus.Skipped
+                        or WorkStepLifecycleStatus.Failed))
+                {
+                    if (policy.FailurePolicy is WorkStepFailurePolicy.Continue
+                        || steps.All(static s => s.Status is WorkStepLifecycleStatus.Completed
+                            or WorkStepLifecycleStatus.Skipped))
+                    {
+                        break;
+                    }
+
+                    var terminalFailed = steps.First(static s =>
+                        s.Status == WorkStepLifecycleStatus.Failed);
+                    await _workRepo.UpdateSessionStatusAsync(
+                        sessionId, WorkSessionStatus.Failed, ct).ConfigureAwait(false);
+                    throw new InvalidOperationException(
+                        $"Work step '{terminalFailed.StepId}' failed: {terminalFailed.ErrorMessage}");
                 }
 
                 var failed = steps.FirstOrDefault(static s =>
                     s.Status == WorkStepLifecycleStatus.Failed);
-                if (failed is not null)
+                if (failed is not null
+                    && policy.FailurePolicy is not WorkStepFailurePolicy.Continue)
                 {
                     await _workRepo.UpdateSessionStatusAsync(
                         sessionId, WorkSessionStatus.Failed, ct).ConfigureAwait(false);
@@ -381,11 +588,61 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                         $"Work step '{failed.StepId}' failed: {failed.ErrorMessage}");
                 }
 
+                if (failed is not null && policy.FailurePolicy is WorkStepFailurePolicy.Continue)
+                {
+                    // Remaining pending steps may still become ready after skips; re-loop.
+                    continue;
+                }
+
                 throw new InvalidOperationException(
                     "Work plan has pending steps but no ready steps (possible dependency deadlock).");
             }
 
-            // V1 sequential execution within the selected ready set.
+            // 同波就绪步骤可并行：Provider/工具环并行，准备与落盘仍串行。
+            // Sqlite 各仓储共用 SqliteConnectionSync 连接级闸门，允许挂载 Tool Gateway。
+            var executeConcurrently = ready.Count > 1
+                && policy.MaxConcurrentSteps > 1
+                && policy.FailurePolicy is WorkStepFailurePolicy.Stop
+                    or WorkStepFailurePolicy.Continue;
+
+            if (executeConcurrently)
+            {
+                await foreach (var envelope in ExecuteReadyStepsConcurrentAsync(
+                    ready,
+                    agentById,
+                    plan,
+                    steps,
+                    request,
+                    options,
+                    policy,
+                    goal,
+                    fallbackStepId,
+                    legacyInputHash,
+                    parentInvocationId,
+                    runId,
+                    sessionId,
+                    runtimeInstanceId,
+                    approvedLoopRisks,
+                    sequence.Current,
+                    ct).ConfigureAwait(false))
+                {
+                    sequence.CatchUp(envelope.RunSequence + 1);
+                    yield return envelope;
+                    if (envelope.MessageType is MessageTypes.InvocationCompleted
+                        or MessageTypes.InvocationFailed)
+                    {
+                        completedCount++;
+                    }
+                }
+
+                if (completedCount > policy.HardMaxStepsPerRun)
+                {
+                    throw new InvalidOperationException("Work run exceeded hard step limit.");
+                }
+
+                continue;
+            }
+
             foreach (var readyStep in ready)
             {
                 if (!agentById.TryGetValue(readyStep.TargetAgentId, out var agent))
@@ -415,7 +672,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                     runId, sessionId, request, agent, StepProjectionVersion, ct,
                     stepGoal: readyStep.Goal ?? goal,
                     parentAgentId: options.GeneralManager.AgentId,
-                    parentInvocationId: managerInvocation.InvocationId,
+                    parentInvocationId: parentInvocationId,
                     workStepId: readyStep.StepId,
                     workPlanVersion: readyStep.PlanVersion,
                     workPlan: plan,
@@ -485,13 +742,13 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 }
 
                 yield return await CreateInvocationStartedEnvelopeAsync(
-                    childInvocation, runtimeInstanceId, runSequence++, ct).ConfigureAwait(false);
+                    childInvocation, runtimeInstanceId, sequence.Take(), ct).ConfigureAwait(false);
                 if (IsProjectionAdjusted(childInvocation.Snapshot.ContextProjection))
                 {
                     yield return await CreateContextProjectionAdjustedEnvelopeAsync(
                         childInvocation,
                         runtimeInstanceId,
-                        runSequence++,
+                        sequence.Take(),
                         ct).ConfigureAwait(false);
                 }
 
@@ -506,7 +763,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                     {
                         yield return await CreateTextDeltaEnvelopeAsync(
                             runId, runtimeInstanceId, childInvocation.InvocationId, cached.Text,
-                            runSequence++, ct).ConfigureAwait(false);
+                            sequence.Take(), ct).ConfigureAwait(false);
                     }
 
                     await EnsureWorkStepToolIntentsTerminalAsync(
@@ -515,7 +772,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                         readyStep.PlanVersion,
                         ct).ConfigureAwait(false);
                     yield return await CreateInvocationCompletedEnvelopeAsync(
-                        runId, runtimeInstanceId, childInvocation.InvocationId, runSequence++, ct,
+                        runId, runtimeInstanceId, childInvocation.InvocationId, sequence.Take(), ct,
                         workStepId: readyStep.StepId)
                         .ConfigureAwait(false);
                     completedCount++;
@@ -534,23 +791,23 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                             resultBuilder.Append(textDelta.Delta);
                             yield return await CreateTextDeltaEnvelopeAsync(
                                 runId, runtimeInstanceId, textDelta.InvocationId, textDelta.Delta,
-                                runSequence++, ct).ConfigureAwait(false);
+                                sequence.Take(), ct).ConfigureAwait(false);
                             break;
                         case ReasoningDeltaProviderEvent reasoningDelta:
                             yield return await CreateReasoningDeltaEnvelopeAsync(
                                 runId, runtimeInstanceId, reasoningDelta.InvocationId, reasoningDelta.Delta,
-                                runSequence++, ct).ConfigureAwait(false);
+                                sequence.Take(), ct).ConfigureAwait(false);
                             break;
                         case ToolCallDeltaProviderEvent toolCallDelta:
                             yield return await CreateToolCallDeltaEnvelopeAsync(
                                 runId, runtimeInstanceId, toolCallDelta.InvocationId, toolCallDelta.CallId,
                                 toolCallDelta.Name, toolCallDelta.ArgumentsDelta,
-                                runSequence++, ct).ConfigureAwait(false);
+                                sequence.Take(), ct).ConfigureAwait(false);
                             break;
                         case UsageUpdatedProviderEvent usage:
                             yield return await CreateUsageUpdatedEnvelopeAsync(
                                 runId, runtimeInstanceId, usage.InvocationId, usage.InputTokens, usage.OutputTokens,
-                                runSequence++, ct).ConfigureAwait(false);
+                                sequence.Take(), ct).ConfigureAwait(false);
                             break;
                         case InvocationFailedProviderEvent failed:
                             stepFailed = true;
@@ -565,7 +822,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                                     runtimeInstanceId,
                                     failed.InvocationId,
                                     failed.Error,
-                                    runSequence++,
+                                    sequence.Take(),
                                     ct,
                                     workStepId: readyStep.StepId).ConfigureAwait(false);
                                 await _workRepo.UpdateSessionStatusAsync(
@@ -579,7 +836,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                             yield return await CreateStatusEnvelopeAsync(
                                 runtimeInstanceId,
                                 runId,
-                                runSequence++,
+                                sequence.Take(),
                                 statusChanged.Status,
                                 ct,
                                 workPhase: "executing",
@@ -619,7 +876,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                                 stepError ?? CreateRuntimeError(
                                     "WorkStepFailed",
                                     reason),
-                                runSequence++,
+                                sequence.Take(),
                                 ct,
                                 workStepId: readyStep.StepId).ConfigureAwait(false);
                             await _workRepo.UpdateSessionStatusAsync(
@@ -638,12 +895,26 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
 
                     if (policy.FailurePolicy is WorkStepFailurePolicy.Retry)
                     {
+                        var retryReason = stepError?.Message ?? "Work step failed.";
+                        await _sessionRepo.FailWorkStepAsync(
+                            readyStep.StepId,
+                            readyStep.PlanVersion,
+                            retryReason,
+                            ct).ConfigureAwait(false);
+                        yield return await CreateInvocationFailedEnvelopeAsync(
+                            runId,
+                            runtimeInstanceId,
+                            childInvocation.InvocationId,
+                            stepError ?? CreateRuntimeError("WorkStepFailed", retryReason),
+                            sequence.Take(),
+                            ct,
+                            workStepId: readyStep.StepId).ConfigureAwait(false);
                         if (readyStep.AttemptCount < policy.MaxRetriesPerStep)
                         {
                             await _workRepo.ResetStepForRetryAsync(
                                 readyStep.StepId,
                                 readyStep.PlanVersion,
-                                stepError?.Message ?? "Work step failed.",
+                                retryReason,
                                 ct).ConfigureAwait(false);
                             var retryDelay = ComputeRetryDelay(policy, readyStep.AttemptCount);
                             if (retryDelay > TimeSpan.Zero)
@@ -655,26 +926,27 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                             continue;
                         }
 
-                        // Retry exhausted, emit failed event
-                        await _sessionRepo.FailWorkStepAsync(
-                            readyStep.StepId, readyStep.PlanVersion, stepError?.Message ?? "Work step failed.", ct)
-                            .ConfigureAwait(false);
-                        yield return await CreateInvocationFailedEnvelopeAsync(
-                            runId,
-                            runtimeInstanceId,
-                            childInvocation.InvocationId,
-                            stepError ?? CreateRuntimeError(
-                                "WorkStepFailed",
-                                "Work step failed after retries."),
-                            runSequence++,
-                            ct,
-                            workStepId: readyStep.StepId).ConfigureAwait(false);
                         await _workRepo.UpdateSessionStatusAsync(
                             sessionId, WorkSessionStatus.Failed, ct).ConfigureAwait(false);
                         throw new InvalidOperationException(
                             $"Work-step invocation '{childInvocation.InvocationId}' failed after {policy.MaxRetriesPerStep} retries: {stepError?.Message}");
                     }
 
+                    // Continue policy: mark the step failed, keep the run going.
+                    var continueReason = stepError?.Message ?? "Work step failed.";
+                    await _sessionRepo.FailWorkStepAsync(
+                        readyStep.StepId,
+                        readyStep.PlanVersion,
+                        continueReason,
+                        ct).ConfigureAwait(false);
+                    yield return await CreateInvocationFailedEnvelopeAsync(
+                        runId,
+                        runtimeInstanceId,
+                        childInvocation.InvocationId,
+                        stepError ?? CreateRuntimeError("WorkStepFailed", continueReason),
+                        sequence.Take(),
+                        ct,
+                        workStepId: readyStep.StepId).ConfigureAwait(false);
                     completedCount++;
                     continue;
                 }
@@ -685,7 +957,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                     readyStep.PlanVersion,
                     ct).ConfigureAwait(false);
                 yield return await CreateInvocationCompletedEnvelopeAsync(
-                    runId, runtimeInstanceId, childInvocation.InvocationId, runSequence++, ct,
+                    runId, runtimeInstanceId, childInvocation.InvocationId, sequence.Take(), ct,
                     workStepId: readyStep.StepId)
                     .ConfigureAwait(false);
 
@@ -707,16 +979,352 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             }
         }
 
-        await _workRepo.UpdateSessionStatusAsync(
-            sessionId, WorkSessionStatus.Completed, ct).ConfigureAwait(false);
+        if (!stoppedForPendingInput)
+        {
+            await _workRepo.UpdateSessionStatusAsync(
+                sessionId, WorkSessionStatus.Completed, ct).ConfigureAwait(false);
+        }
+
         await CompleteRunAsync(runId, ct).ConfigureAwait(false);
         var completed = await CreateCompletedEnvelopeAsync(
-            runId, sessionId, runtimeInstanceId, runSequence, ct).ConfigureAwait(false);
+            runId, sessionId, runtimeInstanceId, sequence.Current, ct).ConfigureAwait(false);
         if (completed is not null)
         {
             yield return completed;
         }
     }
+
+    /// <summary>
+    /// 同波就绪步骤并行执行（含工具环）。步骤准备与结果落盘仍串行；
+    /// 仓储写通过连接级闸门串行化，因此可与 Tool Gateway 同用。
+    /// </summary>
+    private async IAsyncEnumerable<RuntimeEventEnvelope> ExecuteReadyStepsConcurrentAsync(
+        IReadOnlyList<WorkStepSnapshot> ready,
+        Dictionary<string, AgentRef> agentById,
+        WorkPlanDraft plan,
+        IReadOnlyList<WorkStepSnapshot> planSteps,
+        NewSessionRunRequest request,
+        WorkModeOptions options,
+        WorkflowPolicy policy,
+        string goal,
+        string fallbackStepId,
+        string legacyInputHash,
+        string? parentInvocationId,
+        string runId,
+        string sessionId,
+        string runtimeInstanceId,
+        HashSet<string> approvedLoopRisks,
+        long runSequence,
+        [EnumeratorCancellation] CancellationToken ct)
+    {
+        var prepared = new List<PreparedConcurrentStep>(ready.Count);
+        foreach (var readyStep in ready.OrderBy(static s => s.StepId, StringComparer.Ordinal))
+        {
+            if (!agentById.TryGetValue(readyStep.TargetAgentId, out var agent))
+            {
+                throw new InvalidOperationException(
+                    $"Step '{readyStep.StepId}' targets unknown agent '{readyStep.TargetAgentId}'.");
+            }
+
+            var stepInputHash = string.Equals(
+                    readyStep.StepId,
+                    fallbackStepId,
+                    StringComparison.Ordinal)
+                ? legacyInputHash
+                : (string.IsNullOrWhiteSpace(readyStep.StepInputHash)
+                    ? WorkPlanValidator.ComputeStepInputHash(
+                        readyStep.StepId,
+                        readyStep.PlanVersion,
+                        readyStep.Goal ?? string.Empty)
+                    : readyStep.StepInputHash);
+
+            var completedResult = await _sessionRepo.GetCompletedWorkStepResultAsync(
+                readyStep.StepId, readyStep.PlanVersion, stepInputHash, ct)
+                .ConfigureAwait(false);
+
+            var childInvocation = await CreateInvocationRequestAsync(
+                runId, sessionId, request, agent, StepProjectionVersion, ct,
+                stepGoal: readyStep.Goal ?? goal,
+                parentAgentId: options.GeneralManager.AgentId,
+                parentInvocationId: parentInvocationId,
+                workStepId: readyStep.StepId,
+                workPlanVersion: readyStep.PlanVersion,
+                workPlan: plan,
+                currentStepState: readyStep,
+                planSteps: planSteps).ConfigureAwait(false);
+
+            if (completedResult is null)
+            {
+                var childSnapshotJson = JsonSerializer.Serialize(
+                    childInvocation.Snapshot,
+                    RuntimeJsonContext.Default.InvocationSnapshot);
+                var checkpointJson = CreateStepCheckpointJson(
+                    readyStep,
+                    childInvocation.InvocationId,
+                    stepInputHash);
+                var started = await _sessionRepo.TryStartWorkStepWithCheckpointAsync(
+                    readyStep.StepId,
+                    readyStep.PlanVersion,
+                    runId,
+                    sessionId,
+                    readyStep.TargetAgentId,
+                    stepInputHash,
+                    childInvocation.InvocationId,
+                    childInvocation.Snapshot,
+                    childSnapshotJson,
+                    checkpointJson,
+                    ct).ConfigureAwait(false);
+                if (!started)
+                {
+                    completedResult = await _sessionRepo.GetCompletedWorkStepResultAsync(
+                        readyStep.StepId, readyStep.PlanVersion, stepInputHash, ct)
+                        .ConfigureAwait(false);
+                    if (completedResult is null)
+                    {
+                        throw new InvalidOperationException(
+                            $"Work step '{readyStep.StepId}' already exists without a reusable result.");
+                    }
+                }
+            }
+
+            var loopRisk = DetectLoopRisk(readyStep, planSteps, policy);
+            if (completedResult is null
+                && loopRisk is not null
+                && approvedLoopRisks.Add(loopRisk.ApprovalKey))
+            {
+                var approved = await RequestWorkflowApprovalAsync(
+                    sessionId,
+                    runId,
+                    readyStep,
+                    childInvocation,
+                    loopRisk.Reason,
+                    ct).ConfigureAwait(false);
+                if (!approved)
+                {
+                    await _sessionRepo.FailWorkStepAsync(
+                        readyStep.StepId,
+                        readyStep.PlanVersion,
+                        loopRisk.Reason,
+                        ct).ConfigureAwait(false);
+                    await _workRepo.UpdateSessionStatusAsync(
+                        sessionId,
+                        WorkSessionStatus.Failed,
+                        ct).ConfigureAwait(false);
+                    throw new InvalidOperationException(
+                        $"The host denied continuation for work step '{readyStep.StepId}': {loopRisk.Reason}");
+                }
+            }
+
+            yield return await CreateInvocationStartedEnvelopeAsync(
+                childInvocation, runtimeInstanceId, runSequence++, ct).ConfigureAwait(false);
+            if (IsProjectionAdjusted(childInvocation.Snapshot.ContextProjection))
+            {
+                yield return await CreateContextProjectionAdjustedEnvelopeAsync(
+                    childInvocation,
+                    runtimeInstanceId,
+                    runSequence++,
+                    ct).ConfigureAwait(false);
+            }
+
+            prepared.Add(new PreparedConcurrentStep(
+                readyStep,
+                childInvocation,
+                stepInputHash,
+                completedResult));
+        }
+
+        var providerResults = new ConcurrentDictionary<string, ConcurrentStepProviderResult>(
+            StringComparer.Ordinal);
+        await Task.WhenAll(prepared.Select(async item =>
+        {
+            if (item.CompletedResultJson is not null)
+            {
+                providerResults[item.Step.StepId] = new ConcurrentStepProviderResult(
+                    item.CompletedResultJson,
+                    Failed: false,
+                    Error: null,
+                    ProviderEvents: []);
+                return;
+            }
+
+            var events = new List<RuntimeProviderEvent>();
+            RuntimeError? error = null;
+            await foreach (var providerEvent in ExecuteInvocationAsync(item.Invocation, ct)
+                .ConfigureAwait(false))
+            {
+                events.Add(providerEvent);
+                if (providerEvent is InvocationFailedProviderEvent failed)
+                {
+                    error = failed.Error;
+                }
+            }
+
+            providerResults[item.Step.StepId] = new ConcurrentStepProviderResult(
+                CompletedResultJson: null,
+                Failed: error is not null,
+                Error: error,
+                ProviderEvents: events);
+        })).ConfigureAwait(false);
+
+        foreach (var item in prepared)
+        {
+            var providerResult = providerResults[item.Step.StepId];
+            if (providerResult.CompletedResultJson is not null)
+            {
+                var cached = JsonSerializer.Deserialize(
+                    providerResult.CompletedResultJson,
+                    RuntimeJsonContext.Default.TextContentBlock)
+                    ?? throw new InvalidDataException(
+                        $"Work step '{item.Step.StepId}' has an empty persisted result.");
+                if (cached.Text.Length > 0)
+                {
+                    yield return await CreateTextDeltaEnvelopeAsync(
+                        runId,
+                        runtimeInstanceId,
+                        item.Invocation.InvocationId,
+                        cached.Text,
+                        runSequence++,
+                        ct).ConfigureAwait(false);
+                }
+
+                await EnsureWorkStepToolIntentsTerminalAsync(
+                    sessionId,
+                    item.Step.StepId,
+                    item.Step.PlanVersion,
+                    ct).ConfigureAwait(false);
+                yield return await CreateInvocationCompletedEnvelopeAsync(
+                    runId,
+                    runtimeInstanceId,
+                    item.Invocation.InvocationId,
+                    runSequence++,
+                    ct,
+                    workStepId: item.Step.StepId).ConfigureAwait(false);
+                continue;
+            }
+
+            var resultBuilder = new StringBuilder();
+            foreach (var providerEvent in providerResult.ProviderEvents)
+            {
+                switch (providerEvent)
+                {
+                    case TextDeltaProviderEvent textDelta:
+                        resultBuilder.Append(textDelta.Delta);
+                        yield return await CreateTextDeltaEnvelopeAsync(
+                            runId,
+                            runtimeInstanceId,
+                            textDelta.InvocationId,
+                            textDelta.Delta,
+                            runSequence++,
+                            ct).ConfigureAwait(false);
+                        break;
+                    case ReasoningDeltaProviderEvent reasoningDelta:
+                        yield return await CreateReasoningDeltaEnvelopeAsync(
+                            runId,
+                            runtimeInstanceId,
+                            reasoningDelta.InvocationId,
+                            reasoningDelta.Delta,
+                            runSequence++,
+                            ct).ConfigureAwait(false);
+                        break;
+                    case ToolCallDeltaProviderEvent toolCallDelta:
+                        yield return await CreateToolCallDeltaEnvelopeAsync(
+                            runId,
+                            runtimeInstanceId,
+                            toolCallDelta.InvocationId,
+                            toolCallDelta.CallId,
+                            toolCallDelta.Name,
+                            toolCallDelta.ArgumentsDelta,
+                            runSequence++,
+                            ct).ConfigureAwait(false);
+                        break;
+                    case UsageUpdatedProviderEvent usage:
+                        yield return await CreateUsageUpdatedEnvelopeAsync(
+                            runId,
+                            runtimeInstanceId,
+                            usage.InvocationId,
+                            usage.InputTokens,
+                            usage.OutputTokens,
+                            runSequence++,
+                            ct).ConfigureAwait(false);
+                        break;
+                    case WorkRunStatusProviderEvent statusChanged:
+                        yield return await CreateStatusEnvelopeAsync(
+                            runtimeInstanceId,
+                            runId,
+                            runSequence++,
+                            statusChanged.Status,
+                            ct,
+                            workPhase: "executing",
+                            currentStep: item.Step.StepId).ConfigureAwait(false);
+                        break;
+                }
+            }
+
+            if (providerResult.Failed)
+            {
+                var reason = providerResult.Error?.Message ?? "Work step failed.";
+                await _sessionRepo.FailWorkStepAsync(
+                    item.Step.StepId,
+                    item.Step.PlanVersion,
+                    reason,
+                    ct).ConfigureAwait(false);
+                yield return await CreateInvocationFailedEnvelopeAsync(
+                    runId,
+                    runtimeInstanceId,
+                    item.Invocation.InvocationId,
+                    providerResult.Error ?? CreateRuntimeError("WorkStepFailed", reason),
+                    runSequence++,
+                    ct,
+                    workStepId: item.Step.StepId).ConfigureAwait(false);
+                continue;
+            }
+
+            await EnsureWorkStepToolIntentsTerminalAsync(
+                sessionId,
+                item.Step.StepId,
+                item.Step.PlanVersion,
+                ct).ConfigureAwait(false);
+            yield return await CreateInvocationCompletedEnvelopeAsync(
+                runId,
+                runtimeInstanceId,
+                item.Invocation.InvocationId,
+                runSequence++,
+                ct,
+                workStepId: item.Step.StepId).ConfigureAwait(false);
+
+            var resultJson = JsonSerializer.Serialize(
+                new TextContentBlock(resultBuilder.ToString()),
+                RuntimeJsonContext.Default.TextContentBlock);
+            await _sessionRepo.CompleteWorkStepAsync(
+                item.Step.StepId,
+                item.Step.PlanVersion,
+                item.StepInputHash,
+                resultJson,
+                ct).ConfigureAwait(false);
+        }
+
+        if (policy.FailurePolicy is WorkStepFailurePolicy.Stop
+            && providerResults.Values.Any(static result => result.Failed))
+        {
+            var failed = providerResults.First(static pair => pair.Value.Failed);
+            await _workRepo.UpdateSessionStatusAsync(
+                sessionId, WorkSessionStatus.Failed, ct).ConfigureAwait(false);
+            throw new InvalidOperationException(
+                $"Work step '{failed.Key}' failed: {failed.Value.Error?.Message ?? "Work step failed."}");
+        }
+    }
+
+    private sealed record PreparedConcurrentStep(
+        WorkStepSnapshot Step,
+        AgentInvocationRequest Invocation,
+        string StepInputHash,
+        string? CompletedResultJson);
+
+    private sealed record ConcurrentStepProviderResult(
+        string? CompletedResultJson,
+        bool Failed,
+        RuntimeError? Error,
+        IReadOnlyList<RuntimeProviderEvent> ProviderEvents);
 
     private async Task CompleteRunAsync(string runId, CancellationToken ct)
     {
@@ -783,6 +1391,35 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 .Select(static intent => $"{intent.CallId}:{intent.Status}"));
         throw new InvalidOperationException(
             $"Work step '{workStepId}' cannot be completed because {recoverable.Count} tool intent(s) are not terminal: {sample}.");
+    }
+
+    private void TryCaptureSetPlanFromToolOutput(string outputJson)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(outputJson);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("ok", out var ok)
+                || ok.ValueKind != JsonValueKind.True
+                || !root.TryGetProperty("plan", out var planElement)
+                || planElement.ValueKind != JsonValueKind.Object)
+            {
+                return;
+            }
+
+            var plan = JsonSerializer.Deserialize(
+                planElement.GetRawText(),
+                RuntimeJsonContext.Default.WorkPlanDraft);
+            if (plan is not null)
+            {
+                _capturedSetPlanDraft = plan;
+            }
+        }
+        catch (JsonException)
+        {
+            // Keep planning on text fallback when tool output is malformed.
+        }
     }
 
     private static WorkPlanDraft? TryParsePlan(string text)
@@ -1624,6 +2261,13 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 }
 
                 var toolResult = CreateToolResultContent(toolCall, gatewayResult);
+                if (gatewayResult.Kind is ToolGatewayResultKind.Success
+                    && gatewayResult.Result is { Success: true, OutputJson: { } setPlanOutput }
+                    && string.Equals(toolCall.ToolId, WorkSetPlanToolId, StringComparison.Ordinal))
+                {
+                    TryCaptureSetPlanFromToolOutput(setPlanOutput);
+                }
+
                 if (_isHostModeSkills
                     && gatewayResult.Kind is ToolGatewayResultKind.Success
                     && gatewayResult.Result is { Success: true, OutputJson: { } outputJson })
@@ -1833,7 +2477,10 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         string? workPlanVersion = null,
         WorkPlanDraft? workPlan = null,
         WorkStepSnapshot? currentStepState = null,
-        IReadOnlyList<WorkStepSnapshot>? planSteps = null)
+        IReadOnlyList<WorkStepSnapshot>? planSteps = null,
+        string? publishedPlanVersion = null,
+        WorkResumeState? priorResume = null,
+        IReadOnlyList<string>? pendingUserInputs = null)
     {
         var providerId = agent.ProviderId ?? request.Selection.DefaultSelection.ProviderId;
         var modelId = agent.ModelId ?? request.Selection.DefaultSelection.ModelId;
@@ -1846,15 +2493,16 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         var context = _agentContextComposer is null
             ? AgentContextComposer.WithoutMemory(agent.SystemPrompt)
             : await _agentContextComposer.ComposeAsync(agent.SystemPrompt, ct).ConfigureAwait(false);
-        var availableTools = ResolveAvailableTools(agent, providerId);
+        var workOptionsForTools = request.Selection.ModeOptions as WorkModeOptions;
+        var availableTools = ResolveAvailableTools(agent, providerId, workOptionsForTools);
 
         // Append available agents list for GM if in Work mode with delegatable agents
         var systemInstructions = context.Instructions;
-        if (request.Selection.ModeOptions is WorkModeOptions workOpts
-            && agent.AgentId == workOpts.GeneralManager.AgentId
-            && workOpts.AvailableAgents.Any(a => !string.Equals(a.AgentId, agent.AgentId, StringComparison.Ordinal)))
+        if (workOptionsForTools is not null
+            && agent.AgentId == workOptionsForTools.GeneralManager.AgentId
+            && workOptionsForTools.AvailableAgents.Any(a => !string.Equals(a.AgentId, agent.AgentId, StringComparison.Ordinal)))
         {
-            systemInstructions = AppendAvailableAgentsList(systemInstructions, workOpts.AvailableAgents);
+            systemInstructions = AppendAvailableAgentsList(systemInstructions, workOptionsForTools.AvailableAgents);
         }
 
         var systemMessage = new RuntimeProviderMessage(
@@ -1872,7 +2520,10 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                     [new TextContentBlock(BuildManagerPlanningInput(
                         ExtractGoalText(request.InitialInput),
                         workOptions,
-                        availableTools))])
+                        availableTools,
+                        publishedPlanVersion,
+                        priorResume,
+                        pendingUserInputs))])
             ];
         }
         else if (workPlan is not null
@@ -2015,11 +2666,27 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
     private static string BuildManagerPlanningInput(
         string goal,
         WorkModeOptions options,
-        ToolDescriptor[]? tools)
+        ToolDescriptor[]? tools,
+        string? publishedPlanVersion = null,
+        WorkResumeState? priorResume = null,
+        IReadOnlyList<string>? pendingUserInputs = null)
     {
         var builder = new StringBuilder();
         builder.AppendLine("Create a structured WorkPlanDraft for this goal:");
         builder.AppendLine(goal);
+        if (pendingUserInputs is { Count: > 0 })
+        {
+            builder.AppendLine("Pending user inputs (FIFO, already accepted this turn):");
+            for (var index = 0; index < pendingUserInputs.Count; index++)
+            {
+                builder.Append(CultureInfo.InvariantCulture, $"[{index + 1}] ")
+                    .AppendLine(pendingUserInputs[index]);
+            }
+
+            builder.AppendLine(
+                "Absorb every pending user input before deciding discussion, confirmation, or a revised plan.");
+        }
+
         builder.AppendLine("Available agents and declared capabilities:");
         foreach (var agent in options.AvailableAgents)
         {
@@ -2054,18 +2721,176 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             JsonSerializer.Serialize(
                 options.EffectiveWorkflowPolicy,
                 RuntimeJsonContext.Default.WorkflowPolicy));
-        builder.AppendLine(
-            "Return only a WorkPlanDraft JSON object. The first planVersion is '1'.");
+
+        if (priorResume?.Status is WorkSessionStatus.WaitingForPlanConfirmation)
+        {
+            builder.AppendLine(
+                "A plan is waiting for user confirmation. Do not invent a new plan unless the user asked to revise it.");
+            builder.AppendLine(
+                "If the user only discusses without approving execution, reply in plain text with no JSON object.");
+        }
+
+        if (tools is { Length: > 0 }
+            && tools.Any(static tool => string.Equals(tool.ToolId, WorkSetPlanToolId, StringComparison.Ordinal)))
+        {
+            builder.AppendLine(
+                "Preferred path: call mcli_work_set_plan with a WorkPlanDraft (planVersion/goal/steps) or main_steps/sub_steps when proposing an executable plan.");
+            builder.AppendLine(
+                "Do not expand {{placeholders}}. Template tools only supply materials; set_plan is required to publish.");
+        }
+
+        if (string.IsNullOrWhiteSpace(publishedPlanVersion))
+        {
+            builder.AppendLine(
+                "Alternatively return only a WorkPlanDraft JSON object when proposing an executable plan.");
+            builder.AppendLine(
+                "The first executable planVersion must be '1' with no previousPlanVersion.");
+            builder.AppendLine(
+                "If the user only wants discussion or has not approved a plan, reply in plain text with no JSON object and do not call set_plan.");
+        }
+        else
+        {
+            var nextVersion = publishedPlanVersion;
+            if (int.TryParse(
+                    publishedPlanVersion,
+                    NumberStyles.None,
+                    CultureInfo.InvariantCulture,
+                    out var currentVersion))
+            {
+                nextVersion = (currentVersion + 1).ToString(CultureInfo.InvariantCulture);
+            }
+
+            builder.AppendLine(
+                CultureInfo.InvariantCulture,
+                $"A plan is already published at planVersion '{publishedPlanVersion}'.");
+            builder.AppendLine(
+                CultureInfo.InvariantCulture,
+                $"Any revised executable plan must use planVersion '{nextVersion}' and previousPlanVersion '{publishedPlanVersion}'.");
+            builder.AppendLine(
+                "Preserve completed step outcomes via reusesStepId when the work should not be redone.");
+            builder.AppendLine(
+                "If the user only wants discussion and has not approved a revised plan, reply in plain text with no JSON object and do not call set_plan.");
+            if (priorResume?.Steps is { Length: > 0 } steps)
+            {
+                builder.AppendLine("Current step statuses:");
+                foreach (var step in steps)
+                {
+                    builder.Append("- ")
+                        .Append(step.StepId)
+                        .Append(": ")
+                        .Append(step.Status)
+                        .Append(" / ")
+                        .AppendLine(step.Goal);
+                }
+            }
+        }
+
         return builder.ToString();
     }
 
-    private ToolDescriptor[]? ResolveAvailableTools(AgentRef agent, string providerId)
+    private static bool IsExplicitPlanConfirmation(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        if (ContainsAny(text,
+                "不要执行", "别执行", "先不要", "未批准", "还未确认", "先讨论",
+                "不是执行批准", "不是批准", "禁止执行", "等待批准", "等待确认",
+                "do not execute", "don't execute", "dont execute", "not yet", "do not confirm",
+                "not an approval"))
+        {
+            return false;
+        }
+
+        // 避免「可执行计划」误命中「执行计划」；只用明确批准执行的短语。
+        return ContainsAny(text,
+            "确认执行", "批准执行", "同意执行", "开始执行", "可以执行", "确认计划",
+            "批准计划", "确认并执行", "按计划执行", "开始按计划执行",
+            "confirm and execute", "approve and execute", "execute the plan",
+            "confirm the plan", "approve the plan", "lgtm", "ship it");
+    }
+
+    private static bool IsPlanRevisionRequest(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        return ContainsAny(text,
+            "修改计划", "修订计划", "改一下计划", "更新计划", "调整步骤", "增加步骤", "删除步骤",
+            "revise the plan", "revise plan", "change the plan", "update the plan",
+            "add a step", "remove a step", "modify the plan");
+    }
+
+    private static string CombineGoalWithPendingInputs(
+        string goal,
+        string[] pendingTexts)
+    {
+        if (pendingTexts.Length == 0)
+        {
+            return goal;
+        }
+
+        var builder = new StringBuilder(goal);
+        foreach (var pending in pendingTexts)
+        {
+            if (string.IsNullOrWhiteSpace(pending))
+            {
+                continue;
+            }
+
+            if (builder.Length > 0)
+            {
+                builder.AppendLine().AppendLine();
+            }
+
+            builder.Append(pending);
+        }
+
+        return builder.ToString();
+    }
+
+    private static bool ContainsPlanJson(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        return text.Contains("\"planVersion\"", StringComparison.Ordinal)
+            || text.Contains("\"steps\"", StringComparison.Ordinal);
+    }
+
+    private static bool ContainsAny(string text, params string[] needles)
+    {
+        foreach (var needle in needles)
+        {
+            if (text.Contains(needle, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private ToolDescriptor[]? ResolveAvailableTools(
+        AgentRef agent,
+        string providerId,
+        WorkModeOptions? workOptions = null)
     {
         var catalog = CaptureCatalogSnapshot();
         if (_toolGateway is null || catalog is null)
         {
             return null;
         }
+
+        // Work 模式按 Mode + 逻辑角色过滤（GM 全开，project-lead 仅 dispatch/read_template）。
+        // 角色按 GeneralManager.AgentId 判定，避免宿主自定义 GM id（如 gm）被当成普通员工。
+        catalog = catalog.FilterByMode("work", ResolveWorkToolRole(agent, workOptions));
 
         if (agent.AllowedToolIds is { Length: > 0 } allowedToolIds)
         {
@@ -2115,6 +2940,17 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         return _toolCatalogSnapshot;
     }
 
+    private static string ResolveWorkToolRole(AgentRef agent, WorkModeOptions? workOptions)
+    {
+        if (workOptions is not null
+            && string.Equals(agent.AgentId, workOptions.GeneralManager.AgentId, StringComparison.Ordinal))
+        {
+            return "general-manager";
+        }
+
+        return agent.AgentId;
+    }
+
     /// <summary>
     /// Refresh tools exposed to the Provider after a tool round.
     /// Full-catalog agents follow live growth (search injection).
@@ -2127,6 +2963,9 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         {
             return previouslyExposed;
         }
+
+        // 刷新时仍限制在 Work 可见工具；角色收窄由 previousIds / allowlist 保持。
+        catalog = catalog.FilterByMode("work");
 
         if (previouslyExposed is null)
         {
@@ -2344,4 +3183,294 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             DateTimeOffset.UtcNow,
             payloadJson);
     }
+
+    private async Task<WorkDispatchStepResult> HandleDispatchStepAsync(
+        WorkDispatchStepRequest dispatch,
+        CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(dispatch);
+        var context = _dispatchContext;
+        if (context is null)
+        {
+            return new WorkDispatchStepResult(
+                false,
+                ErrorCode: "dispatch_runner_unavailable",
+                ErrorMessage: "Work orchestrator dispatch context is not active.");
+        }
+
+        if (!string.Equals(dispatch.SessionId, context.SessionId, StringComparison.Ordinal)
+            || !string.Equals(dispatch.RunId, context.RunId, StringComparison.Ordinal))
+        {
+            return new WorkDispatchStepResult(
+                false,
+                ErrorCode: "dispatch_session_mismatch",
+                ErrorMessage: "dispatch_step session/run does not match the active Work run.");
+        }
+
+        var agentById = context.Options.AvailableAgents
+            .Concat([context.Options.GeneralManager])
+            .GroupBy(static agent => agent.AgentId, StringComparer.Ordinal)
+            .ToDictionary(static group => group.Key, static group => group.First(), StringComparer.Ordinal);
+        if (!agentById.TryGetValue(dispatch.TargetAgentId, out var agent))
+        {
+            return new WorkDispatchStepResult(
+                false,
+                ErrorCode: "target_agent_not_found",
+                ErrorMessage: $"Target agent '{dispatch.TargetAgentId}' is not in AvailableAgents.");
+        }
+
+        var plan = await _workRepo.GetCurrentPlanDraftAsync(context.SessionId, ct).ConfigureAwait(false);
+        if (plan is null
+            || !string.Equals(plan.PlanVersion, dispatch.PlanVersion, StringComparison.Ordinal))
+        {
+            return new WorkDispatchStepResult(
+                false,
+                ErrorCode: "plan_not_set",
+                ErrorMessage: "Published plan is missing or planVersion mismatch for dispatch.");
+        }
+
+        var planSteps = await _workRepo.ListStepsAsync(context.SessionId, plan.PlanVersion, ct)
+            .ConfigureAwait(false);
+        var currentStep = planSteps.FirstOrDefault(step =>
+            string.Equals(step.StepId, dispatch.StepId, StringComparison.Ordinal));
+        if (currentStep is null)
+        {
+            return new WorkDispatchStepResult(
+                false,
+                ErrorCode: "step_not_materialized",
+                ErrorMessage: $"Step '{dispatch.StepId}' is not materialized in the published plan ledger.");
+        }
+
+        if (currentStep.Status is not WorkStepLifecycleStatus.Pending)
+        {
+            return new WorkDispatchStepResult(
+                false,
+                ErrorCode: "step_not_dispatchable",
+                ErrorMessage: $"Step '{dispatch.StepId}' status is '{currentStep.Status}'; only Pending steps can be dispatched.");
+        }
+
+        var stepGoal = string.IsNullOrWhiteSpace(dispatch.Instruction)
+            ? (dispatch.Goal ?? string.Empty)
+            : $"{dispatch.Goal}\n\nDispatch instruction:\n{dispatch.Instruction}";
+        var stepInputHash = string.IsNullOrWhiteSpace(currentStep.StepInputHash)
+            ? WorkPlanValidator.ComputeStepInputHash(
+                currentStep.StepId,
+                currentStep.PlanVersion,
+                currentStep.Goal ?? stepGoal)
+            : currentStep.StepInputHash;
+
+        var childInvocation = await CreateInvocationRequestAsync(
+                context.RunId,
+                context.SessionId,
+                context.Request,
+                agent,
+                StepProjectionVersion,
+                ct,
+                stepGoal: stepGoal,
+                parentAgentId: dispatch.AgentId,
+                parentInvocationId: dispatch.InvocationId ?? dispatch.CallId,
+                workStepId: dispatch.StepId,
+                workPlanVersion: plan.PlanVersion,
+                workPlan: plan,
+                currentStepState: currentStep,
+                planSteps: planSteps.Count == 0 ? null : planSteps)
+            .ConfigureAwait(false);
+
+        var childSnapshotJson = JsonSerializer.Serialize(
+            childInvocation.Snapshot,
+            RuntimeJsonContext.Default.InvocationSnapshot);
+        var checkpointJson = CreateStepCheckpointJson(
+            currentStep,
+            childInvocation.InvocationId,
+            stepInputHash);
+        var started = await _sessionRepo.TryStartWorkStepWithCheckpointAsync(
+                currentStep.StepId,
+                currentStep.PlanVersion,
+                context.RunId,
+                context.SessionId,
+                currentStep.TargetAgentId,
+                stepInputHash,
+                childInvocation.InvocationId,
+                childInvocation.Snapshot,
+                childSnapshotJson,
+                checkpointJson,
+                ct)
+            .ConfigureAwait(false);
+        if (!started)
+        {
+            return new WorkDispatchStepResult(
+                false,
+                ErrorCode: "step_start_failed",
+                ErrorMessage: $"Failed to start step '{dispatch.StepId}' from Pending; another runner may own it.",
+                ChildInvocationId: childInvocation.InvocationId);
+        }
+
+        var sequence = context.Sequence;
+        // Nested under GM tool execution: persist the same lifecycle events to outbox.
+        // Live DispatchPendingEvents flushes them on the next outer RunAsync yield.
+        _ = await CreateInvocationStartedEnvelopeAsync(
+                childInvocation,
+                context.RuntimeInstanceId,
+                sequence.Take(),
+                ct)
+            .ConfigureAwait(false);
+        if (IsProjectionAdjusted(childInvocation.Snapshot.ContextProjection))
+        {
+            _ = await CreateContextProjectionAdjustedEnvelopeAsync(
+                    childInvocation,
+                    context.RuntimeInstanceId,
+                    sequence.Take(),
+                    ct)
+                .ConfigureAwait(false);
+        }
+
+        var textBuilder = new StringBuilder();
+        RuntimeError? error = null;
+        await foreach (var providerEvent in ExecuteInvocationAsync(childInvocation, ct)
+            .ConfigureAwait(false))
+        {
+            switch (providerEvent)
+            {
+                case TextDeltaProviderEvent textDelta:
+                    textBuilder.Append(textDelta.Delta);
+                    _ = await CreateTextDeltaEnvelopeAsync(
+                            context.RunId,
+                            context.RuntimeInstanceId,
+                            textDelta.InvocationId,
+                            textDelta.Delta,
+                            sequence.Take(),
+                            ct)
+                        .ConfigureAwait(false);
+                    break;
+                case ReasoningDeltaProviderEvent reasoningDelta:
+                    _ = await CreateReasoningDeltaEnvelopeAsync(
+                            context.RunId,
+                            context.RuntimeInstanceId,
+                            reasoningDelta.InvocationId,
+                            reasoningDelta.Delta,
+                            sequence.Take(),
+                            ct)
+                        .ConfigureAwait(false);
+                    break;
+                case ToolCallDeltaProviderEvent toolCallDelta:
+                    _ = await CreateToolCallDeltaEnvelopeAsync(
+                            context.RunId,
+                            context.RuntimeInstanceId,
+                            toolCallDelta.InvocationId,
+                            toolCallDelta.CallId,
+                            toolCallDelta.Name,
+                            toolCallDelta.ArgumentsDelta,
+                            sequence.Take(),
+                            ct)
+                        .ConfigureAwait(false);
+                    break;
+                case UsageUpdatedProviderEvent usage:
+                    _ = await CreateUsageUpdatedEnvelopeAsync(
+                            context.RunId,
+                            context.RuntimeInstanceId,
+                            usage.InvocationId,
+                            usage.InputTokens,
+                            usage.OutputTokens,
+                            sequence.Take(),
+                            ct)
+                        .ConfigureAwait(false);
+                    break;
+                case InvocationFailedProviderEvent failed:
+                    error = failed.Error;
+                    break;
+                case WorkRunStatusProviderEvent statusChanged:
+                    _ = await CreateStatusEnvelopeAsync(
+                            context.RuntimeInstanceId,
+                            context.RunId,
+                            sequence.Take(),
+                            statusChanged.Status,
+                            ct,
+                            workPhase: "dispatch-step")
+                        .ConfigureAwait(false);
+                    break;
+            }
+        }
+
+        if (error is not null)
+        {
+            await _sessionRepo.FailWorkStepAsync(
+                    currentStep.StepId,
+                    currentStep.PlanVersion,
+                    error.Message ?? error.Code,
+                    ct)
+                .ConfigureAwait(false);
+            _ = await CreateInvocationFailedEnvelopeAsync(
+                    context.RunId,
+                    context.RuntimeInstanceId,
+                    childInvocation.InvocationId,
+                    error,
+                    sequence.Take(),
+                    ct,
+                    workStepId: currentStep.StepId)
+                .ConfigureAwait(false);
+            return new WorkDispatchStepResult(
+                false,
+                ErrorCode: error.Code ?? "dispatch_invocation_failed",
+                ErrorMessage: error.Message ?? "Child agent invocation failed.",
+                ChildInvocationId: childInvocation.InvocationId);
+        }
+
+        var outputText = textBuilder.ToString().Trim();
+        var resultJson = JsonSerializer.Serialize(
+            new TextContentBlock(outputText),
+            RuntimeJsonContext.Default.TextContentBlock);
+        await _sessionRepo.CompleteWorkStepAsync(
+                currentStep.StepId,
+                currentStep.PlanVersion,
+                stepInputHash,
+                resultJson,
+                ct)
+            .ConfigureAwait(false);
+        _ = await CreateInvocationCompletedEnvelopeAsync(
+                context.RunId,
+                context.RuntimeInstanceId,
+                childInvocation.InvocationId,
+                sequence.Take(),
+                ct,
+                workStepId: currentStep.StepId)
+            .ConfigureAwait(false);
+
+        return new WorkDispatchStepResult(
+            true,
+            outputText,
+            ChildInvocationId: childInvocation.InvocationId);
+    }
+
+    /// <summary>Run-local sequence allocator shared by RunCoreAsync and sync dispatch_step.</summary>
+    private sealed class RunSequenceAllocator
+    {
+        private long _next;
+
+        public RunSequenceAllocator(long start)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(start);
+            _next = start;
+        }
+
+        public long Current => _next;
+
+        public long Take() => _next++;
+
+        public void CatchUp(long nextSequence)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(nextSequence);
+            if (nextSequence > _next)
+            {
+                _next = nextSequence;
+            }
+        }
+    }
+
+    private sealed record DispatchRunContext(
+        string RunId,
+        string SessionId,
+        string RuntimeInstanceId,
+        NewSessionRunRequest Request,
+        WorkModeOptions Options,
+        RunSequenceAllocator Sequence);
 }

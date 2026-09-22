@@ -148,6 +148,15 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
     /// <inheritdoc />
     public RuntimeMode Mode => RuntimeMode.Meeting;
 
+    /// <summary>进程内入队会议插话；check_pending 默认 Peek，编排器处理后再 Consume。</summary>
+    public Task<MeetingPendingUserInput> EnqueueUserInputAsync(
+        string sessionId,
+        string contentText,
+        string source = "user",
+        string? inputId = null,
+        CancellationToken ct = default) =>
+        _meetingRepo.EnqueuePendingUserInputAsync(sessionId, contentText, source, inputId, ct);
+
     /// <summary>Runs one deterministic meeting round in participant join order.</summary>
     public async IAsyncEnumerable<RuntimeEventEnvelope> RunAsync(
         string runId,
@@ -2260,6 +2269,8 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             throw new InvalidOperationException(
                 $"Meeting participant agent '{agent.AgentId}' declares tools, but the Runtime has no tool gateway or catalog snapshot.");
         }
+
+        catalog = catalog.FilterByMode("meeting", agent.AgentId);
 
         var requestedToolIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var toolId in allowedToolIds)

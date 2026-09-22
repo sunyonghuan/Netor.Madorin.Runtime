@@ -23,9 +23,30 @@ if (args.Length == 4 && args[0] == "--timed-read")
     return;
 }
 
+EnsureProviderWorkerDirectory();
 var output = Path.GetFullPath(args.Length > 0 ? args[0] : "artifacts/real-smoke-20260915");
 var scenario = args.Length > 1 ? args[1] : "all";
 await Smoke.RunAsync(output, scenario);
+
+/// <summary>
+/// Provider 已与宿主脱离：Runtime 通过协议拉起同目录/指定目录的 madorin-provider-*.exe。
+/// 冒烟若未显式设置 MADORIN_PROVIDER_DIR，则优先使用构建拷贝的 providers/ 目录。
+/// </summary>
+static void EnsureProviderWorkerDirectory()
+{
+    if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("MADORIN_PROVIDER_DIR")))
+    {
+        return;
+    }
+
+    var bundled = Path.Combine(AppContext.BaseDirectory, "providers");
+    var deepseek = Path.Combine(bundled, "madorin-provider-deepseek.exe");
+    if (File.Exists(deepseek))
+    {
+        Environment.SetEnvironmentVariable("MADORIN_PROVIDER_DIR", bundled);
+        Console.WriteLine($"[provider] MADORIN_PROVIDER_DIR={bundled}");
+    }
+}
 
 internal static partial class Smoke
 {
@@ -99,6 +120,8 @@ internal static partial class Smoke
             if (scenario == "meeting-interrupt") { _interruptMeeting = true; await MeetingAsync(true, true); }
             if (scenario == "meeting-controlled") { await MeetingAsync(true, false, true); }
             if (scenario == "work-confirm") { await WorkConfirmAsync(); }
+            if (scenario == "work-set-plan") { await WorkSetPlanAsync(); }
+            if (scenario == "work-ask-pending") { await WorkAskPendingAsync(); }
         }
         finally
         {
