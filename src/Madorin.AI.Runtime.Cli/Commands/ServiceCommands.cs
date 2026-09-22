@@ -2250,7 +2250,7 @@ internal static class ServiceCommands
                 InvocationTimeoutSeconds: 180,
                 MaxRetriesPerInvocation: 0,
                 HostFailure: MeetingHostFailurePolicy.Pause,
-                SummarizerFailure: MeetingSummarizerFailurePolicy.Skip));
+                SummarizerFailure: MeetingSummarizerFailurePolicy.FallbackTailWindow));
     }
 
     private static bool TryResolveMode(string? value, out RuntimeMode mode)
