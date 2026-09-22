@@ -1427,6 +1427,224 @@ public sealed class MeetingModeOrchestratorTests
     }
 
     [TestMethod]
+    public async Task RunAsync_RequireEndConfirmation_Approve_CompletesAfterDiscussion()
+    {
+        var participants = new[]
+        {
+            CreateParticipant("p-a", joinOrder: 0),
+            CreateParticipant("p-b", joinOrder: 1),
+        };
+        var options = new MeetingModeOptions(
+            participants,
+            selectorPolicy: new MeetingSelectorPolicyOptions(Type: MeetingSelectorPolicy.RoundRobin, MaxRounds: 1),
+            policy: new MeetingPolicy(RequireEndConfirmation: true));
+
+        var callbackRequests = new List<MeetingHitlRequest>();
+        Func<MeetingHitlRequest, CancellationToken, Task<MeetingHitlResponse>> handler = (req, _) =>
+        {
+            callbackRequests.Add(req);
+            return Task.FromResult(new MeetingHitlResponse(req.ApprovalRequestId, MeetingHitlAction.Approve));
+        };
+
+        var result = await RunMeetingAsync(options, hitlHandler: handler);
+
+        Assert.HasCount(1, callbackRequests);
+        Assert.AreEqual("meeting.hitl.question.end-confirmation", callbackRequests[0].Prompt);
+        Assert.AreEqual(1, callbackRequests[0].RoundIndex);
+        var expectedEndApprovalId = CreateTestStableId(
+            "meeting-hitl-v1",
+            result.Snapshot.Session.SessionId,
+            result.Run.RunId,
+            "1",
+            "host-after-summary");
+        Assert.AreEqual(expectedEndApprovalId, callbackRequests[0].ApprovalRequestId);
+        Assert.IsTrue(
+            result.Events.Any(static e =>
+                e.MessageType == MessageTypes.RunStatusChanged
+                && e.Payload.GetProperty("status").GetString() == "WaitingForApproval"));
+        Assert.AreEqual(MessageTypes.RunCompleted, result.Events[^1].MessageType);
+        Assert.AreEqual("Completed", result.Snapshot.Session.Status);
+    }
+
+    [TestMethod]
+    public async Task RunAsync_RequireEndConfirmation_Reject_CancelsWithoutCompleted()
+    {
+        var participants = new[]
+        {
+            CreateParticipant("p-a", joinOrder: 0),
+            CreateParticipant("p-b", joinOrder: 1),
+        };
+        var options = new MeetingModeOptions(
+            participants,
+            selectorPolicy: new MeetingSelectorPolicyOptions(Type: MeetingSelectorPolicy.RoundRobin, MaxRounds: 1),
+            policy: new MeetingPolicy(RequireEndConfirmation: true));
+
+        Func<MeetingHitlRequest, CancellationToken, Task<MeetingHitlResponse>> handler = (req, _) =>
+            Task.FromResult(new MeetingHitlResponse(
+                req.ApprovalRequestId,
+                MeetingHitlAction.Reject,
+                Reason: "Boss rejected the conclusion."));
+
+        var result = await RunMeetingAsync(options, hitlHandler: handler);
+
+        Assert.IsNotEmpty(result.Provider.InvokedAgentIds);
+        Assert.HasCount(1, result.Events.Where(static e => e.MessageType == MessageTypes.RunCancelled));
+        Assert.HasCount(0, result.Events.Where(static e => e.MessageType == MessageTypes.RunCompleted));
+        Assert.AreEqual("Cancelled", result.Snapshot.Session.Status);
+    }
+
+    [TestMethod]
+    public async Task RunAsync_RequireEndConfirmation_SupplementThenApprove_ContinuesDiscussionBeforeComplete()
+    {
+        var participants = new[]
+        {
+            CreateParticipant("p-a", joinOrder: 0),
+            CreateParticipant("p-b", joinOrder: 1),
+        };
+        var options = new MeetingModeOptions(
+            participants,
+            selectorPolicy: new MeetingSelectorPolicyOptions(Type: MeetingSelectorPolicy.RoundRobin, MaxRounds: 1),
+            policy: new MeetingPolicy(RequireEndConfirmation: true));
+
+        var callbackRequests = new List<MeetingHitlRequest>();
+        var callCount = 0;
+        Func<MeetingHitlRequest, CancellationToken, Task<MeetingHitlResponse>> handler = (req, _) =>
+        {
+            callbackRequests.Add(req);
+            callCount++;
+            if (callCount == 1)
+            {
+                return Task.FromResult(new MeetingHitlResponse(
+                    req.ApprovalRequestId,
+                    MeetingHitlAction.Supplement,
+                    Supplement: "Please emphasize the rollback plan in the archive."));
+            }
+
+            return Task.FromResult(new MeetingHitlResponse(req.ApprovalRequestId, MeetingHitlAction.Approve));
+        };
+
+        var result = await RunMeetingAsync(options, hitlHandler: handler);
+
+        Assert.HasCount(2, callbackRequests);
+        Assert.AreEqual("meeting.hitl.question.end-confirmation", callbackRequests[0].Prompt);
+        Assert.AreEqual("meeting.hitl.question.end-confirmation", callbackRequests[1].Prompt);
+        Assert.AreNotEqual(callbackRequests[0].ApprovalRequestId, callbackRequests[1].ApprovalRequestId);
+        Assert.IsGreaterThanOrEqualTo(2, result.Provider.InvokedAgentIds.Count);
+        Assert.IsTrue(
+            result.History.Any(static record =>
+                record.Content.GetRawText().Contains("rollback plan", StringComparison.Ordinal)));
+        Assert.AreEqual(MessageTypes.RunCompleted, result.Events[^1].MessageType);
+        Assert.AreEqual("Completed", result.Snapshot.Session.Status);
+        Assert.IsGreaterThanOrEqualTo(2, result.Snapshot.Session.CurrentRound);
+    }
+
+    [TestMethod]
+    public async Task RunAsync_RequireEndConfirmation_WithoutHandler_FailsAfterDiscussion()
+    {
+        var provider = new FakeProviderAdapter();
+        var participants = new[]
+        {
+            CreateParticipant("p-a", joinOrder: 0),
+            CreateParticipant("p-b", joinOrder: 1),
+        };
+        var options = new MeetingModeOptions(
+            participants,
+            selectorPolicy: new MeetingSelectorPolicyOptions(Type: MeetingSelectorPolicy.RoundRobin, MaxRounds: 1),
+            policy: new MeetingPolicy(RequireEndConfirmation: true));
+
+        Exception? caught = null;
+        try
+        {
+            await RunMeetingAsync(options, provider);
+        }
+        catch (InvalidOperationException ex)
+        {
+            caught = ex;
+        }
+
+        Assert.IsNotNull(caught);
+        StringAssert.Contains(caught!.Message, "End confirmation");
+        Assert.IsNotEmpty(provider.InvokedAgentIds);
+    }
+
+    [TestMethod]
+    public async Task RunAsync_PendingInput_IsDrainedBetweenRounds()
+    {
+        var participants = new[]
+        {
+            CreateParticipant("p-a", joinOrder: 0),
+            CreateParticipant("p-b", joinOrder: 1),
+        };
+        var options = new MeetingModeOptions(
+            participants,
+            selectorPolicy: new MeetingSelectorPolicyOptions(Type: MeetingSelectorPolicy.RoundRobin, MaxRounds: 2),
+            policy: new MeetingPolicy());
+
+        var enqueued = false;
+        var result = await RunMeetingAsync(
+            options,
+            configure: async (setup, ct) =>
+            {
+                setup.Provider.OnRequestCaptured = async (_, token) =>
+                {
+                    if (!enqueued)
+                    {
+                        enqueued = true;
+                        var contentJson = """[{"type":"text","text":"老板插话：预算上限改为50元。"}]""";
+                        await setup.MeetingRepository.EnqueuePendingInputAsync(
+                            setup.SessionId,
+                            "interrupt-1",
+                            contentJson,
+                            runId: null,
+                            token).ConfigureAwait(false);
+                    }
+                };
+            });
+
+        Assert.IsTrue(
+            result.History.Any(static record =>
+                record.Content.GetRawText().Contains("预算上限改为50元", StringComparison.Ordinal)));
+        Assert.AreEqual(MessageTypes.RunCompleted, result.Events[^1].MessageType);
+    }
+
+    [TestMethod]
+    public async Task RunAsync_PauseRequested_InterruptsAtSafePoint()
+    {
+        var participants = new[]
+        {
+            CreateParticipant("p-a", joinOrder: 0),
+            CreateParticipant("p-b", joinOrder: 1),
+        };
+        var options = new MeetingModeOptions(
+            participants,
+            selectorPolicy: new MeetingSelectorPolicyOptions(Type: MeetingSelectorPolicy.RoundRobin, MaxRounds: 2),
+            policy: new MeetingPolicy());
+
+        var paused = false;
+        var result = await RunMeetingAsync(
+            options,
+            configure: async (setup, ct) =>
+            {
+                setup.Provider.OnRequestCaptured = async (_, token) =>
+                {
+                    if (!paused)
+                    {
+                        paused = true;
+                        await setup.MeetingRepository.RequestPauseAsync(
+                            setup.SessionId,
+                            "pause-1",
+                            "老板请求暂停",
+                            token).ConfigureAwait(false);
+                    }
+                };
+            });
+
+        Assert.AreEqual("Paused", result.Snapshot.Session.Status);
+        Assert.AreEqual(RunStatus.Interrupted, result.Run.Status);
+        Assert.AreEqual(MessageTypes.RunCancelled, result.Events[^1].MessageType);
+    }
+
+    [TestMethod]
     public async Task RunAsync_RoundRobin_MidRunParticipantAddRemove_UsesNewSnapshotAtSafePoint()
     {
         var ct = TestContext.CancellationToken;

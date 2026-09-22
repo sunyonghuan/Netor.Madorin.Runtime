@@ -56,6 +56,8 @@ public sealed record MeetingSelectorPolicyOptions(
 
 /// <summary>
 /// Meeting governance: summary, termination, HITL, timeouts, retries and failure handling.
+/// <see cref="RequireEndConfirmation"/> keeps the meeting open after the final discussion or
+/// summary until the host explicitly approves end via HITL.
 /// </summary>
 public sealed record MeetingPolicy(
     MeetingSummaryMode SummaryMode = MeetingSummaryMode.None,
@@ -71,7 +73,8 @@ public sealed record MeetingPolicy(
     MeetingParticipantFailurePolicy ParticipantFailure = MeetingParticipantFailurePolicy.Skip,
     MeetingHostFailurePolicy HostFailure = MeetingHostFailurePolicy.Pause,
     MeetingSelectorFailurePolicy SelectorFailure = MeetingSelectorFailurePolicy.DeterministicFallback,
-    MeetingSummarizerFailurePolicy SummarizerFailure = MeetingSummarizerFailurePolicy.FallbackTailWindow);
+    MeetingSummarizerFailurePolicy SummarizerFailure = MeetingSummarizerFailurePolicy.FallbackTailWindow,
+    bool RequireEndConfirmation = false);
 
 /// <summary>
 /// How the canonical history is projected into each meeting role's context.

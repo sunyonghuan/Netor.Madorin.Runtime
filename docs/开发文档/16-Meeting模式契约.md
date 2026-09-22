@@ -109,21 +109,52 @@ Skills 总述见 [12-Skills系统](./12-Skills系统.md) §8；宿主接入见 [
 
 | 动作 | 说明 |
 | --- | --- |
-| `Approve` | 批准当前提案或发言 |
+| `Approve` | 批准当前提案或发言；在结束确认门禁上表示确认结束会议 |
 | `Reject` | 拒绝并取消会议（与 `Cancel` 走同一分支，不存在"重新处理"逻辑） |
-| `Supplement` | 补充信息后继续 |
+| `Supplement` | 补充信息后继续；在结束确认门禁上会持久化补充并再次征询结束 |
 | `Cancel` | 取消当前会议 |
 
-当 `HitlEnabled` 为 `true` 时，HITL 是一个在首轮开始前触发一次的门禁（gate），而非贯穿运行期、对每条提案或发言反复审批的循环。门禁通过后本次 Run 内不再触发。
+Meeting 支持两类独立的 HITL 门禁，均由 orchestrator 直接消费，不交给 Host Agent：
 
-流程：
+### 7.1 首轮前门禁（`HitlEnabled`）
 
-1. 首轮调度前，Runtime 发出 `meeting.hitl.request` 事件（`ApprovalRequestId` 后缀为 `host-before-round`），携带待审批内容。
-2. 会议进入 `WaitingForApproval` 状态，暂停调度。
-3. 宿主或 CLI 返回 `meeting.hitl.response`，携带 `MeetingHitlAction`。
-4. Orchestrator 直接根据审批结果处理：`Approve` 恢复调度并进入首轮；`Supplement` 持久化补充信息后继续；`Reject` 与 `Cancel` 取消会议。
+当 `HitlEnabled` 为 `true` 时，在首轮开始前触发一次：
 
-门禁的审批结果由 orchestrator 直接消费，而非交由 Host Agent 决策。
+1. Runtime 发出 `meeting.hitl.request`（`ApprovalRequestId` 后缀为 `host-before-round`）。
+2. 会议进入 `WaitingForApproval`，暂停调度。
+3. 宿主或 CLI 返回 `meeting.hitl.response`。
+4. `Approve` 恢复调度并进入首轮；`Supplement` 持久化补充信息后继续；`Reject` / `Cancel` 取消会议。
+
+### 7.2 结束确认门禁（`RequireEndConfirmation`）
+
+当 `RequireEndConfirmation` 为 `true` 时，讨论与最终摘要完成后、写入 `Completed` 之前再触发一次：
+
+1. Runtime 发出 `meeting.hitl.request`（`ApprovalRequestId` 含 `host-after-summary`，`Prompt` 为 `meeting.hitl.question.end-confirmation`）。
+2. 会议进入 `WaitingForApproval`，**此时尚未**将 Meeting / Run 标为 `Completed`。
+3. `Approve` 才进入收尾并标记 `Completed`。
+4. `Supplement` 持久化补充说明后再次征询结束（不自动完成）。
+5. `Reject` / `Cancel` 取消会议。
+
+`HitlEnabled` 与 `RequireEndConfirmation` 可独立开关，也可同时开启（先首轮门禁，后结束确认）。缺少 `hitlHandler` 时对应门禁会在触发点失败。结束确认上的 `Supplement` 会持久化补充并**再开一轮讨论段**，然后再次征询结束。
+
+### 7.3 运行中插话与暂停
+
+| RPC | 说明 |
+| --- | --- |
+| `meeting.input.enqueue` | 入队用户插话（FIFO，`requestId` 幂等）；编排器在轮次安全点写入 CanonicalHistory 并消费 |
+| `meeting.pause` | 请求协作式暂停；下一安全点将 Meeting 置 `Paused`、Run 置 `Interrupted` |
+
+Client：`EnqueueMeetingInputAsync` / `PauseMeetingAsync`。
+
+### 7.4 会议专用工具
+
+| ToolId | 角色 | 说明 |
+| --- | --- | --- |
+| `mcli_meeting_output_summary` | Host | 落盘会议总结并登记 `final_summary_message_id` |
+| `mcli_meeting_confirm_end` | Host | 有总结后将 `end_confirmed` 置位，收尾可跳过结束确认 HITL |
+| `mcli_meeting_list_attachments` | Host/参会者 | 列出会议附件元数据 |
+| `mcli_ask_user` | Host | 将问题入队为 pending input |
+| `mcli_check_pending_user_input` | Host | Peek 未消费插话 |
 
 独立 CLI 模式下，HITL 请求阻塞等待用户在终端输入响应。
 
@@ -204,16 +235,24 @@ NotStarted ─┬─ 门禁 ─→ WaitingForApproval ─┤
             │                             └─ Reject / Cancel ─→ Cancelled
             └──────────(HITL 未启用)──────────────────────────→ Running
 
-Running ─→ Summarizing ─→ Completed
-Running ─────────────────→ Completed（摘要模式为 None，跳过 Summarizing）
+Running ─→ Summarizing ─┬─ (RequireEndConfirmation) → WaitingForApproval ─┬─ Approve → Completed
+                        │                                                 ├─ Supplement → WaitingForApproval（再次征询）
+                        │                                                 └─ Reject / Cancel → Cancelled
+                        └─ (未要求结束确认) ──────────────────────────────→ Completed
+Running ─────────────────→ Completed（摘要模式为 None，且未要求结束确认）
 Summarizing ─→ Failed（摘要失败且降级策略为 Fail，见 §8.4）
 Running ─→ Paused（故障或人工介入）
 Running / Paused ─→ Failed / Cancelled
 ```
 
-`WaitingForApproval` 是首轮开始前触发一次的 HITL 门禁（见 §7），并非运行期反复审批：`HitlEnabled` 为 `true` 时会议从 `NotStarted` 先进入 `WaitingForApproval`，`Approve`／`Supplement` 后进入首轮 `Running`，`Reject`／`Cancel` 直接进入 `Cancelled`（不经 `Paused`）；`HitlEnabled` 为 `false` 时直接进入 `Running`。运行期的故障或人工介入才会使 `Running` 进入 `Paused`。
+`WaitingForApproval` 用于两类门禁（见 §7），不是运行期对每条发言反复审批：
 
-`Summarizing` 为可选阶段：摘要模式为 `None` 时 `Running` 直接进入 `Completed`；进入 `Summarizing` 后若摘要生成失败且降级策略（`MeetingSummarizerFailurePolicy` 或 `MeetingSummaryFallbackStrategy`）为 `Fail`，则终止为 `Failed`，其余降级策略仍进入 `Completed`。
+1. **首轮前**（`HitlEnabled`）：`NotStarted` → `WaitingForApproval`；`Approve`／`Supplement` 后进入首轮 `Running`，`Reject`／`Cancel` 进入 `Cancelled`。
+2. **结束确认**（`RequireEndConfirmation`）：讨论与最终摘要完成后、写入 `Completed` 之前再次进入 `WaitingForApproval`；只有 `Approve` 才进入 `Completed`，`Supplement` 落盘后再次征询，`Reject`／`Cancel` 进入 `Cancelled`。
+
+`HitlEnabled` 为 `false` 且未要求结束确认时，可直接进入 `Running` 并在收尾时进入 `Completed`。运行期故障或人工介入才会使 `Running` 进入 `Paused`。
+
+`Summarizing` 为可选阶段：摘要模式为 `None` 时跳过 Summarizing；若开启 `RequireEndConfirmation`，收尾前仍会进入结束确认门禁。进入 `Summarizing` 后若摘要生成失败且降级策略（`MeetingSummarizerFailurePolicy` 或 `MeetingSummaryFallbackStrategy`）为 `Fail`，则终止为 `Failed`，其余降级策略按是否开启结束确认决定进入门禁或 `Completed`。
 
 | 状态 | 说明 |
 | --- | --- |
@@ -255,3 +294,5 @@ Running / Paused ─→ Failed / Cancelled
 | 日期 | 说明 |
 | --- | --- |
 | 2026-09-07 | §3.1 SkillIds 过滤；§3.2 宿主 Skills + Meeting live catalog / AvailableTools 刷新 |
+| 2026-09-22 | §7 拆分首轮门禁与 `RequireEndConfirmation` 结束确认门禁 |
+| 2026-09-22 | §7.3 插话/暂停 RPC；§7.4 会议专用工具；结束确认 Supplement 续讨论 |

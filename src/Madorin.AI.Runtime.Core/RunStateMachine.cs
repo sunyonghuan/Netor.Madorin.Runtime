@@ -30,13 +30,16 @@ public static class RunStateMachine
                 or RunStatus.WaitingForApproval
                 or RunStatus.WaitingForCredentials
                 or RunStatus.Persisting
-                or RunStatus.Failed) => true,
+                or RunStatus.Failed
+                or RunStatus.Interrupted) => true,
             (RunStatus.WaitingForTool, RunStatus.Running
                 or RunStatus.WaitingForApproval
-                or RunStatus.Failed) => true,
+                or RunStatus.Failed
+                or RunStatus.Interrupted) => true,
             (RunStatus.WaitingForApproval, RunStatus.Running
                 or RunStatus.WaitingForTool
-                or RunStatus.Failed) => true,
+                or RunStatus.Failed
+                or RunStatus.Interrupted) => true,
             (RunStatus.WaitingForCredentials, RunStatus.Running or RunStatus.Failed) => true,
             (RunStatus.Persisting, RunStatus.Completed or RunStatus.Failed) => true,
             _ => false

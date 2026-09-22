@@ -62,19 +62,27 @@ public sealed class ToolCatalogSnapshot
         {
             // 宿主工具或通用工具：不过滤（SupportedModes == null）
             if (tool.SupportedModes is null || tool.SupportedModes.Count == 0)
+            {
                 return true;
+            }
 
             // 检查是否支持当前模式
             if (!tool.SupportedModes.Contains(mode, StringComparer.OrdinalIgnoreCase))
+            {
                 return false;
+            }
 
             // Work 模式需要按角色过滤
             if (string.Equals(mode, "work", StringComparison.OrdinalIgnoreCase) && agentRole is not null)
+            {
                 return IsAllowedForWorkRole(tool, agentRole);
+            }
 
             // Meeting 模式需要按角色过滤
             if (string.Equals(mode, "meeting", StringComparison.OrdinalIgnoreCase) && agentRole is not null)
+            {
                 return IsAllowedForMeetingRole(tool, agentRole);
+            }
 
             return true;
         }).ToArray();
@@ -87,7 +95,9 @@ public sealed class ToolCatalogSnapshot
     {
         // general-manager (A): 所有 Work 工具
         if (string.Equals(agentRole, "general-manager", StringComparison.OrdinalIgnoreCase))
+        {
             return true;
+        }
 
         // project-lead (B): 只能用 dispatch_step + read_template_file，不能 ask_user / set_plan
         if (string.Equals(agentRole, "project-lead", StringComparison.OrdinalIgnoreCase))
@@ -115,7 +125,9 @@ public sealed class ToolCatalogSnapshot
     {
         // meeting-host: 所有 Meeting 工具
         if (string.Equals(agentRole, "meeting-host", StringComparison.OrdinalIgnoreCase))
+        {
             return true;
+        }
 
         // 参会者 (participant): 只能 list_attachments，不能 output_summary / confirm_end / ask_user
         return tool.ToolId switch

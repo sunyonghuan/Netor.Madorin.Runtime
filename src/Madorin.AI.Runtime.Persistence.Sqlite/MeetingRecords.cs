@@ -21,7 +21,22 @@ public sealed record MeetingSessionRecord(
     string? PendingApprovalJson,
     string? PendingApprovalStatus,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt,
+    bool PauseRequested = false,
+    string? PauseRequestId = null,
+    string? PauseReason = null,
+    bool EndConfirmed = false,
+    string? FinalSummaryMessageId = null);
+
+public sealed record MeetingPendingInputRecord(
+    string RequestId,
+    string SessionId,
+    string? RunId,
+    string ContentJson,
+    string Status,
+    DateTimeOffset EnqueuedAt,
+    DateTimeOffset? ConsumedAt,
+    string? MessageId);
 
 public sealed record MeetingRoundRecord(
     string SessionId,

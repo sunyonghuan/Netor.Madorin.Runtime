@@ -29,6 +29,8 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
     private const int RecommendedMaximumParticipantCount = 10;
     private const string ProjectionVersion = "meeting-round-v1";
     private const string SummaryProjectionVersion = "meeting-summary-v1";
+    private const string EndConfirmationApprovalSuffix = "host-after-summary";
+    private const string StartHitlApprovalSuffix = "host-before-round";
 
     private readonly Func<string, IRuntimeProviderAdapter> _providerFactory;
     private readonly MeetingInvocationExecutor _invocationExecutor;
@@ -67,7 +69,7 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
     /// Set to 1 when the runtime server has already consumed sequence 0 for <c>run.accepted</c>.
     /// </param>
     /// <param name="hitlHandler">
-    /// Optional human-in-the-loop handler invoked before the first provider round when HITL is enabled.
+    /// Optional human-in-the-loop handler invoked for start-gate HITL and end-confirmation HITL.
     /// The handler owns approval persistence and Waiting state transitions.
     /// </param>
     public MeetingModeOrchestrator(
@@ -203,6 +205,8 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
         MeetingSnapshot snapshot;
         int selectionVersion;
         int runFirstRoundIndex;
+        var isEndConfirmationResume = _resumedHitlResponse is not null
+            && IsEndConfirmationApprovalRequestId(_resumedHitlResponse.ApprovalRequestId);
         if (_resumedInvocation is not null)
         {
             snapshot = await _meetingRepo.GetMeetingSnapshotAsync(sessionId, ct)
@@ -276,11 +280,19 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                 .ConfigureAwait(false)
                 ?? throw new InvalidOperationException(
                     $"No persisted rounds were found for resumed Meeting Run '{runId}'.");
-            ValidateHitlResumeSnapshot(
-                snapshot,
-                runId,
-                runFirstRoundIndex,
-                _resumedHitlResponse);
+            if (isEndConfirmationResume)
+            {
+                ValidateEndConfirmationHitlResumeSnapshot(snapshot, runId, _resumedHitlResponse);
+            }
+            else
+            {
+                ValidateHitlResumeSnapshot(
+                    snapshot,
+                    runId,
+                    runFirstRoundIndex,
+                    _resumedHitlResponse);
+            }
+
             selectionVersion = snapshot.Session.SelectionVersion;
         }
 
@@ -289,7 +301,9 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             ? snapshot.Session.CreatedAt.AddSeconds(effectivePolicy.MeetingTimeoutSeconds.Value)
             : (DateTimeOffset?)null;
 
-        if (effectivePolicy.HitlEnabled && _resumedInvocation is null)
+        if (effectivePolicy.HitlEnabled
+            && _resumedInvocation is null
+            && !isEndConfirmationResume)
         {
             if (_resumedHitlResponse is null && _hitlHandler is null)
             {
@@ -306,7 +320,7 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                 sessionId,
                 runId,
                 runFirstRoundIndex.ToString(CultureInfo.InvariantCulture),
-                "host-before-round");
+                StartHitlApprovalSuffix);
             var hostInvocationId = CreateStableId(
                 "meeting-host-v1",
                 sessionId,
@@ -428,7 +442,7 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             }
         }
 
-        var successfulTexts = _resumedInvocation is null
+        List<string> successfulTexts = _resumedInvocation is null && !isEndConfirmationResume
             ? []
             : await LoadSuccessfulParticipantTextsAsync(sessionId, ct).ConfigureAwait(false);
         MeetingContextStrategy? projectionStrategyOverride = null;
@@ -814,8 +828,19 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             return (events, null);
         }
 
+        var completedRoundIndex = lastRoundIndex;
         var currentActiveParticipants = activeParticipants;
         var currentSelectionVersion = selectionVersion;
+        if (isEndConfirmationResume)
+        {
+            completedRoundIndex = snapshot.Session.CurrentRound > 0
+                ? snapshot.Session.CurrentRound
+                : lastRoundIndex;
+            (currentActiveParticipants, currentSelectionVersion) =
+                await ReloadActiveParticipantsAsync(sessionId, options, ct).ConfigureAwait(false);
+        }
+        else
+        {
         if (_resumedInvocation is not null)
         {
             (currentActiveParticipants, _) = await ReloadActiveParticipantsAsync(
@@ -826,7 +851,6 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
 
         var pendingResume = _resumedInvocation;
         var firstRoundIndex = pendingResume?.RoundIndex ?? runFirstRoundIndex;
-        var completedRoundIndex = lastRoundIndex;
 
         if (pendingResume is { } resumedSummary
             && string.Equals(resumedSummary.Role, "summarizer", StringComparison.OrdinalIgnoreCase))
@@ -898,6 +922,18 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
         for (var roundIndex = firstRoundIndex; roundIndex <= lastRoundIndex; roundIndex++)
         {
             ct.ThrowIfCancellationRequested();
+            await DrainPendingInputsAtSafePointAsync(sessionId, runId, ct).ConfigureAwait(false);
+            if (await TryPauseAtSafePointAsync(
+                    sessionId,
+                    runId,
+                    runtimeInstanceId,
+                    () => runSequence++,
+                    ct).ConfigureAwait(false) is { } pauseEnvelope)
+            {
+                yield return pauseEnvelope;
+                yield break;
+            }
+
             var isLastRound = roundIndex == lastRoundIndex;
 
             if (isSelectorDriven || isHostDriven)
@@ -1635,6 +1671,362 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                 }
             }
         }
+        } // !isEndConfirmationResume
+
+        var endStateSnapshot = await _meetingRepo.GetMeetingSnapshotAsync(sessionId, ct)
+            .ConfigureAwait(false);
+        if (endStateSnapshot?.Session.EndConfirmed == true)
+        {
+            goto EndConfirmationAccepted;
+        }
+
+        if (effectivePolicy.RequireEndConfirmation || isEndConfirmationResume)
+        {
+            if (_hitlHandler is null && _resumedHitlResponse is null)
+            {
+                await FailMeetingAndRunAsync(
+                    sessionId,
+                    runId,
+                    "End confirmation is required but no hitlHandler was provided.",
+                    CancellationToken.None).ConfigureAwait(false);
+                throw new InvalidOperationException(
+                    "End confirmation is required but no hitlHandler was provided.");
+            }
+
+            var endConfirmationAttempt = 0;
+            var pendingEndHitlResponse = isEndConfirmationResume ? _resumedHitlResponse : null;
+            while (true)
+            {
+                await DrainPendingInputsAtSafePointAsync(sessionId, runId, ct).ConfigureAwait(false);
+                if (await TryPauseAtSafePointAsync(
+                        sessionId,
+                        runId,
+                        runtimeInstanceId,
+                        () => runSequence++,
+                        ct).ConfigureAwait(false) is { } endPauseEnvelope)
+                {
+                    yield return endPauseEnvelope;
+                    yield break;
+                }
+
+                endStateSnapshot = await _meetingRepo.GetMeetingSnapshotAsync(sessionId, ct)
+                    .ConfigureAwait(false);
+                if (endStateSnapshot?.Session.EndConfirmed == true)
+                {
+                    await ResumeFromPersistedHitlAsync(sessionId, runId, ct).ConfigureAwait(false);
+                    goto EndConfirmationAccepted;
+                }
+
+                endConfirmationAttempt++;
+                var endApprovalRequestId = CreateStableId(
+                    "meeting-hitl-v1",
+                    sessionId,
+                    runId,
+                    completedRoundIndex.ToString(CultureInfo.InvariantCulture),
+                    EndConfirmationApprovalSuffix,
+                    endConfirmationAttempt.ToString(CultureInfo.InvariantCulture));
+                // Stable id for the first attempt must match crash-resume ids that omit the attempt suffix.
+                if (endConfirmationAttempt == 1)
+                {
+                    endApprovalRequestId = CreateStableId(
+                        "meeting-hitl-v1",
+                        sessionId,
+                        runId,
+                        completedRoundIndex.ToString(CultureInfo.InvariantCulture),
+                        EndConfirmationApprovalSuffix);
+                }
+
+                var endHostInvocationId = CreateStableId(
+                    "meeting-host-end-v1",
+                    sessionId,
+                    runId,
+                    completedRoundIndex.ToString(CultureInfo.InvariantCulture));
+                var endHitlNow = DateTimeOffset.UtcNow;
+                DateTimeOffset? endHitlExpiresAt = effectivePolicy.HitlTimeoutSeconds is > 0
+                    ? endHitlNow.AddSeconds(effectivePolicy.HitlTimeoutSeconds.Value)
+                    : null;
+
+                ContentBlock[] endContext =
+                [
+                    new TextContentBlock(
+                        "Meeting discussion and summary are ready. Approve to end the meeting, "
+                        + "Supplement to add notes and re-confirm, or Cancel to abort.")
+                ];
+
+                var endHitlRequest = new MeetingHitlRequest(
+                    endApprovalRequestId,
+                    sessionId,
+                    runId,
+                    RoundIndex: completedRoundIndex,
+                    HostInvocationId: endHostInvocationId,
+                    Prompt: "meeting.hitl.question.end-confirmation",
+                    Context: endContext,
+                    CreatedAt: endHitlNow,
+                    ExpiresAt: endHitlExpiresAt);
+
+                yield return await CreateStatusEnvelopeAsync(
+                    runtimeInstanceId,
+                    runId,
+                    runSequence++,
+                    RunStatus.WaitingForApproval,
+                    currentStep: $"round:{completedRoundIndex}:end-confirmation",
+                    completedUnits: maxRounds,
+                    totalUnits: maxRounds,
+                    ct).ConfigureAwait(false);
+
+                MeetingHitlResponse endHitlResponse;
+                if (pendingEndHitlResponse is not null)
+                {
+                    endHitlResponse = pendingEndHitlResponse;
+                    pendingEndHitlResponse = null;
+                }
+                else
+                {
+                    try
+                    {
+                        endHitlResponse = await _hitlHandler!(endHitlRequest, ct).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                }
+
+                if (endHitlResponse is null
+                    || !string.Equals(
+                        endHitlResponse.ApprovalRequestId,
+                        endApprovalRequestId,
+                        StringComparison.Ordinal))
+                {
+                    await FailMeetingAndRunAsync(
+                        sessionId,
+                        runId,
+                        "End-confirmation HITL handler returned a null or mismatched response.",
+                        CancellationToken.None).ConfigureAwait(false);
+                    throw new InvalidOperationException(
+                        "End-confirmation HITL handler returned a null or mismatched response.");
+                }
+
+                switch (endHitlResponse.Action)
+                {
+                    case MeetingHitlAction.Approve:
+                        await ResumeFromPersistedHitlAsync(sessionId, runId, ct).ConfigureAwait(false);
+                        goto EndConfirmationAccepted;
+
+                    case MeetingHitlAction.Supplement:
+                        if (string.IsNullOrWhiteSpace(endHitlResponse.Supplement))
+                        {
+                            await FailMeetingAndRunAsync(
+                                sessionId,
+                                runId,
+                                "End-confirmation supplement action returned with a blank supplement.",
+                                CancellationToken.None).ConfigureAwait(false);
+                            throw new InvalidOperationException(
+                                "End-confirmation supplement action returned with a blank supplement.");
+                        }
+
+                        await PersistHitlSupplementAsync(
+                            sessionId,
+                            runId,
+                            endHitlResponse.ApprovalRequestId,
+                            endHitlResponse.Supplement,
+                            ct).ConfigureAwait(false);
+                        await ResumeFromPersistedHitlAsync(sessionId, runId, ct).ConfigureAwait(false);
+
+                        // Continue discussion for one more segment, then re-ask for end confirmation.
+                        var continuationCount = Math.Max(
+                            1,
+                            effectiveSelectorPolicy.MaxRounds ?? activeParticipants.Count);
+                        (currentActiveParticipants, currentSelectionVersion) =
+                            await ReloadActiveParticipantsAsync(sessionId, options, ct)
+                                .ConfigureAwait(false);
+                        if (currentActiveParticipants.Count == 0)
+                        {
+                            throw new InvalidOperationException(
+                                "No active participants remain for continued discussion.");
+                        }
+
+                        try
+                        {
+                            await _meetingRepo.CompleteRoundOnlyAsync(
+                                sessionId,
+                                completedRoundIndex,
+                                ct).ConfigureAwait(false);
+                        }
+                        catch (InvalidOperationException)
+                        {
+                            // Round may already be completed when FinalOnly summarizer finished the step.
+                        }
+
+                        for (var offset = 1; offset <= continuationCount; offset++)
+                        {
+                            var continuationRound = completedRoundIndex + offset;
+                            var isContinuationLast = offset == continuationCount;
+                            var continuationParticipant = currentActiveParticipants[
+                                (continuationRound - 1) % currentActiveParticipants.Count];
+                            var continuationSchedule = CreateParticipantRoleSchedule(
+                                sessionId,
+                                runId,
+                                continuationRound,
+                                currentSelectionVersion,
+                                continuationParticipant);
+                            await _meetingRepo.CreateRoundWithFirstInvocationAsync(
+                                sessionId,
+                                runId,
+                                continuationRound - 1,
+                                continuationRound,
+                                continuationSchedule,
+                                ct).ConfigureAwait(false);
+                            await _meetingRepo.TransitionInvocationStatusAsync(
+                                continuationSchedule.InvocationId,
+                                "Scheduled",
+                                "Running",
+                                ct).ConfigureAwait(false);
+
+                            var continuationRequest = await CreateInvocationRequestAsync(
+                                runId,
+                                sessionId,
+                                request,
+                                options,
+                                continuationParticipant,
+                                continuationRound,
+                                projectionStrategyOverride,
+                                continuationSchedule.InvocationId,
+                                ct).ConfigureAwait(false);
+                            yield return await CreateInvocationStartedEnvelopeAsync(
+                                continuationRequest.Request,
+                                runtimeInstanceId,
+                                runSequence++,
+                                ct).ConfigureAwait(false);
+
+                            var continuationResult = await ExecuteInvocationAsync(
+                                continuationRequest.Request).ConfigureAwait(false);
+                            foreach (var evt in continuationResult.Events)
+                            {
+                                yield return evt;
+                            }
+
+                            if (!continuationResult.Succeeded
+                                || string.IsNullOrWhiteSpace(continuationResult.Text))
+                            {
+                                var continuationError = continuationResult.Error
+                                    ?? new RuntimeError(
+                                        "invocation_failed",
+                                        "orchestration",
+                                        "Continuation participant invocation failed.",
+                                        IsRetryable: false,
+                                        ProviderDetails: null,
+                                        Guid.NewGuid().ToString("N"));
+                                await _meetingRepo.CompleteInvocationAsync(
+                                    continuationSchedule.InvocationId,
+                                    "Failed",
+                                    null,
+                                    null,
+                                    continuationError.Code,
+                                    continuationError.Message,
+                                    null,
+                                    ct).ConfigureAwait(false);
+                                yield return await CreateEnvelopeAsync(
+                                    runtimeInstanceId,
+                                    runId,
+                                    runSequence++,
+                                    MessageTypes.InvocationFailed,
+                                    new InvocationFailedEvent(
+                                        continuationSchedule.InvocationId,
+                                        continuationError),
+                                    RuntimeJsonContext.Default.InvocationFailedEvent,
+                                    ct).ConfigureAwait(false);
+                                break;
+                            }
+
+                            var continuationMessageId = CreateStableId(
+                                "meeting-message-v1",
+                                continuationSchedule.InvocationId);
+                            await PersistAssistantMessageAsync(
+                                sessionId,
+                                continuationRequest.Request,
+                                continuationResult.Text!,
+                                continuationMessageId,
+                                ct).ConfigureAwait(false);
+                            successfulTexts.Add(continuationResult.Text!);
+
+                            MeetingInvocationScheduleInput? nextContinuation = null;
+                            if (!isContinuationLast)
+                            {
+                                var nextParticipant = currentActiveParticipants[
+                                    continuationRound % currentActiveParticipants.Count];
+                                nextContinuation = CreateParticipantRoleSchedule(
+                                    sessionId,
+                                    runId,
+                                    continuationRound + 1,
+                                    currentSelectionVersion,
+                                    nextParticipant);
+                            }
+
+                            var continuationSummary = await CompleteRoleStepAsync(
+                                continuationSchedule.InvocationId,
+                                continuationMessageId,
+                                decisionJson: null,
+                                continuationRound,
+                                currentSelectionVersion,
+                                nextContinuation).ConfigureAwait(false);
+                            foreach (var summaryEvent in continuationSummary.Events)
+                            {
+                                yield return summaryEvent;
+                            }
+
+                            if (continuationSummary.FatalError is not null)
+                            {
+                                throw new InvalidOperationException(
+                                    $"Summarizer failed during continued discussion round {continuationRound}: "
+                                    + continuationSummary.FatalError.Message);
+                            }
+
+                            completedRoundIndex = continuationRound;
+                        }
+
+                        continue;
+
+                    case MeetingHitlAction.Reject:
+                    case MeetingHitlAction.Cancel:
+                        var endCancellationReason = endHitlResponse.Reason
+                            ?? "Meeting end confirmation was rejected or cancelled.";
+                        await CancelMeetingAndRunAsync(
+                            sessionId,
+                            runId,
+                            endCancellationReason,
+                            CancellationToken.None,
+                            transitionRun: false).ConfigureAwait(false);
+                        var endCancelledEnvelope = await CommitTerminalEnvelopeAsync(
+                            runtimeInstanceId,
+                            runId,
+                            runSequence++,
+                            RunStatus.Cancelled,
+                            endCancellationReason,
+                            error: null,
+                            value: new RunCancelledEvent(runId, sessionId),
+                            typeInfo: RuntimeJsonContext.Default.RunCancelledEvent,
+                            ct: ct).ConfigureAwait(false);
+                        if (endCancelledEnvelope is not null)
+                        {
+                            yield return endCancelledEnvelope;
+                        }
+
+                        yield break;
+
+                    default:
+                        await FailMeetingAndRunAsync(
+                            sessionId,
+                            runId,
+                            $"Unknown end-confirmation HITL action '{endHitlResponse.Action}'.",
+                            CancellationToken.None).ConfigureAwait(false);
+                        throw new InvalidOperationException(
+                            $"Unknown end-confirmation HITL action '{endHitlResponse.Action}'.");
+                }
+            }
+        }
+
+        EndConfirmationAccepted:
 
         await _meetingRepo.CompleteRoundAndMeetingAsync(
             sessionId,
@@ -2521,6 +2913,7 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
         {
             RunStatus.Completed => MessageTypes.RunCompleted,
             RunStatus.Cancelled => MessageTypes.RunCancelled,
+            RunStatus.Interrupted => MessageTypes.RunCancelled,
             RunStatus.Failed => MessageTypes.RunFailed,
             _ => throw new ArgumentOutOfRangeException(nameof(terminalStatus))
         };
@@ -3066,6 +3459,91 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             ct).ConfigureAwait(false);
     }
 
+    private static bool IsEndConfirmationApprovalRequestId(string approvalRequestId) =>
+        approvalRequestId.Contains(EndConfirmationApprovalSuffix, StringComparison.Ordinal);
+
+    private async Task DrainPendingInputsAtSafePointAsync(
+        string sessionId,
+        string runId,
+        CancellationToken ct)
+    {
+        var pending = await _meetingRepo.ListPendingInputsAsync(sessionId, ct).ConfigureAwait(false);
+        foreach (var item in pending)
+        {
+            ContentBlock[] content;
+            try
+            {
+                content = JsonSerializer.Deserialize(
+                    item.ContentJson,
+                    RuntimeJsonContext.Default.ContentBlockArray)
+                    ?? [new TextContentBlock(item.ContentJson)];
+            }
+            catch (JsonException)
+            {
+                content = [new TextContentBlock(item.ContentJson)];
+            }
+
+            var messageId = CreateStableId(
+                "meeting-pending-input-message-v1",
+                sessionId,
+                runId,
+                item.RequestId);
+            await PersistMeetingUserMessageAsync(
+                sessionId,
+                messageId,
+                CreateStableId(
+                    "meeting-pending-input-invocation-v1",
+                    sessionId,
+                    runId,
+                    item.RequestId),
+                content,
+                "pending user interrupt",
+                ct).ConfigureAwait(false);
+            await _meetingRepo.MarkPendingInputConsumedAsync(item.RequestId, messageId, ct)
+                .ConfigureAwait(false);
+        }
+    }
+
+    private async Task<RuntimeEventEnvelope?> TryPauseAtSafePointAsync(
+        string sessionId,
+        string runId,
+        string runtimeInstanceId,
+        Func<long> nextRunSequence,
+        CancellationToken ct)
+    {
+        var snapshot = await _meetingRepo.GetMeetingSnapshotAsync(sessionId, ct)
+            .ConfigureAwait(false);
+        if (snapshot is null || !snapshot.Session.PauseRequested)
+        {
+            return null;
+        }
+
+        var reason = snapshot.Session.PauseReason ?? "Paused by host request.";
+        await _meetingRepo.TryTransitionMeetingStatusAsync(
+            sessionId,
+            "Running",
+            "Paused",
+            ct).ConfigureAwait(false);
+        await _meetingRepo.ClearPauseRequestAsync(sessionId, ct).ConfigureAwait(false);
+        await _sessionRepo.TransitionRunToTerminalAsync(
+            runId,
+            RunStatus.Running,
+            RunStatus.Interrupted,
+            reason,
+            ct).ConfigureAwait(false);
+
+        return await CommitTerminalEnvelopeAsync(
+            runtimeInstanceId,
+            runId,
+            nextRunSequence(),
+            RunStatus.Interrupted,
+            reason,
+            error: null,
+            value: new RunCancelledEvent(runId, sessionId),
+            typeInfo: RuntimeJsonContext.Default.RunCancelledEvent,
+            ct: ct).ConfigureAwait(false);
+    }
+
     private static void ValidateHitlResumeSnapshot(
         MeetingSnapshot snapshot,
         string runId,
@@ -3086,6 +3564,27 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
         {
             throw new InvalidOperationException(
                 $"Meeting session '{snapshot.Session.SessionId}' is not at a recoverable post-HITL checkpoint.");
+        }
+    }
+
+    private static void ValidateEndConfirmationHitlResumeSnapshot(
+        MeetingSnapshot snapshot,
+        string runId,
+        MeetingHitlResponse response)
+    {
+        if (!string.Equals(snapshot.Session.RunId, runId, StringComparison.Ordinal)
+            || snapshot.Session.CurrentRound <= 0
+            || snapshot.NextScheduledInvocation is not null
+            || !IsEndConfirmationApprovalRequestId(response.ApprovalRequestId)
+            || !string.Equals(
+                snapshot.Session.PendingApprovalRequestId,
+                response.ApprovalRequestId,
+                StringComparison.Ordinal)
+            || !string.Equals(snapshot.PendingApprovalStatus, "Decided", StringComparison.Ordinal)
+            || snapshot.Session.Status is not ("WaitingForApproval" or "Running"))
+        {
+            throw new InvalidOperationException(
+                $"Meeting session '{snapshot.Session.SessionId}' is not at a recoverable end-confirmation checkpoint.");
         }
     }
 

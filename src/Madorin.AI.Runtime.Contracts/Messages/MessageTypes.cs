@@ -49,6 +49,8 @@ public static class MessageTypes
     public const string MeetingHitlRequest = "meeting.hitl.request";
     public const string MeetingHitlResponse = "meeting.hitl.response";
     public const string MeetingSelectionUpdate = "meeting.selection.update";
+    public const string MeetingInputEnqueue = "meeting.input.enqueue";
+    public const string MeetingPause = "meeting.pause";
     public const string SkillCatalogGet = "skill.catalog.get";
     public const string SkillCatalogRefresh = "skill.catalog.refresh";
     public const string SkillCatalogChanged = "skill.catalog.changed";

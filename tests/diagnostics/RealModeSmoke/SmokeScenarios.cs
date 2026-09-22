@@ -131,7 +131,8 @@ internal static partial class Smoke
             selectorPolicy: new MeetingSelectorPolicyOptions(MeetingSelectorPolicy.HostDriven, MaxRounds: interrupt ? 2 : 4),
             policy: new MeetingPolicy(SummaryMode: MeetingSummaryMode.FinalOnly, Summarizer: host,
                 HitlEnabled: true, HitlTimeoutSeconds: 60, InvocationTimeoutSeconds: 120,
-                MaxRetriesPerInvocation: 0));
+                MaxRetriesPerInvocation: 0,
+                RequireEndConfirmation: true));
         var selection = Select(RuntimeMode.Meeting, options);
         var session = await TurnAsync(interrupt ? "MI1-running-interrupt" : "M1-discussion", selection,
             "开会讨论：依据sales.csv和refunds.csv决定是否扩大跨境销售推广。请主持人安排财务与风控有序讨论，必要时调用工具核实信息。先讨论收益，再讨论退款风险和试投预算，至少四次发言，最后总结并询问我是否结束，等待我明确答复。当前没有同意结束。");

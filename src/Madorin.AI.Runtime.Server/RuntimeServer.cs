@@ -1370,6 +1370,94 @@ public sealed class RuntimeServer : IAsyncDisposable
             return new JsonRpcResponse("2.0", request.Id, hitlResult);
         }
 
+        if (string.Equals(request.Method, MessageTypes.MeetingInputEnqueue, StringComparison.Ordinal))
+        {
+            var enqueue = request.Params is { } enqueueParams
+                ? JsonSerializer.Deserialize(
+                    enqueueParams,
+                    RuntimeJsonContext.Default.MeetingInputEnqueueRequest)
+                : null;
+            if (enqueue is null
+                || string.IsNullOrWhiteSpace(enqueue.SessionId)
+                || string.IsNullOrWhiteSpace(enqueue.RequestId)
+                || enqueue.Content is not { Length: > 0 })
+            {
+                return Error(request.Id, -32602, "The meeting.input.enqueue parameters are invalid.");
+            }
+
+            var meetingSnapshot = await meetingRepository.GetMeetingSnapshotAsync(enqueue.SessionId, ct)
+                .ConfigureAwait(false);
+            if (meetingSnapshot is null)
+            {
+                return Error(request.Id, -32004, $"Meeting session '{enqueue.SessionId}' was not found.");
+            }
+
+            var contentJson = JsonSerializer.Serialize(
+                enqueue.Content,
+                RuntimeJsonContext.Default.ContentBlockArray);
+            var accepted = await meetingRepository.EnqueuePendingInputAsync(
+                enqueue.SessionId,
+                enqueue.RequestId,
+                contentJson,
+                enqueue.RunId ?? meetingSnapshot.Session.RunId,
+                ct).ConfigureAwait(false);
+            var enqueueResult = new MeetingInputEnqueueResult(
+                enqueue.SessionId,
+                enqueue.RequestId,
+                accepted,
+                accepted ? "Pending" : "Duplicate",
+                accepted
+                    ? "Input accepted and will be consumed at the next Meeting safe point."
+                    : "An identical requestId was already enqueued.");
+            return new JsonRpcResponse(
+                "2.0",
+                request.Id,
+                JsonSerializer.SerializeToElement(
+                    enqueueResult,
+                    RuntimeJsonContext.Default.MeetingInputEnqueueResult));
+        }
+
+        if (string.Equals(request.Method, MessageTypes.MeetingPause, StringComparison.Ordinal))
+        {
+            var pause = request.Params is { } pauseParams
+                ? JsonSerializer.Deserialize(
+                    pauseParams,
+                    RuntimeJsonContext.Default.MeetingPauseRequest)
+                : null;
+            if (pause is null
+                || string.IsNullOrWhiteSpace(pause.SessionId)
+                || string.IsNullOrWhiteSpace(pause.RequestId))
+            {
+                return Error(request.Id, -32602, "The meeting.pause parameters are invalid.");
+            }
+
+            try
+            {
+                await meetingRepository.RequestPauseAsync(
+                    pause.SessionId,
+                    pause.RequestId,
+                    pause.Reason,
+                    ct).ConfigureAwait(false);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Error(request.Id, -32006, ex.Message);
+            }
+
+            var pauseResult = new MeetingPauseResult(
+                pause.SessionId,
+                pause.RequestId,
+                true,
+                "PauseRequested",
+                "Pause will take effect at the next Meeting safe point.");
+            return new JsonRpcResponse(
+                "2.0",
+                request.Id,
+                JsonSerializer.SerializeToElement(
+                    pauseResult,
+                    RuntimeJsonContext.Default.MeetingPauseResult));
+        }
+
         if (string.Equals(request.Method, MessageTypes.RunCancel, StringComparison.Ordinal))
         {
             var parameters = request.Params is { } cancelParameters

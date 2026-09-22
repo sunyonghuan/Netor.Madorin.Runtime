@@ -5,7 +5,7 @@ namespace Madorin.AI.Runtime.Persistence.Sqlite;
 /// <summary>Creates and migrates the Runtime SQLite metadata schema.</summary>
 public static class SqliteSchema
 {
-    public const int CurrentVersion = 16;
+    public const int CurrentVersion = 17;
 
     private static readonly string[] RequiredTables =
     [
@@ -33,7 +33,8 @@ public static class SqliteSchema
         "meeting_sessions",
         "meeting_rounds",
         "meeting_participants",
-        "meeting_invocations"
+        "meeting_invocations",
+        "meeting_pending_inputs"
     ];
 
     private static readonly string[] RequiredIndexes =
@@ -61,6 +62,8 @@ public static class SqliteSchema
         "idx_meeting_invocations_scheduled",
         "idx_meeting_invocations_run_round",
         "idx_meeting_invocations_session_round_ordinal",
+        "idx_meeting_pending_inputs_session_status",
+        "idx_meeting_pending_inputs_enqueued",
         "idx_work_sessions_status",
         "idx_work_plan_revisions_session",
         "idx_work_steps_session",
@@ -119,6 +122,19 @@ public static class SqliteSchema
         ("meeting_sessions", "pending_approval_request_id"),
         ("meeting_sessions", "pending_approval_json"),
         ("meeting_sessions", "pending_approval_status"),
+        ("meeting_sessions", "pause_requested"),
+        ("meeting_sessions", "pause_request_id"),
+        ("meeting_sessions", "pause_reason"),
+        ("meeting_sessions", "end_confirmed"),
+        ("meeting_sessions", "final_summary_message_id"),
+        ("meeting_pending_inputs", "request_id"),
+        ("meeting_pending_inputs", "session_id"),
+        ("meeting_pending_inputs", "run_id"),
+        ("meeting_pending_inputs", "content_json"),
+        ("meeting_pending_inputs", "status"),
+        ("meeting_pending_inputs", "enqueued_at"),
+        ("meeting_pending_inputs", "consumed_at"),
+        ("meeting_pending_inputs", "message_id"),
         ("meeting_rounds", "first_invocation_id"),
         ("meeting_rounds", "summary_message_id"),
         ("meeting_rounds", "summarizes_through_seq"),
@@ -324,6 +340,9 @@ public static class SqliteSchema
                     break;
                 case 16:
                     await ApplyVersionSixteenAsync(conn, ct).ConfigureAwait(false);
+                    break;
+                case 17:
+                    await ApplyVersionSeventeenAsync(conn, ct).ConfigureAwait(false);
                     break;
                 default:
                     throw new InvalidOperationException($"No migration is registered for schema version {version}.");
@@ -1070,6 +1089,58 @@ public static class SqliteSchema
             ON runs(session_id, status, updated_at, run_id);
             INSERT OR IGNORE INTO schema_versions(version, applied_at)
             VALUES(16, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            """;
+        await versionCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        transaction.Commit();
+    }
+
+    private static async Task ApplyVersionSeventeenAsync(SqliteConnection conn, CancellationToken ct)
+    {
+        using var transaction = conn.BeginTransaction(deferred: false);
+
+        await using (var create = conn.CreateCommand())
+        {
+            create.Transaction = transaction;
+            create.CommandText = """
+                CREATE TABLE IF NOT EXISTS meeting_pending_inputs(
+                    request_id TEXT PRIMARY KEY NOT NULL,
+                    session_id TEXT NOT NULL,
+                    run_id TEXT NULL,
+                    content_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    enqueued_at TEXT NOT NULL,
+                    consumed_at TEXT NULL,
+                    message_id TEXT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_meeting_pending_inputs_session_status
+                ON meeting_pending_inputs(session_id, status, enqueued_at);
+                CREATE INDEX IF NOT EXISTS idx_meeting_pending_inputs_enqueued
+                ON meeting_pending_inputs(enqueued_at, request_id);
+                """;
+            await create.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
+
+        await AddColumnIfMissingAsync(
+                conn, transaction, "meeting_sessions", "pause_requested", "INTEGER NOT NULL DEFAULT 0", ct)
+            .ConfigureAwait(false);
+        await AddColumnIfMissingAsync(
+                conn, transaction, "meeting_sessions", "pause_request_id", "TEXT", ct)
+            .ConfigureAwait(false);
+        await AddColumnIfMissingAsync(
+                conn, transaction, "meeting_sessions", "pause_reason", "TEXT", ct)
+            .ConfigureAwait(false);
+        await AddColumnIfMissingAsync(
+                conn, transaction, "meeting_sessions", "end_confirmed", "INTEGER NOT NULL DEFAULT 0", ct)
+            .ConfigureAwait(false);
+        await AddColumnIfMissingAsync(
+                conn, transaction, "meeting_sessions", "final_summary_message_id", "TEXT", ct)
+            .ConfigureAwait(false);
+
+        await using var versionCommand = conn.CreateCommand();
+        versionCommand.Transaction = transaction;
+        versionCommand.CommandText = """
+            INSERT OR IGNORE INTO schema_versions(version, applied_at)
+            VALUES(17, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
             """;
         await versionCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         transaction.Commit();

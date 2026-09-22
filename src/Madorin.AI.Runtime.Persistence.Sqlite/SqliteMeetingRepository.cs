@@ -525,6 +525,217 @@ public sealed class SqliteMeetingRepository(
         transaction.Commit();
     }
 
+    /// <summary>Completes the current Running round without terminating the meeting session.</summary>
+    public async Task CompleteRoundOnlyAsync(
+        string sessionId,
+        int roundIndex,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        if (roundIndex <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(roundIndex), "Round index must be positive.");
+        }
+
+        var now = FormatTimestamp(DateTimeOffset.UtcNow);
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            UPDATE meeting_rounds
+            SET status = 'Completed',
+                completed_at = $now
+            WHERE session_id = $sessionId
+              AND round_index = $roundIndex
+              AND status = 'Running';
+            """;
+        cmd.Parameters.AddWithValue("$now", now);
+        cmd.Parameters.AddWithValue("$sessionId", sessionId);
+        cmd.Parameters.AddWithValue("$roundIndex", roundIndex);
+        if (await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false) != 1)
+        {
+            throw new InvalidOperationException(
+                $"No running round {roundIndex} found for session '{sessionId}'.");
+        }
+    }
+
+    #endregion
+
+    #region 4C. Meeting control inputs and pause
+
+    public async Task<bool> EnqueuePendingInputAsync(
+        string sessionId,
+        string requestId,
+        string contentJson,
+        string? runId,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(contentJson);
+
+        var now = FormatTimestamp(DateTimeOffset.UtcNow);
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            INSERT OR IGNORE INTO meeting_pending_inputs(
+                request_id, session_id, run_id, content_json, status, enqueued_at)
+            VALUES(
+                $requestId, $sessionId, $runId, $contentJson, 'Pending', $enqueuedAt);
+            """;
+        cmd.Parameters.AddWithValue("$requestId", requestId);
+        cmd.Parameters.AddWithValue("$sessionId", sessionId);
+        cmd.Parameters.AddWithValue("$runId", (object?)runId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$contentJson", contentJson);
+        cmd.Parameters.AddWithValue("$enqueuedAt", now);
+        return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false) == 1;
+    }
+
+    public async Task<IReadOnlyList<MeetingPendingInputRecord>> ListPendingInputsAsync(
+        string sessionId,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        var rows = new List<MeetingPendingInputRecord>();
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT request_id, session_id, run_id, content_json, status, enqueued_at, consumed_at, message_id
+            FROM meeting_pending_inputs
+            WHERE session_id = $sessionId
+              AND status = 'Pending'
+            ORDER BY enqueued_at, request_id;
+            """;
+        cmd.Parameters.AddWithValue("$sessionId", sessionId);
+        await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            rows.Add(new MeetingPendingInputRecord(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                ParseTimestamp(reader.GetString(5)),
+                reader.IsDBNull(6) ? null : ParseTimestamp(reader.GetString(6)),
+                reader.IsDBNull(7) ? null : reader.GetString(7)));
+        }
+
+        return rows;
+    }
+
+    public async Task MarkPendingInputConsumedAsync(
+        string requestId,
+        string messageId,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(messageId);
+        var now = FormatTimestamp(DateTimeOffset.UtcNow);
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            UPDATE meeting_pending_inputs
+            SET status = 'Consumed',
+                consumed_at = $now,
+                message_id = $messageId
+            WHERE request_id = $requestId
+              AND status = 'Pending';
+            """;
+        cmd.Parameters.AddWithValue("$now", now);
+        cmd.Parameters.AddWithValue("$messageId", messageId);
+        cmd.Parameters.AddWithValue("$requestId", requestId);
+        _ = await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+    }
+
+    public async Task RequestPauseAsync(
+        string sessionId,
+        string requestId,
+        string? reason,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+        var now = FormatTimestamp(DateTimeOffset.UtcNow);
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            UPDATE meeting_sessions
+            SET pause_requested = 1,
+                pause_request_id = $requestId,
+                pause_reason = $reason,
+                updated_at = $now
+            WHERE session_id = $sessionId
+              AND status IN ('Running', 'WaitingForApproval', 'Paused');
+            """;
+        cmd.Parameters.AddWithValue("$requestId", requestId);
+        cmd.Parameters.AddWithValue("$reason", (object?)reason ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$now", now);
+        cmd.Parameters.AddWithValue("$sessionId", sessionId);
+        if (await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false) != 1)
+        {
+            throw new InvalidOperationException(
+                $"Meeting session '{sessionId}' cannot accept a pause request in its current state.");
+        }
+    }
+
+    public async Task ClearPauseRequestAsync(string sessionId, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        var now = FormatTimestamp(DateTimeOffset.UtcNow);
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            UPDATE meeting_sessions
+            SET pause_requested = 0,
+                pause_request_id = NULL,
+                pause_reason = NULL,
+                updated_at = $now
+            WHERE session_id = $sessionId;
+            """;
+        cmd.Parameters.AddWithValue("$now", now);
+        cmd.Parameters.AddWithValue("$sessionId", sessionId);
+        _ = await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+    }
+
+    public async Task MarkEndConfirmedAsync(
+        string sessionId,
+        string? finalSummaryMessageId,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        var now = FormatTimestamp(DateTimeOffset.UtcNow);
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            UPDATE meeting_sessions
+            SET end_confirmed = 1,
+                final_summary_message_id = COALESCE($summaryMessageId, final_summary_message_id),
+                updated_at = $now
+            WHERE session_id = $sessionId;
+            """;
+        cmd.Parameters.AddWithValue("$summaryMessageId", (object?)finalSummaryMessageId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$now", now);
+        cmd.Parameters.AddWithValue("$sessionId", sessionId);
+        if (await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false) != 1)
+        {
+            throw new KeyNotFoundException($"Meeting session '{sessionId}' not found.");
+        }
+    }
+
+    public async Task SaveFinalSummaryMessageIdAsync(
+        string sessionId,
+        string summaryMessageId,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(summaryMessageId);
+        var now = FormatTimestamp(DateTimeOffset.UtcNow);
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            UPDATE meeting_sessions
+            SET final_summary_message_id = $summaryMessageId,
+                updated_at = $now
+            WHERE session_id = $sessionId;
+            """;
+        cmd.Parameters.AddWithValue("$summaryMessageId", summaryMessageId);
+        cmd.Parameters.AddWithValue("$now", now);
+        cmd.Parameters.AddWithValue("$sessionId", sessionId);
+        _ = await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+    }
+
     #endregion
 
     #region 5. TryUpdateSelectionAsync
@@ -1126,7 +1337,9 @@ public sealed class SqliteMeetingRepository(
                 SELECT session_id, run_id, status, current_round,
                        selector_state, policy_json, policy_hash, selection_version,
                        pending_approval_request_id, pending_approval_json, pending_approval_status,
-                       created_at, updated_at
+                       created_at, updated_at,
+                       COALESCE(pause_requested, 0), pause_request_id, pause_reason,
+                       COALESCE(end_confirmed, 0), final_summary_message_id
                 FROM meeting_sessions
                 WHERE session_id = $sessionId;
                 """;
@@ -1964,7 +2177,12 @@ public sealed class SqliteMeetingRepository(
         r.IsDBNull(9) ? null : r.GetString(9),
         r.IsDBNull(10) ? null : r.GetString(10),
         ParseTimestamp(r.GetString(11)),
-        ParseTimestamp(r.GetString(12)));
+        ParseTimestamp(r.GetString(12)),
+        PauseRequested: r.FieldCount > 13 && !r.IsDBNull(13) && r.GetInt64(13) != 0,
+        PauseRequestId: r.FieldCount > 14 && !r.IsDBNull(14) ? r.GetString(14) : null,
+        PauseReason: r.FieldCount > 15 && !r.IsDBNull(15) ? r.GetString(15) : null,
+        EndConfirmed: r.FieldCount > 16 && !r.IsDBNull(16) && r.GetInt64(16) != 0,
+        FinalSummaryMessageId: r.FieldCount > 17 && !r.IsDBNull(17) ? r.GetString(17) : null);
 
     private static MeetingRoundRecord ReadMeetingRound(SqliteDataReader r) => new(
         r.GetString(0),

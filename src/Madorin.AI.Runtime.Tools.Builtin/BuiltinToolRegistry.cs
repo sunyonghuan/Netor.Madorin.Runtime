@@ -31,6 +31,11 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
     public const string AgentJobResultToolId = "mcli_agent_job_result";
     public const string AgentJobWaitToolId = "mcli_agent_job_wait";
     public const string AgentJobCancelToolId = "mcli_agent_job_cancel";
+    public const string MeetingOutputSummaryToolId = "mcli_meeting_output_summary";
+    public const string MeetingConfirmEndToolId = "mcli_meeting_confirm_end";
+    public const string MeetingListAttachmentsToolId = "mcli_meeting_list_attachments";
+    public const string AskUserToolId = "mcli_ask_user";
+    public const string CheckPendingUserInputToolId = "mcli_check_pending_user_input";
 
     private static readonly IReadOnlyList<ToolDescriptor> AdvertisedTools = Array.AsReadOnly<ToolDescriptor>(
     [
@@ -227,13 +232,72 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
             RiskLevel: "low",
             Capabilities: ["agent.delegate"],
             Risk: ToolRiskLevel.Low,
-            IsIdempotent: false)
+            IsIdempotent: false),
+        new(
+            MeetingOutputSummaryToolId,
+            "mcli",
+            "Output meeting summary",
+            "Writes the meeting summary as an independent markdown artifact and registers it for end confirmation.",
+            """{"type":"object","properties":{"summary":{"type":"string","minLength":1}},"required":["summary"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"ok":{"type":"boolean"},"summaryMessageId":{"type":"string"},"summaryPath":{"type":"string"},"next":{"type":"string"}},"required":["ok"],"additionalProperties":false}""",
+            RiskLevel: "low",
+            Capabilities: ["meeting.summary"],
+            Risk: ToolRiskLevel.Low,
+            IsIdempotent: false,
+            SupportedModes: ["meeting"]),
+        new(
+            MeetingConfirmEndToolId,
+            "mcli",
+            "Confirm meeting end",
+            "Marks the meeting as explicitly ended after a summary has been produced.",
+            """{"type":"object","properties":{},"additionalProperties":false}""",
+            """{"type":"object","properties":{"ok":{"type":"boolean"},"endConfirmed":{"type":"boolean"},"finalSummaryMessageId":{"type":"string"}},"required":["ok"],"additionalProperties":false}""",
+            RiskLevel: "medium",
+            RequiresApproval: false,
+            Capabilities: ["meeting.control"],
+            Risk: ToolRiskLevel.Write,
+            IsIdempotent: false,
+            SupportedModes: ["meeting"]),
+        new(
+            MeetingListAttachmentsToolId,
+            "mcli",
+            "List meeting attachments",
+            "Lists attachment metadata for the current meeting without reading file contents.",
+            """{"type":"object","properties":{},"additionalProperties":false}""",
+            """{"type":"object","properties":{"ok":{"type":"boolean"},"attachmentRoot":{"type":"string"},"attachments":{"type":"array"},"empty":{"type":"boolean"}},"required":["ok","attachments","empty"],"additionalProperties":false}""",
+            RiskLevel: "low",
+            Capabilities: ["meeting.attachments"],
+            Risk: ToolRiskLevel.SensitiveRead,
+            SupportedModes: ["meeting"]),
+        new(
+            AskUserToolId,
+            "mcli",
+            "Ask user",
+            "Queues a short question for the host/user and waits for a later interrupt response.",
+            """{"type":"object","properties":{"question":{"type":"string","minLength":1}},"required":["question"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"ok":{"type":"boolean"},"waitingForUser":{"type":"boolean"},"requestId":{"type":"string"},"message":{"type":"string"}},"required":["ok"],"additionalProperties":false}""",
+            RiskLevel: "low",
+            Capabilities: ["meeting.hitl", "work.hitl"],
+            Risk: ToolRiskLevel.Low,
+            IsIdempotent: false,
+            SupportedModes: ["meeting", "work"]),
+        new(
+            CheckPendingUserInputToolId,
+            "mcli",
+            "Check pending user input",
+            "Peeks whether the current session has unconsumed user interrupt input.",
+            """{"type":"object","properties":{},"additionalProperties":false}""",
+            """{"type":"object","properties":{"ok":{"type":"boolean"},"hasPending":{"type":"boolean"},"pending":{"type":"array"},"message":{"type":"string"}},"required":["ok","hasPending","pending","message"],"additionalProperties":false}""",
+            RiskLevel: "low",
+            Capabilities: ["meeting.hitl", "work.hitl"],
+            Risk: ToolRiskLevel.Low,
+            SupportedModes: ["meeting", "work"])
     ]);
 
     private static readonly IReadOnlyList<ToolDescriptor> Tools = Array.AsReadOnly(
         [.. AdvertisedTools, .. BuiltinToolAliasCatalog.Tools]);
 
-    public string CatalogVersion => "3.2.0";
+    public string CatalogVersion => "3.3.0";
 
     public IReadOnlyList<ToolDescriptor> GetTools() => Tools;
 

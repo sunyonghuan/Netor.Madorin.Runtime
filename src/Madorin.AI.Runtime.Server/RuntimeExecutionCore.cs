@@ -135,6 +135,8 @@ internal sealed class RuntimeExecutionCore(
                     reverseExecutor.RequestApprovalAsync));
         // 并行子 Agent 作业池（无定时）：Run 作用域，Expert 绑定 Worker 后可 create/wait/result 回收。
         await using var agentJobCoordinator = new AgentJobCoordinator();
+        var meetingToolStore = new SqliteMeetingModeToolStore(
+            new SqliteMeetingRepository(toolConnection));
         var executors = new List<IToolExecutor>
         {
             new BuiltinFsToolExecutor(_memoryFiles.WorkspaceMutationLock),
@@ -142,7 +144,8 @@ internal sealed class RuntimeExecutionCore(
             new BuiltinHttpToolExecutor(),
             new BuiltinMemoryToolExecutor(_memoryFiles),
             new BuiltinDelegateAgentToolExecutor(),
-            new BuiltinAgentJobToolExecutor(agentJobCoordinator)
+            new BuiltinAgentJobToolExecutor(agentJobCoordinator),
+            new BuiltinMeetingToolExecutor(meetingToolStore, _workspaceRoot)
         };
         if (skillCatalog is not null)
         {

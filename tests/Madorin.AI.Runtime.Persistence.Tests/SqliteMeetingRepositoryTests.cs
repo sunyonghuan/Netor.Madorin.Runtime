@@ -57,7 +57,8 @@ public sealed class SqliteMeetingRepositoryTests
         string[] expectedTables =
         [
             "meeting_sessions", "meeting_rounds",
-            "meeting_participants", "meeting_invocations"
+            "meeting_participants", "meeting_invocations",
+            "meeting_pending_inputs"
         ];
         foreach (var table in expectedTables)
         {

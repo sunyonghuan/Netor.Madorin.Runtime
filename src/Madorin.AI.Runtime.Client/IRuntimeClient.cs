@@ -81,6 +81,16 @@ public interface IRuntimeClient : IAsyncDisposable
         MeetingHitlResponse response,
         CancellationToken cancellationToken = default);
 
+    /// <summary>Enqueues mid-meeting user interrupt input for the next safe point.</summary>
+    public ValueTask<MeetingInputEnqueueResult> EnqueueMeetingInputAsync(
+        MeetingInputEnqueueRequest request,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Requests a cooperative Meeting pause at the next safe point.</summary>
+    public ValueTask<MeetingPauseResult> PauseMeetingAsync(
+        MeetingPauseRequest request,
+        CancellationToken cancellationToken = default);
+
     public ValueTask<SessionMessagesListResult> ListSessionMessagesAsync(
         SessionMessagesListParameters parameters,
         CancellationToken cancellationToken = default);

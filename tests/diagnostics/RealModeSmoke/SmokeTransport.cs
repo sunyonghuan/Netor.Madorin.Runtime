@@ -68,7 +68,13 @@ internal static partial class Smoke
             {
                 var request = e.Payload.Deserialize(RuntimeJsonContext.Default.MeetingHitlRequest)!;
                 var context = string.Join("\n", (request.Context ?? []).OfType<TextContentBlock>().Select(block => block.Text));
-                var ending = context.Contains("可以结束会议", StringComparison.Ordinal);
+                var isEndConfirmation = string.Equals(
+                    request.Prompt,
+                    "meeting.hitl.question.end-confirmation",
+                    StringComparison.Ordinal);
+                var ending = isEndConfirmation
+                    || context.Contains("可以结束会议", StringComparison.Ordinal)
+                    || context.Contains("Approve to end the meeting", StringComparison.Ordinal);
                 var changed = context.Contains("50元", StringComparison.Ordinal);
                 var response = new MeetingHitlResponse(request.ApprovalRequestId,
                     ending ? MeetingHitlAction.Approve : MeetingHitlAction.Supplement,
