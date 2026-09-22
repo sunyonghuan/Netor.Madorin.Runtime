@@ -200,11 +200,40 @@ madorin run --mode expert --input "分析这个系统的性能瓶颈"
 
 ### Meeting 模式
 
-会议纪要、协作和信息整理，适合多人讨论场景。
+多 Agent 主持会议：主持人（Host）调度发言、工具收口。独立 CLI 默认 `HostDriven` + `FinalOnly`。  
+独立 CLI 当前**未**挂 Meeting HITL 控制台处理器，因此默认 `RequireEndConfirmation=false`；宿主/SDK 可显式打开结束确认并处理 `meeting.hitl.request`。
 
 ```bash
-madorin run --mode meeting --input "总结今天的项目会议内容"
+# 单轮（非交互）
+madorin run --mode meeting --input "讨论跨境推广预算与退款风险"
+
+# 交互 REPL（推荐联调）
+madorin run --mode meeting
 ```
+
+#### Meeting 交互命令与暂停续跑
+
+| 操作 | 说明 |
+| --- | --- |
+| 普通输入 | 新开会或在当前 Session 上续一轮 |
+| `Ctrl+C`（运行中一次） | **协作式暂停**：下一安全点 `Meeting=Paused`，当前 Run=`Interrupted` |
+| `Ctrl+C`（暂停请求后再按） | 硬取消当前 Run |
+| `/pause` | 对当前 Meeting Session 请求协作式暂停 / 查看是否已 Paused |
+| `/interrupt <文本>` | 入队老板插话，下一安全点或续跑 Host 轮吸收 |
+| `/resume <sessionId>` | 切回会话；若 Meeting 已 Paused，校验 `ReadyForContinuation` |
+| 暂停后下一条输入 | 自动 `run.existing_session` Continuation Run（Host 恢复轮优先） |
+
+```text
+开会讨论…
+  → 运行中 Ctrl+C
+  → 提示「会议已在安全点暂停」
+  → /interrupt 预算上限改为 50 元
+  → 输入「请主持人吸收变更后继续」
+  → Continuation Run：Host 先处理插话，再调度参会者
+  → 结束确认 HITL 后归档
+```
+
+配置要求：全局 `~/.madorin/config.json` 至少 2 个可用 Agent（参会者）；可选 `meeting-host` / `summarizer` 角色 id 以拆分 Host 与参会者。
 
 ### Work 模式
 

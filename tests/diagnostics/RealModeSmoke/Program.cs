@@ -47,6 +47,7 @@ internal static partial class Smoke
     private static RuntimeClient _client = null!;
     private static Task _eventReader = Task.CompletedTask;
     private static bool _interruptMeeting;
+    private static bool _pauseMeetingOnParticipant;
 
     public static async Task RunAsync(string output, string scenario)
     {
@@ -98,6 +99,7 @@ internal static partial class Smoke
             if (scenario == "work-revision") { await InterruptedWorkAsync(WorkSelection(), true); }
             if (scenario == "meeting-interrupt") { _interruptMeeting = true; await MeetingAsync(true, true); }
             if (scenario == "meeting-controlled") { await MeetingAsync(true, false, true); }
+            if (scenario == "meeting-pause-resume") { await MeetingPauseResumeAsync(); }
             if (scenario == "work-confirm") { await WorkConfirmAsync(); }
         }
         finally

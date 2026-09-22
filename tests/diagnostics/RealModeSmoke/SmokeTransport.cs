@@ -85,6 +85,31 @@ internal static partial class Smoke
                 Save(e.RunId + ".hitl-response.json", response);
                 await _client.SubmitMeetingHitlResponseAsync(response, ct);
             }
+            if (_pauseMeetingOnParticipant && e.MessageType == "invocation.started"
+                && e.Payload.TryGetProperty("snapshot", out var pauseSnapshot)
+                && pauseSnapshot.TryGetProperty("role", out var pauseRole)
+                && string.Equals(pauseRole.GetString(), "Participant", StringComparison.Ordinal))
+            {
+                _pauseMeetingOnParticipant = false;
+                if (SessionIds.TryGetValue(e.RunId, out var pauseSessionId))
+                {
+                    try
+                    {
+                        var pauseResult = await _client.PauseMeetingAsync(
+                            new MeetingPauseRequest(
+                                pauseSessionId,
+                                Guid.NewGuid().ToString("N"),
+                                "smoke: pause after first participant start"),
+                            ct);
+                        Save("MP-pause-response.json", new { pauseResult, runId = e.RunId, pauseSessionId });
+                    }
+                    catch (Exception ex)
+                    {
+                        Save("MP-pause-response.json", new { type = ex.GetType().Name, ex.Message, runId = e.RunId });
+                    }
+                }
+            }
+
             if (_interruptMeeting && e.MessageType == "invocation.started"
                 && e.Payload.TryGetProperty("snapshot", out var snapshot)
                 && snapshot.TryGetProperty("role", out var role) && role.GetString() == "Participant")

@@ -107,6 +107,96 @@ internal static partial class Smoke
             "确认新计划，继续执行剩余步骤：退款150+100=250元，净额1750元，写interrupt-revised.md并读回验收。保留第一步成果，不重复执行已完成步骤，最后总结。", rediscussion);
     }
 
+    private static async Task MeetingPauseResumeAsync()
+    {
+        var host = new AgentRef(
+            "host",
+            "smoke-v1",
+            """
+            你是会议主持人。调度阶段只输出裸JSON，可用participantId仅finance与risk。
+            示例：{"conclude":false,"participantId":"finance"}。续跑后先吸收老板插话再点名一次，然后{"conclude":true,"participantId":null}。
+            禁止调用工具。
+            """,
+            _provider,
+            _model,
+            AllowedToolIds: []);
+        var finance = Agent("finance", "你是财务。第一次发言调用mcli_fs_read读sales.csv，用真实数字简短建议，不超过80字。");
+        var risk = Agent("risk", "你是风控。第一次发言调用mcli_fs_read读refunds.csv，简短评价风险，不超过80字。");
+        var options = new MeetingModeOptions(
+            [
+                new MeetingParticipant("finance", finance, "财务", JoinOrder: 0),
+                new MeetingParticipant("risk", risk, "风控", JoinOrder: 1)
+            ],
+            hostAgent: host,
+            selectorPolicy: new MeetingSelectorPolicyOptions(MeetingSelectorPolicy.HostDriven, MaxRounds: 4),
+            policy: new MeetingPolicy(
+                SummaryMode: MeetingSummaryMode.FinalOnly,
+                Summarizer: host,
+                HitlEnabled: false,
+                RequireEndConfirmation: true,
+                InvocationTimeoutSeconds: 120,
+                MaxRetriesPerInvocation: 0,
+                HostFailure: MeetingHostFailurePolicy.Fail,
+                ParticipantFailure: MeetingParticipantFailurePolicy.Skip));
+        var selection = Select(RuntimeMode.Meeting, options);
+
+        // Arm pause on first participant invocation of the first run.
+        _pauseMeetingOnParticipant = true;
+        var session = await TurnAsync(
+            "MP1-running-then-pause",
+            selection,
+            "开会：依据sales.csv与refunds.csv讨论是否推广。主持人点名财务与风控各至少一次。");
+        if (session is null)
+        {
+            Save("MP1-no-session.json", new { error = "pause scenario did not produce a session id" });
+            return;
+        }
+
+        MeetingResumeResult? pauseStatus = null;
+        try
+        {
+            pauseStatus = await _client.ResumeMeetingAsync(
+                new MeetingResumeRequest(session, Guid.NewGuid().ToString("N")));
+            Save("MP2-resume-check.json", pauseStatus);
+        }
+        catch (Exception ex)
+        {
+            Save("MP2-resume-check.json", new { type = ex.GetType().Name, ex.Message });
+        }
+
+        if (pauseStatus is null
+            || !string.Equals(pauseStatus.Status, "ReadyForContinuation", StringComparison.Ordinal))
+        {
+            // Meeting may still be Running if pause raced; force pause then re-check.
+            try
+            {
+                await _client.PauseMeetingAsync(new MeetingPauseRequest(
+                    session, Guid.NewGuid().ToString("N"), "smoke force pause"));
+            }
+            catch (Exception ex)
+            {
+                Save("MP2-force-pause.json", new { type = ex.GetType().Name, ex.Message });
+            }
+
+            // Wait for the active run to park at a safe point.
+            await Task.Delay(3000);
+            pauseStatus = await _client.ResumeMeetingAsync(
+                new MeetingResumeRequest(session, Guid.NewGuid().ToString("N")));
+            Save("MP2-resume-check-retry.json", pauseStatus);
+        }
+
+        await _client.EnqueueMeetingInputAsync(new MeetingInputEnqueueRequest(
+            session,
+            Guid.NewGuid().ToString("N"),
+            [new TextContentBlock("老板插话：预算上限50元，退款按250元情景讨论后再结束。")]));
+
+        await TurnAsync(
+            "MP3-continuation",
+            selection,
+            "请主持人吸收插话后继续调度，充分后结束讨论并生成总结；结束确认时我再批准。",
+            session);
+    }
+
     private static async Task MeetingAsync(bool strict = false, bool interrupt = false, bool controlled = false)
     {
         var host = Agent("host", """

@@ -250,8 +250,46 @@ public interface IRuntimeClient : IAsyncDisposable
     ValueTask UpsertProvidersAsync(
         IReadOnlyList<HostProviderConfig> providers,
         CancellationToken cancellationToken = default);
+
+    // Meeting 运行中控制（插话 / 暂停 / 续跑校验）
+    ValueTask<MeetingInputEnqueueResult> EnqueueMeetingInputAsync(
+        MeetingInputEnqueueRequest request,
+        CancellationToken cancellationToken = default);
+    ValueTask<MeetingPauseResult> PauseMeetingAsync(
+        MeetingPauseRequest request,
+        CancellationToken cancellationToken = default);
+    ValueTask<MeetingResumeResult> ResumeMeetingAsync(
+        MeetingResumeRequest request,
+        CancellationToken cancellationToken = default);
 }
 ```
+
+### Meeting 暂停与续跑（宿主）
+
+```csharp
+// 1) 运行中协作暂停（下一安全点生效）
+await client.PauseMeetingAsync(new MeetingPauseRequest(
+    sessionId, requestId: Guid.NewGuid().ToString("N"), reason: "user break"));
+
+// 2) 可选：暂停后仍可入队插话
+await client.EnqueueMeetingInputAsync(new MeetingInputEnqueueRequest(
+    sessionId,
+    requestId: Guid.NewGuid().ToString("N"),
+    content: [new TextContentBlock("预算上限改为 50 元")]));
+
+// 3) 校验可续（不重开 Interrupted 的旧 Run）
+var ready = await client.ResumeMeetingAsync(new MeetingResumeRequest(
+    sessionId, requestId: Guid.NewGuid().ToString("N")));
+// ready.Status == "ReadyForContinuation"
+
+// 4) Continuation Run
+var continuationRunId = await client.StartExistingSessionRunAsync(new ExistingSessionRunRequest(
+    sessionId,
+    RunIdempotencyKey: Guid.NewGuid().ToString("N"),
+    InputOverride: [new TextContentBlock("请主持人吸收变更后继续")]));
+```
+
+约定：旧 Run 保持 `Interrupted` 终态；续跑创建新 Run，编排器 `Paused→Running` 并先走 Host 恢复轮。
 
 ## 连接选项
 

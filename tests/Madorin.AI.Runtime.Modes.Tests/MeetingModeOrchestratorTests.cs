@@ -749,12 +749,13 @@ public sealed class MeetingModeOrchestratorTests
         CollectionAssert.AreEqual(
             ExpectedHostConcludedSummaryAgentIds,
             result.Provider.InvokedAgentIds.ToArray());
-        Assert.HasCount(2, result.History);
+        Assert.IsGreaterThanOrEqualTo(2, result.History.Length);
         Assert.AreEqual(RuntimeProviderRoles.User, result.History[0].Role);
-        Assert.IsNotNull(result.History[1].SummaryMetadata);
+        var summaryRecord = result.History.Last(static item => item.SummaryMetadata is not null);
+        Assert.IsNotNull(summaryRecord.SummaryMetadata);
         Assert.AreEqual(
-            1L,
-            result.History[1].SummaryMetadata!.Value
+            result.History.Where(static item => item.SummaryMetadata is null).Max(static item => item.Sequence),
+            summaryRecord.SummaryMetadata!.Value
                 .GetProperty("summarizesThroughSeq")
                 .GetInt64());
         Assert.IsNotNull(result.Snapshot.LatestSummary);
@@ -970,7 +971,7 @@ public sealed class MeetingModeOrchestratorTests
     }
 
     [TestMethod]
-    public async Task RunAsync_HostFailurePause_PersistsPausedMeetingWithoutTerminalRunEvent()
+    public async Task RunAsync_HostFailurePause_PersistsPausedMeetingAndEmitsInterruptedTerminal()
     {
         var provider = new FakeProviderAdapter
         {
@@ -991,14 +992,16 @@ public sealed class MeetingModeOrchestratorTests
 
         var result = await RunMeetingAsync(options, provider);
 
-        Assert.AreEqual(MessageTypes.InvocationFailed, result.Events[^1].MessageType);
+        Assert.AreEqual(MessageTypes.RunCancelled, result.Events[^1].MessageType);
+        Assert.IsTrue(result.Events.Any(static envelope =>
+            envelope.MessageType == MessageTypes.InvocationFailed));
         Assert.IsFalse(result.Events.Any(static envelope =>
             envelope.MessageType is MessageTypes.RunFailed or MessageTypes.RunCompleted));
         Assert.AreEqual("Paused", result.Snapshot.Session.Status);
         Assert.IsNotNull(result.Snapshot.NextScheduledInvocation);
         Assert.AreEqual("Interrupted", result.Snapshot.NextScheduledInvocation.Status);
         Assert.AreEqual("host", result.Snapshot.NextScheduledInvocation.Role);
-        Assert.AreEqual(RunStatus.WaitingForApproval, result.Run.Status);
+        Assert.AreEqual(RunStatus.Interrupted, result.Run.Status);
     }
 
     [TestMethod]

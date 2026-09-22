@@ -137,14 +137,23 @@ Meeting 支持两类独立的 HITL 门禁，均由 orchestrator 直接消费，�
 
 `HitlEnabled` 与 `RequireEndConfirmation` 可独立开关，也可同时开启（先首轮门禁，后结束确认）。缺少 `hitlHandler` 时对应门禁会在触发点失败。结束确认上的 `Supplement` 会持久化补充并**再开一轮讨论段**，然后再次征询结束。
 
-### 7.3 运行中插话与暂停
+### 7.3 运行中插话、暂停与续跑
 
 | RPC | 说明 |
 | --- | --- |
 | `meeting.input.enqueue` | 入队用户插话（FIFO，`requestId` 幂等）；编排器在轮次安全点写入 CanonicalHistory 并消费 |
-| `meeting.pause` | 请求协作式暂停；下一安全点将 Meeting 置 `Paused`、Run 置 `Interrupted` |
+| `meeting.pause` | 请求协作式暂停；下一安全点将 Meeting 置 `Paused`、Run 置 `Interrupted`（终态） |
+| `meeting.resume` | 校验 Meeting 已为 `Paused` 并返回 `ReadyForContinuation` + 快照；**不**重开旧 Run |
 
-Client：`EnqueueMeetingInputAsync` / `PauseMeetingAsync`。
+续跑协议：
+
+1. 宿主调用 `meeting.pause` → 编排器在轮次边界安全点停靠：`Meeting=Paused`，当前 Run=`Interrupted`。
+2. 可选继续 `meeting.input.enqueue` 写入插话（Paused 也可入队）。
+3. 宿主调用 `meeting.resume` 确认可续。
+4. 宿主用 **`run.existing_session`** 创建 **Continuation Run**（新 `runIdempotencyKey` + `InputOverride` 续跑说明）。
+5. 编排器 `ClaimPausedMeetingForContinuation`：`Paused→Running`、绑定新 `run_id`；先 Host 恢复轮吸收插话，再按策略调度。
+
+Client：`EnqueueMeetingInputAsync` / `PauseMeetingAsync` / `ResumeMeetingAsync`。
 
 ### 7.4 会议专用工具
 
@@ -153,8 +162,12 @@ Client：`EnqueueMeetingInputAsync` / `PauseMeetingAsync`。
 | `mcli_meeting_output_summary` | Host | 落盘会议总结并登记 `final_summary_message_id` |
 | `mcli_meeting_confirm_end` | Host | 有总结后将 `end_confirmed` 置位，收尾可跳过结束确认 HITL |
 | `mcli_meeting_list_attachments` | Host/参会者 | 列出会议附件元数据 |
-| `mcli_ask_user` | Host | 将问题入队为 pending input |
-| `mcli_check_pending_user_input` | Host | Peek 未消费插话 |
+| `mcli_ask_user` | Host | 向用户提问并**阻塞当前 Host invocation**，经 `meeting.hitl.request`（`ApprovalRequestId` 前缀 `ask-user:`）等待回复；**不**写入插话队列 |
+| `mcli_check_pending_user_input` | Host | Peek 未消费的用户插话（仅 `meeting.input.enqueue`） |
+
+工具目录由编排器按 `FilterByMode("meeting", role)` 装配：Host=`meeting-host` 全开会议+共享工具；参会者仅 `list_attachments` + 通用工具。HostDriven 下 Host 可自然语言发言并调用上述工具；点名可通过文末决策 JSON / 文内 `participantId` 解析。`mcli_meeting_output_summary` 同时落盘 `final-summary.md` 与 CanonicalHistory（带 `SummaryMetadata.kind=meeting-host-final-summary`）。`mcli_meeting_confirm_end` 成功后 `end_confirmed=1`，收尾跳过 `RequireEndConfirmation` HITL。
+
+结束确认 `Supplement` 后续讨论：`HostDriven` / `SelectorDriven` 继续走决策角色（Host/Selector）再点名参会者；`RoundRobin` 仍按参会者顺序。独立 CLI 默认装配：`SelectorPolicy=HostDriven`、`SummaryMode=FinalOnly`、`RequireEndConfirmation=true`，并尽量把 `meeting-host` / `summarizer` 从 `Participants[]` 中拆出。
 
 独立 CLI 模式下，HITL 请求阻塞等待用户在终端输入响应。
 
@@ -278,14 +291,22 @@ Running / Paused ─→ Failed / Cancelled
 
 ## 11. 恢复
 
-`MeetingResumeState` 持久化当前轮次状态，包括：
+`MeetingResumeState`（`session.resume` / `meeting.resume`）描述当前轮次状态，包括：
 
 - 当前轮次编号和已完成的调度记录
 - 各参与者的 `ParticipantStatus`
 - 未完成的 HITL 请求
 - 摘要生成进度
+- 会议是否处于 `Paused`
 
-断线重连后，Runtime 从 `MeetingResumeState` 恢复会议。处于 `Running` 状态的调度在重连后重新执行，已 `Completed` 的调度不重复。
+两类恢复路径：
+
+| 路径 | 触发 | 行为 |
+| --- | --- | --- |
+| 崩溃 / 进程恢复 | Runtime 重启、可恢复 Invocation | `ResumeRecoverableInvocation` / reconcile；重放未完成调度 |
+| 用户协作暂停续跑 | `meeting.pause` → `meeting.resume` → `run.existing_session` | 旧 Run 保持 `Interrupted`；新 Continuation Run claim `Paused→Running`，Host 先吸收插话再调度 |
+
+用户暂停续跑不得把 `Interrupted` Run 改回 `Running`。
 
 ---
 
@@ -296,3 +317,6 @@ Running / Paused ─→ Failed / Cancelled
 | 2026-09-07 | §3.1 SkillIds 过滤；§3.2 宿主 Skills + Meeting live catalog / AvailableTools 刷新 |
 | 2026-09-22 | §7 拆分首轮门禁与 `RequireEndConfirmation` 结束确认门禁 |
 | 2026-09-22 | §7.3 插话/暂停 RPC；§7.4 会议专用工具；结束确认 Supplement 续讨论 |
+| 2026-09-22 | P0：Host/参会者工具目录装配；HostDriven 自然语言+工具；ask_user 真挂起与插话队列分离；confirm_end 跳过结束 HITL |
+| 2026-09-22 | P0 续：CLI 默认 HostDriven/FinalOnly/结束确认；Supplement 续讨论回决策角色；output_summary 写 CanonicalHistory |
+| 2026-09-22 | Pause/Resume：`meeting.resume`、ClaimPaused 续跑、Host 恢复轮 |

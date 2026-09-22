@@ -4,6 +4,7 @@
     <ProjectReference Include="..\Madorin.AI.Runtime.Core\Madorin.AI.Runtime.Core.csproj" />
     <ProjectReference Include="..\Madorin.AI.Runtime.Contracts\Madorin.AI.Runtime.Contracts.csproj" />
     <ProjectReference Include="..\Madorin.AI.Runtime.Persistence.Abstractions\Madorin.AI.Runtime.Persistence.Abstractions.csproj" />
+    <ProjectReference Include="..\Madorin.AI.Runtime.Persistence.Files\Madorin.AI.Runtime.Persistence.Files.csproj" />
     <ProjectReference Include="..\Madorin.AI.Runtime.Tools.Abstractions\Madorin.AI.Runtime.Tools.Abstractions.csproj" />
   </ItemGroup>
 

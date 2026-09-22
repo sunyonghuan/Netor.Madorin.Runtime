@@ -1164,6 +1164,20 @@ public sealed class RuntimeClient : IRuntimeClient
             cancellationToken).ConfigureAwait(false);
     }
 
+    public async ValueTask<MeetingResumeResult> ResumeMeetingAsync(
+        MeetingResumeRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.SessionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.RequestId);
+        return await SendControlRequestAsync(
+            MessageTypes.MeetingResume,
+            request,
+            RuntimeJsonContext.Default.MeetingResumeResult,
+            cancellationToken).ConfigureAwait(false);
+    }
+
     public async ValueTask<SessionMessagesListResult> ListSessionMessagesAsync(
         SessionMessagesListParameters parameters,
         CancellationToken cancellationToken = default)

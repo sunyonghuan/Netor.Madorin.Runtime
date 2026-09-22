@@ -1458,6 +1458,91 @@ public sealed class RuntimeServer : IAsyncDisposable
                     RuntimeJsonContext.Default.MeetingPauseResult));
         }
 
+        if (string.Equals(request.Method, MessageTypes.MeetingResume, StringComparison.Ordinal))
+        {
+            var resume = request.Params is { } resumeParams
+                ? JsonSerializer.Deserialize(
+                    resumeParams,
+                    RuntimeJsonContext.Default.MeetingResumeRequest)
+                : null;
+            if (resume is null
+                || string.IsNullOrWhiteSpace(resume.SessionId)
+                || string.IsNullOrWhiteSpace(resume.RequestId))
+            {
+                return Error(request.Id, -32602, "The meeting.resume parameters are invalid.");
+            }
+
+            var meetingSnapshot = await meetingRepository.GetMeetingSnapshotAsync(resume.SessionId, ct)
+                .ConfigureAwait(false);
+            if (meetingSnapshot is null)
+            {
+                return Error(request.Id, -32004, $"Meeting session '{resume.SessionId}' was not found.");
+            }
+
+            if (!string.Equals(meetingSnapshot.Session.Status, "Paused", StringComparison.Ordinal))
+            {
+                return Error(
+                    request.Id,
+                    -32006,
+                    $"Meeting session '{resume.SessionId}' is '{meetingSnapshot.Session.Status}' and cannot be resumed. "
+                    + "Only Paused meetings accept meeting.resume.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(resume.PreviousRunId)
+                && !string.Equals(
+                    meetingSnapshot.Session.RunId,
+                    resume.PreviousRunId,
+                    StringComparison.Ordinal))
+            {
+                return Error(
+                    request.Id,
+                    -32006,
+                    $"PreviousRunId '{resume.PreviousRunId}' does not match the paused meeting run "
+                    + $"'{meetingSnapshot.Session.RunId}'.");
+            }
+
+            var sessionSnapshot = await repository.GetSessionSnapshotAsync(resume.SessionId, ct)
+                .ConfigureAwait(false);
+            if (sessionSnapshot is null)
+            {
+                return Error(request.Id, -32004, $"Session '{resume.SessionId}' was not found.");
+            }
+
+            NextTurnSelection? selection = null;
+            _ = _sessionSelections.TryGetValue(resume.SessionId, out selection);
+            var diagnostics = new List<string>();
+            var resumeState = BuildMeetingResumeState(
+                meetingSnapshot,
+                sessionSnapshot,
+                selection,
+                diagnostics);
+            var nextRound = checked(meetingSnapshot.Session.CurrentRound + 1);
+            var resumeResult = new MeetingResumeResult(
+                resume.SessionId,
+                resume.RequestId,
+                Accepted: true,
+                Status: "ReadyForContinuation",
+                State: resumeState,
+                NextRoundIndex: nextRound,
+                Message: "Meeting is paused and ready. Start a continuation Run with run.existing_session "
+                    + "(Interrupted is terminal; do not reopen the paused Run). "
+                    + "The orchestrator claims Paused→Running and begins with a Host recovery turn.");
+            if (diagnostics.Count > 0)
+            {
+                resumeResult = resumeResult with
+                {
+                    Message = resumeResult.Message + " Diagnostics: " + string.Join("; ", diagnostics)
+                };
+            }
+
+            return new JsonRpcResponse(
+                "2.0",
+                request.Id,
+                JsonSerializer.SerializeToElement(
+                    resumeResult,
+                    RuntimeJsonContext.Default.MeetingResumeResult));
+        }
+
         if (string.Equals(request.Method, MessageTypes.RunCancel, StringComparison.Ordinal))
         {
             var parameters = request.Params is { } cancelParameters

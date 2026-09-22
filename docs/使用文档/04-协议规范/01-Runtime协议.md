@@ -426,6 +426,42 @@ Runtime 收到确认后，可以安全地清理已确认的事件缓存。
 }
 ```
 
+### Meeting 插话 / 暂停 / 续跑校验
+
+| 方法 | 作用 |
+| --- | --- |
+| `meeting.input.enqueue` | 入队用户插话（FIFO，`requestId` 幂等） |
+| `meeting.pause` | 请求协作式暂停；下一安全点 `Meeting=Paused`，当前 Run=`Interrupted` |
+| `meeting.resume` | 校验已 Paused，返回 `ReadyForContinuation`；**不**启动 Run |
+| `run.existing_session` | 创建 Continuation Run（新 idempotency key） |
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 81,
+  "method": "meeting.pause",
+  "params": {
+    "sessionId": "session-123",
+    "requestId": "pause-1",
+    "reason": "user break"
+  }
+}
+```
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 82,
+  "method": "meeting.resume",
+  "params": {
+    "sessionId": "session-123",
+    "requestId": "resume-1"
+  }
+}
+```
+
+`meeting.resume` 成功示例：`status=ReadyForContinuation`，`nextRoundIndex` 为下一讨论轮。随后宿主必须调用 `run.existing_session` 真正续跑。
+
 ## Provider 配置
 
 ### 注入 Provider

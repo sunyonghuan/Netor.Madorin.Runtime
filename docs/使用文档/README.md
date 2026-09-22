@@ -44,11 +44,14 @@
 - 本地开发和调试
 
 ```bash
-# 交互式运行
+# 交互式运行（默认 Expert）
 madorin run
 
+# Meeting 模式交互：Ctrl+C 协作暂停，/interrupt 插话，暂停后下一条输入续开
+madorin run --mode meeting
+
 # 执行单次任务
-madorin run --provider OpenAI --model gpt-5 --input "你好"
+madorin run --provider deepseek --model deepseek-v4-pro --mode meeting --input "讨论预算与风险"
 
 # 启动常驻服务
 madorin serve --instance main

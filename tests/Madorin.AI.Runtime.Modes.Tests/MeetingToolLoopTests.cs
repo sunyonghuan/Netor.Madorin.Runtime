@@ -7,6 +7,7 @@ using Madorin.AI.Runtime.Persistence.Sqlite;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Services.Tools;
 using Madorin.AI.Runtime.Tools.Abstractions;
+using Madorin.AI.Runtime.Tools.Builtin;
 
 namespace Madorin.AI.Runtime.Modes.Tests;
 
@@ -219,6 +220,250 @@ public sealed class MeetingToolLoopTests
     }
 
     [TestMethod]
+    public async Task RunAsync_HostDriven_WithCatalog_ExposesMeetingHostTools()
+    {
+        var dataDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"madorin-meeting-host-tools-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dataDirectory);
+        try
+        {
+            var ct = TestContext.CancellationToken;
+            await using var connection = await DataDirectoryInitializer.InitializeAsync(
+                dataDirectory,
+                ct);
+            var sessionRepository = new SqliteSessionRepository(connection);
+            var meetingRepository = new SqliteMeetingRepository(connection);
+            var (sessionId, runId) = await CreateRunningRunAsync(sessionRepository);
+            using var outbox = new SqliteEventOutbox(connection);
+            using var toolState = new SqliteToolIntentRepository(connection);
+            var registry = new BuiltinToolRegistry();
+            var validator = new JsonSchemaToolValidator();
+            var catalogStore = new ToolCatalogStore(registry, validator);
+            var catalog = catalogStore.CaptureSnapshot();
+            var authorization = new ToolAuthorizationService(
+                toolState,
+                RuntimeToolPolicy.CreateRestricted(dataDirectory));
+            using var gateway = new ToolGateway(
+                catalogStore,
+                validator,
+                authorization,
+                [new BuiltinMeetingToolExecutor(
+                    new SqliteMeetingModeToolStore(meetingRepository),
+                    dataDirectory)],
+                toolState,
+                outbox);
+            string[]? hostTools = null;
+            var provider = new CapturingHostToolProvider(tools => hostTools = tools);
+            var orchestrator = new MeetingModeOrchestrator(
+                _ => provider,
+                new ConversationStore(dataDirectory),
+                sessionRepository,
+                meetingRepository,
+                outbox,
+                toolGateway: gateway,
+                toolCatalogSnapshot: catalog);
+
+            await foreach (var _ in orchestrator.RunAsync(
+                runId,
+                sessionId,
+                CreateHostRequest(maxRounds: 1),
+                "runtime-1",
+                ct))
+            {
+            }
+
+            Assert.IsNotNull(hostTools);
+            CollectionAssert.Contains(hostTools, BuiltinToolRegistry.MeetingOutputSummaryToolId);
+            CollectionAssert.Contains(hostTools, BuiltinToolRegistry.MeetingConfirmEndToolId);
+            CollectionAssert.Contains(hostTools, BuiltinToolRegistry.AskUserToolId);
+            CollectionAssert.Contains(hostTools, BuiltinToolRegistry.CheckPendingUserInputToolId);
+            CollectionAssert.Contains(hostTools, BuiltinToolRegistry.MeetingListAttachmentsToolId);
+            CollectionAssert.DoesNotContain(hostTools, BuiltinToolRegistry.DelegateToAgentToolId);
+        }
+        finally
+        {
+            if (Directory.Exists(dataDirectory))
+            {
+                Directory.Delete(dataDirectory, recursive: true);
+            }
+        }
+    }
+
+    [TestMethod]
+    public async Task RunAsync_HostOutputSummary_WritesCanonicalHistoryAndRegistersMessage()
+    {
+        var dataDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"madorin-meeting-summary-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dataDirectory);
+        try
+        {
+            var ct = TestContext.CancellationToken;
+            await using var connection = await DataDirectoryInitializer.InitializeAsync(
+                dataDirectory,
+                ct);
+            var sessionRepository = new SqliteSessionRepository(connection);
+            var meetingRepository = new SqliteMeetingRepository(connection);
+            var (sessionId, runId) = await CreateRunningRunAsync(sessionRepository);
+            using var outbox = new SqliteEventOutbox(connection);
+            using var toolState = new SqliteToolIntentRepository(connection);
+            var store = new ConversationStore(dataDirectory);
+            var registry = new BuiltinToolRegistry();
+            var validator = new JsonSchemaToolValidator();
+            var catalogStore = new ToolCatalogStore(registry, validator);
+            var catalog = catalogStore.CaptureSnapshot();
+            var authorization = new ToolAuthorizationService(
+                toolState,
+                RuntimeToolPolicy.CreateRestricted(dataDirectory));
+            using var gateway = new ToolGateway(
+                catalogStore,
+                validator,
+                authorization,
+                [new BuiltinMeetingToolExecutor(
+                    new SqliteMeetingModeToolStore(meetingRepository, store),
+                    dataDirectory)],
+                toolState,
+                outbox);
+            var provider = new HostOutputSummaryThenConcludeProvider();
+            var orchestrator = new MeetingModeOrchestrator(
+                _ => provider,
+                store,
+                sessionRepository,
+                meetingRepository,
+                outbox,
+                toolGateway: gateway,
+                toolCatalogSnapshot: catalog);
+
+            await foreach (var _ in orchestrator.RunAsync(
+                runId,
+                sessionId,
+                CreateHostRequest(maxRounds: 1),
+                "runtime-1",
+                ct))
+            {
+            }
+
+            var history = await store.ReadAllAsync(sessionId, ct);
+            Assert.IsTrue(history.Any(static record =>
+                record.SummaryMetadata is not null
+                && record.MessageId.StartsWith("meeting-tool-summary:", StringComparison.Ordinal)));
+            var snapshot = await meetingRepository.GetMeetingSnapshotAsync(sessionId, ct);
+            Assert.IsNotNull(snapshot);
+            Assert.IsFalse(string.IsNullOrWhiteSpace(snapshot.Session.FinalSummaryMessageId));
+            Assert.IsTrue(snapshot.Session.EndConfirmed);
+            Assert.AreEqual(RunStatus.Completed, await sessionRepository.GetRunStatusAsync(runId, ct));
+        }
+        finally
+        {
+            if (Directory.Exists(dataDirectory))
+            {
+                Directory.Delete(dataDirectory, recursive: true);
+            }
+        }
+    }
+
+    [TestMethod]
+    public async Task RunAsync_HostAskUser_BlocksOnHitlAndContinuesWithAnswer()
+    {
+        var dataDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"madorin-meeting-ask-user-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dataDirectory);
+        try
+        {
+            var ct = TestContext.CancellationToken;
+            await using var connection = await DataDirectoryInitializer.InitializeAsync(
+                dataDirectory,
+                ct);
+            var sessionRepository = new SqliteSessionRepository(connection);
+            var meetingRepository = new SqliteMeetingRepository(connection);
+            var (sessionId, runId) = await CreateRunningRunAsync(sessionRepository);
+            using var outbox = new SqliteEventOutbox(connection);
+            using var toolState = new SqliteToolIntentRepository(connection);
+            var registry = new BuiltinToolRegistry();
+            var validator = new JsonSchemaToolValidator();
+            var catalogStore = new ToolCatalogStore(registry, validator);
+            var catalog = catalogStore.CaptureSnapshot();
+            var authorization = new ToolAuthorizationService(
+                toolState,
+                RuntimeToolPolicy.CreateRestricted(dataDirectory));
+            using var gateway = new ToolGateway(
+                catalogStore,
+                validator,
+                authorization,
+                [new BuiltinMeetingToolExecutor(
+                    new SqliteMeetingModeToolStore(meetingRepository),
+                    dataDirectory)],
+                toolState,
+                outbox);
+            Task<ApprovalResponse> AutoGrantAsync(ApprovalRequest approval, CancellationToken grantCt)
+            {
+                grantCt.ThrowIfCancellationRequested();
+                return Task.FromResult(new ApprovalResponse(
+                    approval.CorrelationId,
+                    approval.ApprovalRequestId,
+                    ToolAuthorizationDecision.Granted,
+                    CreateGrant(approval, dataDirectory)));
+            }
+
+            var consentCoordinator = new ToolConsentCoordinator(
+                gateway,
+                authorization,
+                catalog,
+                approvalHandler: AutoGrantAsync,
+                toolStateStore: toolState);
+            MeetingHitlRequest? capturedAsk = null;
+            var provider = new HostAskUserThenSelectProvider();
+            var orchestrator = new MeetingModeOrchestrator(
+                _ => provider,
+                new ConversationStore(dataDirectory),
+                sessionRepository,
+                meetingRepository,
+                outbox,
+                hitlHandler: (request, hitlCt) =>
+                {
+                    hitlCt.ThrowIfCancellationRequested();
+                    capturedAsk = request;
+                    return Task.FromResult(new MeetingHitlResponse(
+                        request.ApprovalRequestId,
+                        MeetingHitlAction.Supplement,
+                        Supplement: "Yes, please end after summary."));
+                },
+                toolGateway: gateway,
+                toolCatalogSnapshot: catalog,
+                toolConsentCoordinator: consentCoordinator);
+
+            var events = new List<RuntimeEventEnvelope>();
+            await foreach (var envelope in orchestrator.RunAsync(
+                runId,
+                sessionId,
+                CreateHostRequest(maxRounds: 1),
+                "runtime-1",
+                ct))
+            {
+                events.Add(envelope);
+            }
+
+            Assert.IsNotNull(capturedAsk);
+            Assert.AreEqual("meeting.hitl.question.ask-user", capturedAsk.Prompt);
+            StringAssert.Contains(
+                ((TextContentBlock)capturedAsk.Context![0]).Text,
+                "Can we end?");
+            Assert.AreEqual(RunStatus.Completed, await sessionRepository.GetRunStatusAsync(runId, ct));
+            Assert.IsTrue(events.Any(static item => item.MessageType == MessageTypes.RunCompleted));
+            Assert.IsTrue(provider.SawUserAnswer);
+        }
+        finally
+        {
+            if (Directory.Exists(dataDirectory))
+            {
+                Directory.Delete(dataDirectory, recursive: true);
+            }
+        }
+    }
+
+    [TestMethod]
     public async Task RunAsync_HostConcludes_DoesNotScheduleParticipant()
     {
         var result = await ExecuteHostMeetingAsync(conclude: true);
@@ -229,6 +474,137 @@ public sealed class MeetingToolLoopTests
         Assert.AreEqual(1, result.CurrentRound);
         Assert.HasCount(1, result.Events.Where(static item =>
             item.MessageType == MessageTypes.RunCompleted));
+    }
+
+    [TestMethod]
+    public async Task RunAsync_PauseAtSafePoint_ThenContinuationRun_ResumesFromHost()
+    {
+        var dataDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"madorin-meeting-pause-resume-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dataDirectory);
+        try
+        {
+            var ct = TestContext.CancellationToken;
+            await using var connection = await DataDirectoryInitializer.InitializeAsync(
+                dataDirectory,
+                ct);
+            var sessionRepository = new SqliteSessionRepository(connection);
+            var meetingRepository = new SqliteMeetingRepository(connection);
+            var (sessionId, runId) = await CreateRunningRunAsync(sessionRepository);
+            using var outbox = new SqliteEventOutbox(connection);
+            var store = new ConversationStore(dataDirectory);
+
+            // Seed a meeting session in Running, then request cooperative pause.
+            await meetingRepository.CreateMeetingSessionAsync(
+                sessionId,
+                runId,
+                """{"type":"meeting"}""",
+                "policy-hash",
+                [
+                    new MeetingParticipantInput("p-a", "agent-a", null, "A", 0),
+                    new MeetingParticipantInput("p-b", "agent-b", null, "B", 1)
+                ],
+                selectionVersion: 1,
+                ct);
+            await meetingRepository.RequestPauseAsync(
+                sessionId,
+                "pause-1",
+                "user requested pause",
+                ct);
+            var seeded = await meetingRepository.GetMeetingSnapshotAsync(sessionId, ct);
+            Assert.IsNotNull(seeded);
+            Assert.AreEqual("Running", seeded.Session.Status);
+            Assert.IsTrue(seeded.Session.PauseRequested);
+
+            var pauseProvider = new HostDecisionProvider(conclude: false);
+            var pauseOrchestrator = new MeetingModeOrchestrator(
+                _ => pauseProvider,
+                store,
+                sessionRepository,
+                meetingRepository,
+                outbox);
+            var pauseEvents = new List<RuntimeEventEnvelope>();
+            await foreach (var envelope in pauseOrchestrator.RunAsync(
+                runId,
+                sessionId,
+                CreateHostRequest(maxRounds: 3),
+                "runtime-pause",
+                ct))
+            {
+                pauseEvents.Add(envelope);
+            }
+
+            Assert.AreEqual(RunStatus.Interrupted, await sessionRepository.GetRunStatusAsync(runId, ct));
+            var pausedSnapshot = await meetingRepository.GetMeetingSnapshotAsync(sessionId, ct);
+            Assert.IsNotNull(pausedSnapshot);
+            Assert.AreEqual("Paused", pausedSnapshot.Session.Status);
+            Assert.IsFalse(pausedSnapshot.Session.PauseRequested);
+            Assert.IsTrue(pauseEvents.Any(static item =>
+                item.MessageType == MessageTypes.RunCancelled));
+
+            // Continuation run.
+            var continuationRunId = await sessionRepository.CreateRunAsync(
+                sessionId,
+                "meeting-continuation-run",
+                TimeSpan.FromDays(1),
+                ct);
+            await sessionRepository.TransitionRunStatusAsync(
+                continuationRunId,
+                RunStatus.Accepted,
+                RunStatus.Preparing,
+                ct);
+            await sessionRepository.TransitionRunStatusAsync(
+                continuationRunId,
+                RunStatus.Preparing,
+                RunStatus.Running,
+                ct);
+
+            var resumeProvider = new HostDecisionProvider(conclude: true);
+            var resumeOrchestrator = new MeetingModeOrchestrator(
+                _ => resumeProvider,
+                store,
+                sessionRepository,
+                meetingRepository,
+                outbox);
+            var resumeEvents = new List<RuntimeEventEnvelope>();
+            await foreach (var envelope in resumeOrchestrator.RunAsync(
+                continuationRunId,
+                sessionId,
+                CreateHostRequest(maxRounds: 2),
+                "runtime-resume",
+                ct))
+            {
+                resumeEvents.Add(envelope);
+            }
+
+            Assert.AreEqual(
+                RunStatus.Completed,
+                await sessionRepository.GetRunStatusAsync(continuationRunId, ct));
+            var resumedSnapshot = await meetingRepository.GetMeetingSnapshotAsync(sessionId, ct);
+            Assert.IsNotNull(resumedSnapshot);
+            Assert.AreEqual("Completed", resumedSnapshot.Session.Status);
+            Assert.AreEqual(continuationRunId, resumedSnapshot.Session.RunId);
+            CollectionAssert.Contains(resumeProvider.InvokedAgentIds, "agent-host");
+            Assert.IsTrue(resumeEvents.Any(static item =>
+                item.MessageType == MessageTypes.RunCompleted));
+
+            var history = await store.ReadAllAsync(sessionId, ct);
+            Assert.IsTrue(
+                history.Any(static record =>
+                    record.Role == "user"
+                    && record.Content.ToString().Contains(
+                        "continuation after cooperative pause",
+                        StringComparison.OrdinalIgnoreCase)),
+                "Continuation resume input message was not written to canonical history.");
+        }
+        finally
+        {
+            if (Directory.Exists(dataDirectory))
+            {
+                Directory.Delete(dataDirectory, recursive: true);
+            }
+        }
     }
 
     private async Task<HostMeetingResult> ExecuteHostMeetingAsync(bool conclude)
@@ -406,7 +782,8 @@ public sealed class MeetingToolLoopTests
 
         public ProviderCapabilities Capabilities { get; } = new(
             Streaming: true,
-            StructuredOutput: true);
+            StructuredOutput: true,
+            ToolCalling: true);
 
         public IReadOnlyList<ProviderModel> Models { get; } =
             [new("host-model", "Host Model", ContextWindow: 8192)];
@@ -420,13 +797,171 @@ public sealed class MeetingToolLoopTests
             InvokedAgentIds.Add(request.AgentId);
             await Task.Yield();
             ct.ThrowIfCancellationRequested();
-            Assert.IsNull(request.Tools);
+            // Without a tool gateway the host catalog stays null; with a gateway Host may receive tools.
             if (string.Equals(request.AgentId, "agent-host", StringComparison.Ordinal))
             {
                 var decision = conclude
                     ? "{\"conclude\":true,\"participantId\":null}"
                     : "{\"conclude\":false,\"participantId\":\"p-b\"}";
                 yield return new TextDeltaProviderEvent(request.InvocationId, decision);
+                yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
+                yield break;
+            }
+
+            yield return new TextDeltaProviderEvent(request.InvocationId, "Participant B response.");
+            yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
+        }
+
+        public Task ValidateCapabilitiesAsync(
+            ContentBlock[] input,
+            CancellationToken ct = default) => Task.CompletedTask;
+    }
+
+    private sealed class CapturingHostToolProvider(Action<string[]?> onHostTools) : IRuntimeProviderAdapter
+    {
+        public string ProviderId => "host-loop";
+
+        public ProviderCapabilities Capabilities { get; } = new(
+            Streaming: true,
+            ToolCalling: true);
+
+        public IReadOnlyList<ProviderModel> Models { get; } =
+            [new("host-model", "Host Model", ContextWindow: 8192)];
+
+        public async IAsyncEnumerable<RuntimeProviderEvent> CompleteStreamingAsync(
+            RuntimeProviderRequest request,
+            [EnumeratorCancellation] CancellationToken ct = default)
+        {
+            await Task.Yield();
+            ct.ThrowIfCancellationRequested();
+            if (string.Equals(request.AgentId, "agent-host", StringComparison.Ordinal))
+            {
+                onHostTools(request.Tools?.Select(static tool => tool.ToolId).ToArray());
+                yield return new TextDeltaProviderEvent(
+                    request.InvocationId,
+                    """{"conclude":true,"participantId":null}""");
+                yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
+                yield break;
+            }
+
+            yield return new TextDeltaProviderEvent(request.InvocationId, "unused");
+            yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
+        }
+
+        public Task ValidateCapabilitiesAsync(
+            ContentBlock[] input,
+            CancellationToken ct = default) => Task.CompletedTask;
+    }
+
+    private sealed class HostOutputSummaryThenConcludeProvider : IRuntimeProviderAdapter
+    {
+        private int _hostRound;
+
+        public string ProviderId => "host-loop";
+
+        public ProviderCapabilities Capabilities { get; } = new(
+            Streaming: true,
+            ToolCalling: true);
+
+        public IReadOnlyList<ProviderModel> Models { get; } =
+            [new("host-model", "Host Model", ContextWindow: 8192)];
+
+        public async IAsyncEnumerable<RuntimeProviderEvent> CompleteStreamingAsync(
+            RuntimeProviderRequest request,
+            [EnumeratorCancellation] CancellationToken ct = default)
+        {
+            await Task.Yield();
+            ct.ThrowIfCancellationRequested();
+            if (string.Equals(request.AgentId, "agent-host", StringComparison.Ordinal))
+            {
+                _hostRound++;
+                if (_hostRound == 1)
+                {
+                    yield return new ToolCallCompleteProviderEvent(
+                        request.InvocationId,
+                        "sum-1",
+                        BuiltinToolRegistry.MeetingOutputSummaryToolId,
+                        "output_summary",
+                        """{"summary":"# Meeting Summary\n- Topic: ship P0\n- Consensus: proceed"}""");
+                    yield return new ToolCallCompleteProviderEvent(
+                        request.InvocationId,
+                        "end-1",
+                        BuiltinToolRegistry.MeetingConfirmEndToolId,
+                        "confirm_end",
+                        "{}");
+                    yield return new InvocationCompletedProviderEvent(
+                        request.InvocationId,
+                        "tool_calls");
+                    yield break;
+                }
+
+                yield return new TextDeltaProviderEvent(
+                    request.InvocationId,
+                    """{"conclude":true,"participantId":null}""");
+                yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
+                yield break;
+            }
+
+            yield return new TextDeltaProviderEvent(request.InvocationId, "unused");
+            yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
+        }
+
+        public Task ValidateCapabilitiesAsync(
+            ContentBlock[] input,
+            CancellationToken ct = default) => Task.CompletedTask;
+    }
+
+    private sealed class HostAskUserThenSelectProvider : IRuntimeProviderAdapter
+    {
+        private int _hostRound;
+
+        public string ProviderId => "host-loop";
+
+        public ProviderCapabilities Capabilities { get; } = new(
+            Streaming: true,
+            ToolCalling: true);
+
+        public IReadOnlyList<ProviderModel> Models { get; } =
+            [new("host-model", "Host Model", ContextWindow: 8192)];
+
+        public bool SawUserAnswer { get; private set; }
+
+        public async IAsyncEnumerable<RuntimeProviderEvent> CompleteStreamingAsync(
+            RuntimeProviderRequest request,
+            [EnumeratorCancellation] CancellationToken ct = default)
+        {
+            await Task.Yield();
+            ct.ThrowIfCancellationRequested();
+            if (string.Equals(request.AgentId, "agent-host", StringComparison.Ordinal))
+            {
+                _hostRound++;
+                if (_hostRound == 1)
+                {
+                    yield return new ToolCallCompleteProviderEvent(
+                        request.InvocationId,
+                        "ask-1",
+                        BuiltinToolRegistry.AskUserToolId,
+                        "ask_user",
+                        """{"question":"Can we end?"}""");
+                    yield return new InvocationCompletedProviderEvent(
+                        request.InvocationId,
+                        "tool_calls");
+                    yield break;
+                }
+
+                var lastTool = request.Messages
+                    .LastOrDefault(static message => message.Role == RuntimeProviderRoles.Tool);
+                if (lastTool?.Content.OfType<ToolResultContentBlock>().FirstOrDefault() is { } toolResult
+                    && toolResult.Success
+                    && toolResult.Content.OfType<TextContentBlock>().FirstOrDefault() is { } text
+                    && text.Text.Contains("userAnswer", StringComparison.Ordinal))
+                {
+                    SawUserAnswer = true;
+                }
+
+                yield return new TextDeltaProviderEvent(
+                    request.InvocationId,
+                    """Next speaker. {"conclude":false,"participantId":"p-b"}""");
                 yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
                 yield break;
             }

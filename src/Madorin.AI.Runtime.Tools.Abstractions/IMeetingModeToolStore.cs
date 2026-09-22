@@ -13,6 +13,19 @@ public interface IMeetingModeToolStore
         string summaryMessageId,
         CancellationToken ct = default);
 
+    /// <summary>
+    /// Writes the Host-produced final summary into CanonicalHistory and registers its message id.
+    /// Returns the persisted message id.
+    /// </summary>
+    public Task<string> PersistFinalSummaryMessageAsync(
+        string sessionId,
+        string runId,
+        string invocationId,
+        string agentId,
+        string summaryMarkdown,
+        string messageId,
+        CancellationToken ct = default);
+
     public Task<(bool EndConfirmed, string? FinalSummaryMessageId)> GetEndConfirmationStateAsync(
         string sessionId,
         CancellationToken ct = default);

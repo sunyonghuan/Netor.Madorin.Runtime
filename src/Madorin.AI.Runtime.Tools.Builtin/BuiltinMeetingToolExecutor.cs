@@ -140,8 +140,15 @@ public sealed class BuiltinMeetingToolExecutor(
         await File.WriteAllTextAsync(summaryPath, summary, ct).ConfigureAwait(false);
 
         var summaryMessageId = $"meeting-tool-summary:{invocation.SessionId}:{invocation.CallId}";
-        await _meetingStore!.SaveFinalSummaryMessageIdAsync(
+        var summaryInvocationId = string.IsNullOrWhiteSpace(invocation.InvocationId)
+            ? $"meeting-tool-invocation:{invocation.SessionId}:{invocation.CallId}"
+            : invocation.InvocationId;
+        await _meetingStore!.PersistFinalSummaryMessageAsync(
             invocation.SessionId,
+            invocation.RunId,
+            summaryInvocationId,
+            invocation.AgentId,
+            summary,
             summaryMessageId,
             ct).ConfigureAwait(false);
 
@@ -151,6 +158,7 @@ public sealed class BuiltinMeetingToolExecutor(
             writer.WriteBoolean("ok", true);
             writer.WriteString("summaryMessageId", summaryMessageId);
             writer.WriteString("summaryPath", summaryPath);
+            writer.WriteBoolean("canonicalHistoryWritten", true);
             writer.WriteString(
                 "next",
                 "Call mcli_check_pending_user_input, then mcli_ask_user to confirm ending, or mcli_meeting_confirm_end after explicit approval.");
@@ -188,49 +196,36 @@ public sealed class BuiltinMeetingToolExecutor(
         return Success(invocation, json);
     }
 
-    private async Task<ToolResult> AskUserAsync(
+    private static Task<ToolResult> AskUserAsync(
         ToolInvocation invocation,
         JsonElement arguments,
         CancellationToken ct)
     {
+        _ = ct;
         var question = arguments.TryGetProperty("question", out var questionElement)
             ? questionElement.GetString()
             : null;
         if (string.IsNullOrWhiteSpace(question))
         {
-            return Failure(invocation, "question is required.");
+            return Task.FromResult(Failure(invocation, "question is required."));
         }
 
+        // Do not enqueue into the interrupt queue. The meeting tool loop blocks on HITL
+        // and rewrites this result with the user answer before the model continues.
         var requestId = $"ask-user:{invocation.SessionId}:{invocation.CallId}";
-        var contentJson = ToolJson.Write(writer =>
-        {
-            writer.WriteStartArray();
-            writer.WriteStartObject();
-            writer.WriteString("type", "text");
-            writer.WriteString("text", question);
-            writer.WriteEndObject();
-            writer.WriteEndArray();
-        });
-
-        await _meetingStore!.EnqueuePendingInputAsync(
-            invocation.SessionId,
-            requestId,
-            contentJson,
-            invocation.RunId,
-            ct).ConfigureAwait(false);
-
         var json = ToolJson.Write(writer =>
         {
             writer.WriteStartObject();
             writer.WriteBoolean("ok", true);
             writer.WriteBoolean("waitingForUser", true);
             writer.WriteString("requestId", requestId);
+            writer.WriteString("question", question);
             writer.WriteString(
                 "message",
-                "Question queued for the host. Wait for meeting.input.enqueue / HITL response before continuing.");
+                "Waiting for the user to answer. The runtime will resume this invocation after HITL.");
             writer.WriteEndObject();
         });
-        return Success(invocation, json);
+        return Task.FromResult(Success(invocation, json));
     }
 
     private async Task<ToolResult> CheckPendingAsync(

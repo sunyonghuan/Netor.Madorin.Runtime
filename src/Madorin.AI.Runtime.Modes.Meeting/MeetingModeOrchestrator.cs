@@ -110,7 +110,8 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             toolCatalogSnapshot,
             runtimeLimits,
             toolConsentCoordinator,
-            liveCatalogProvider);
+            liveCatalogProvider,
+            askUserHitlHandler: hitlHandler);
         ArgumentNullException.ThrowIfNull(sessionRepo);
         _sessionRepo = sessionRepo;
         ArgumentNullException.ThrowIfNull(meetingRepo);
@@ -201,10 +202,12 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
         var policyHash = ComputeHash(policyJson);
         var isSelectorDriven = effectiveSelectorPolicy.Type == MeetingSelectorPolicy.SelectorDriven;
         var isHostDriven = effectiveSelectorPolicy.Type == MeetingSelectorPolicy.HostDriven;
+        var originalIsHostDriven = isHostDriven;
 
         MeetingSnapshot snapshot;
         int selectionVersion;
         int runFirstRoundIndex;
+        var isContinuationResume = false;
         var isEndConfirmationResume = _resumedHitlResponse is not null
             && IsEndConfirmationApprovalRequestId(_resumedHitlResponse.ApprovalRequestId);
         if (_resumedInvocation is not null)
@@ -222,53 +225,108 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
         }
         else if (_resumedHitlResponse is null)
         {
-            await PersistInitialInputAsync(sessionId, runId, request.InitialInput, ct)
+            var existingSnapshot = await _meetingRepo.GetMeetingSnapshotAsync(sessionId, ct)
                 .ConfigureAwait(false);
-            await _meetingRepo.CreateMeetingSessionAsync(
-                sessionId,
-                runId,
-                policyJson,
-                policyHash,
-                CreateParticipantInputs(options),
-                request.Selection.SelectionVersion,
-                ct).ConfigureAwait(false);
-
-            snapshot = await _meetingRepo.GetMeetingSnapshotAsync(sessionId, ct)
-                .ConfigureAwait(false)
-                ?? throw new InvalidOperationException(
-                    $"Meeting session snapshot not found for session '{sessionId}'.");
-            selectionVersion = request.Selection.SelectionVersion;
-            runFirstRoundIndex = checked(snapshot.Session.CurrentRound + 1);
-
-            var firstSchedule = isSelectorDriven
-                ? CreateSelectorSchedule(
+            if (existingSnapshot is not null
+                && string.Equals(existingSnapshot.Session.Status, "Paused", StringComparison.Ordinal))
+            {
+                // Continuation Run after cooperative pause: claim Paused → Running under the new run id.
+                isContinuationResume = true;
+                await _meetingRepo.ClaimPausedMeetingForContinuationAsync(sessionId, runId, ct)
+                    .ConfigureAwait(false);
+                await PersistContinuationResumeInputAsync(
                     sessionId,
                     runId,
-                    runFirstRoundIndex,
-                    selectionVersion,
-                    effectiveSelectorPolicy.SelectorAgent ?? BuiltInSelectorAgent)
-                : isHostDriven
-                    ? CreateHostSchedule(
-                        sessionId,
-                        runId,
-                        runFirstRoundIndex,
-                        selectionVersion,
-                        options.HostAgent ?? BuiltInHostAgent)
-                    : CreateParticipantRoleSchedule(
-                        sessionId,
-                        runId,
-                        runFirstRoundIndex,
-                        selectionVersion,
-                        activeParticipants[
-                            (runFirstRoundIndex - 1) % activeParticipants.Count]);
+                    request.InitialInput,
+                    ct).ConfigureAwait(false);
 
-            await _meetingRepo.CreateRoundWithFirstInvocationAsync(
-                sessionId,
-                runId,
-                snapshot.Session.CurrentRound,
-                runFirstRoundIndex,
-                firstSchedule,
-                ct).ConfigureAwait(false);
+                snapshot = await _meetingRepo.GetMeetingSnapshotAsync(sessionId, ct)
+                    .ConfigureAwait(false)
+                    ?? throw new InvalidOperationException(
+                        $"Meeting session snapshot not found after claiming pause for '{sessionId}'.");
+                selectionVersion = snapshot.Session.SelectionVersion;
+                runFirstRoundIndex = checked(snapshot.Session.CurrentRound + 1);
+
+                // Recovery always starts with Host/Selector so pending interrupts can be absorbed.
+                var continuationSchedule = isSelectorDriven
+                    ? CreateSelectorSchedule(
+                        sessionId,
+                        runId,
+                        runFirstRoundIndex,
+                        selectionVersion,
+                        effectiveSelectorPolicy.SelectorAgent ?? BuiltInSelectorAgent)
+                    : CreateHostSchedule(
+                        sessionId,
+                        runId,
+                        runFirstRoundIndex,
+                        selectionVersion,
+                        options.HostAgent ?? BuiltInHostAgent);
+
+                await _meetingRepo.CreateRoundWithFirstInvocationAsync(
+                    sessionId,
+                    runId,
+                    snapshot.Session.CurrentRound,
+                    runFirstRoundIndex,
+                    continuationSchedule,
+                    ct).ConfigureAwait(false);
+            }
+            else
+            {
+                await PersistInitialInputAsync(sessionId, runId, request.InitialInput, ct)
+                    .ConfigureAwait(false);
+                await _meetingRepo.CreateMeetingSessionAsync(
+                    sessionId,
+                    runId,
+                    policyJson,
+                    policyHash,
+                    CreateParticipantInputs(options),
+                    request.Selection.SelectionVersion,
+                    ct).ConfigureAwait(false);
+
+                snapshot = await _meetingRepo.GetMeetingSnapshotAsync(sessionId, ct)
+                    .ConfigureAwait(false)
+                    ?? throw new InvalidOperationException(
+                        $"Meeting session snapshot not found for session '{sessionId}'.");
+                selectionVersion = request.Selection.SelectionVersion;
+                runFirstRoundIndex = checked(snapshot.Session.CurrentRound + 1);
+
+                // Existing live session continuation (not pause): rebind active run id.
+                if (!string.Equals(snapshot.Session.RunId, runId, StringComparison.Ordinal)
+                    && string.Equals(snapshot.Session.Status, "Running", StringComparison.Ordinal))
+                {
+                    await _meetingRepo.BindActiveRunAsync(sessionId, runId, ct).ConfigureAwait(false);
+                }
+
+                var firstSchedule = isSelectorDriven
+                    ? CreateSelectorSchedule(
+                        sessionId,
+                        runId,
+                        runFirstRoundIndex,
+                        selectionVersion,
+                        effectiveSelectorPolicy.SelectorAgent ?? BuiltInSelectorAgent)
+                    : isHostDriven
+                        ? CreateHostSchedule(
+                            sessionId,
+                            runId,
+                            runFirstRoundIndex,
+                            selectionVersion,
+                            options.HostAgent ?? BuiltInHostAgent)
+                        : CreateParticipantRoleSchedule(
+                            sessionId,
+                            runId,
+                            runFirstRoundIndex,
+                            selectionVersion,
+                            activeParticipants[
+                                (runFirstRoundIndex - 1) % activeParticipants.Count]);
+
+                await _meetingRepo.CreateRoundWithFirstInvocationAsync(
+                    sessionId,
+                    runId,
+                    snapshot.Session.CurrentRound,
+                    runFirstRoundIndex,
+                    firstSchedule,
+                    ct).ConfigureAwait(false);
+            }
         }
         else
         {
@@ -296,6 +354,12 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             selectionVersion = snapshot.Session.SelectionVersion;
         }
 
+        // Pause continuation forces HostDriven decision parsing when the original policy was RoundRobin.
+        if (isContinuationResume && !originalIsHostDriven && !isSelectorDriven)
+        {
+            isHostDriven = true;
+        }
+
         var lastRoundIndex = checked(runFirstRoundIndex + maxRounds - 1);
         var meetingDeadline = effectivePolicy.MeetingTimeoutSeconds is > 0
             ? snapshot.Session.CreatedAt.AddSeconds(effectivePolicy.MeetingTimeoutSeconds.Value)
@@ -303,7 +367,8 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
 
         if (effectivePolicy.HitlEnabled
             && _resumedInvocation is null
-            && !isEndConfirmationResume)
+            && !isEndConfirmationResume
+            && !isContinuationResume)
         {
             if (_resumedHitlResponse is null && _hitlHandler is null)
             {
@@ -1053,16 +1118,45 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
 
                 if (isHostDriven && selectorResult.Succeeded)
                 {
+                    var endConfirmedAfterHost = false;
+                    var hostSnapshot = await _meetingRepo.GetMeetingSnapshotAsync(sessionId, ct)
+                        .ConfigureAwait(false);
+                    if (hostSnapshot?.Session.EndConfirmed == true)
+                    {
+                        endConfirmedAfterHost = true;
+                    }
+
                     var parsed = TryResolveHostDecision(
                         selectorResult.Text,
                         currentActiveParticipants,
                         out selected,
                         out var conclude);
+                    if (endConfirmedAfterHost)
+                    {
+                        conclude = true;
+                        parsed = true;
+                        selected = null;
+                    }
+
+                    string? hostMessageId = null;
+                    if (!string.IsNullOrWhiteSpace(selectorResult.Text))
+                    {
+                        hostMessageId = CreateStableId(
+                            "meeting-host-message-v1",
+                            selectorInvocationId);
+                        await PersistAssistantMessageAsync(
+                            sessionId,
+                            selectorRequest,
+                            selectorResult.Text!,
+                            hostMessageId,
+                            ct).ConfigureAwait(false);
+                    }
+
                     if (parsed && conclude)
                     {
                         var conclusionStep = await CompleteRoleStepAsync(
                             selectorInvocationId,
-                            null,
+                            hostMessageId,
                             CreateHostDecisionJson(null, conclude: true),
                             roundIndex,
                             currentSelectionVersion,
@@ -1086,6 +1180,17 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
 
                     if (!parsed || selected is null)
                     {
+                        // Real models often speak without a strict decision JSON; fall back to
+                        // deterministic next participant instead of parking the whole meeting.
+                        selected = SelectDeterministicFallback(
+                            currentActiveParticipants,
+                            roundIndex);
+                        parsed = selected is not null;
+                        conclude = false;
+                    }
+
+                    if (!parsed || selected is null)
+                    {
                         selectorResult = (
                             false,
                             null,
@@ -1097,6 +1202,37 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                                 ProviderDetails: null,
                                 Guid.NewGuid().ToString("N")),
                             selectorResult.Events);
+                    }
+                    else
+                    {
+                        participantSchedule = CreateParticipantRoleSchedule(
+                            sessionId,
+                            runId,
+                            roundIndex,
+                            currentSelectionVersion,
+                            selected);
+                        var hostDecisionJson = CreateHostDecisionJson(
+                            selected.ParticipantId,
+                            conclude: false);
+                        await _meetingRepo.CompleteInvocationAsync(
+                            selectorInvocationId,
+                            "Completed",
+                            hostMessageId,
+                            hostDecisionJson,
+                            null,
+                            null,
+                            participantSchedule,
+                            ct).ConfigureAwait(false);
+
+                        yield return await CreateInvocationCompletedEnvelopeAsync(
+                            runId,
+                            runtimeInstanceId,
+                            selectorInvocationId,
+                            runSequence++,
+                            ct).ConfigureAwait(false);
+
+                        decisionSource = "host";
+                        goto HostParticipantReady;
                     }
                 }
 
@@ -1147,6 +1283,44 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                             runtimeInstanceId, runId, runSequence++, MessageTypes.InvocationFailed,
                             new InvocationFailedEvent(selectorInvocationId, selectorError),
                             RuntimeJsonContext.Default.InvocationFailedEvent, ct).ConfigureAwait(false);
+
+                        // PauseInvocation parks the Run in WaitingForApproval; emit an Interrupted
+                        // terminal so hosts/CLI/smoke do not hang waiting for a completion event.
+                        var pauseReason = selectorError.Message;
+                        try
+                        {
+                            await _sessionRepo.TransitionRunToTerminalAsync(
+                                runId,
+                                RunStatus.WaitingForApproval,
+                                RunStatus.Interrupted,
+                                pauseReason,
+                                CancellationToken.None).ConfigureAwait(false);
+                        }
+                        catch (InvalidOperationException)
+                        {
+                            await _sessionRepo.TransitionRunToTerminalAsync(
+                                runId,
+                                RunStatus.Running,
+                                RunStatus.Interrupted,
+                                pauseReason,
+                                CancellationToken.None).ConfigureAwait(false);
+                        }
+
+                        var hostPauseEnvelope = await CommitTerminalEnvelopeAsync(
+                            runtimeInstanceId,
+                            runId,
+                            runSequence++,
+                            RunStatus.Interrupted,
+                            pauseReason,
+                            error: null,
+                            value: new RunCancelledEvent(runId, sessionId),
+                            typeInfo: RuntimeJsonContext.Default.RunCancelledEvent,
+                            ct: ct).ConfigureAwait(false);
+                        if (hostPauseEnvelope is not null)
+                        {
+                            yield return hostPauseEnvelope;
+                        }
+
                         yield break;
                     }
 
@@ -1199,6 +1373,7 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                         resumedParticipant.SelectionVersion);
                 }
 
+            HostParticipantReady:
                 selected = selected ?? throw new InvalidOperationException(
                     $"Selector did not select a participant in round {roundIndex}.");
 
@@ -1670,8 +1845,32 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                     }
                 }
             }
+
+            // Mid-run pause requests (e.g. during a participant turn) take effect after the round finishes.
+            if (await TryPauseAtSafePointAsync(
+                    sessionId,
+                    runId,
+                    runtimeInstanceId,
+                    () => runSequence++,
+                    ct).ConfigureAwait(false) is { } roundEndPauseEnvelope)
+            {
+                yield return roundEndPauseEnvelope;
+                yield break;
+            }
         }
         } // !isEndConfirmationResume
+
+        // Catch pause requests that arrived on the final round after the loop condition ends.
+        if (await TryPauseAtSafePointAsync(
+                sessionId,
+                runId,
+                runtimeInstanceId,
+                () => runSequence++,
+                ct).ConfigureAwait(false) is { } postLoopPauseEnvelope)
+        {
+            yield return postLoopPauseEnvelope;
+            yield break;
+        }
 
         var endStateSnapshot = await _meetingRepo.GetMeetingSnapshotAsync(sessionId, ct)
             .ConfigureAwait(false);
@@ -1833,10 +2032,13 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                             ct).ConfigureAwait(false);
                         await ResumeFromPersistedHitlAsync(sessionId, runId, ct).ConfigureAwait(false);
 
-                        // Continue discussion for one more segment, then re-ask for end confirmation.
+                        // Continue discussion, then re-ask for end confirmation.
+                        // HostDriven/SelectorDriven keep the decision role; RoundRobin stays participant order.
                         var continuationCount = Math.Max(
                             1,
-                            effectiveSelectorPolicy.MaxRounds ?? activeParticipants.Count);
+                            Math.Min(
+                                4,
+                                effectiveSelectorPolicy.MaxRounds ?? activeParticipants.Count));
                         (currentActiveParticipants, currentSelectionVersion) =
                             await ReloadActiveParticipantsAsync(sessionId, options, ct)
                                 .ConfigureAwait(false);
@@ -1858,25 +2060,222 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                             // Round may already be completed when FinalOnly summarizer finished the step.
                         }
 
-                        for (var offset = 1; offset <= continuationCount; offset++)
+                        var continuationConcluded = false;
+                        for (var offset = 1; offset <= continuationCount && !continuationConcluded; offset++)
                         {
                             var continuationRound = completedRoundIndex + offset;
                             var isContinuationLast = offset == continuationCount;
-                            var continuationParticipant = currentActiveParticipants[
-                                (continuationRound - 1) % currentActiveParticipants.Count];
-                            var continuationSchedule = CreateParticipantRoleSchedule(
-                                sessionId,
-                                runId,
-                                continuationRound,
-                                currentSelectionVersion,
-                                continuationParticipant);
-                            await _meetingRepo.CreateRoundWithFirstInvocationAsync(
-                                sessionId,
-                                runId,
-                                continuationRound - 1,
-                                continuationRound,
-                                continuationSchedule,
-                                ct).ConfigureAwait(false);
+                            await DrainPendingInputsAtSafePointAsync(sessionId, runId, ct)
+                                .ConfigureAwait(false);
+                            if (await TryPauseAtSafePointAsync(
+                                    sessionId,
+                                    runId,
+                                    runtimeInstanceId,
+                                    () => runSequence++,
+                                    ct).ConfigureAwait(false) is { } continuationPause)
+                            {
+                                yield return continuationPause;
+                                yield break;
+                            }
+
+                            MeetingParticipant continuationParticipant;
+                            MeetingInvocationScheduleInput continuationSchedule;
+                            string? continuationDecisionJson = null;
+                            string? hostContinuationMessageId = null;
+
+                            if (isHostDriven || isSelectorDriven)
+                            {
+                                var decisionSchedule = CreateDecisionRoleSchedule(
+                                    sessionId,
+                                    runId,
+                                    continuationRound,
+                                    currentSelectionVersion,
+                                    options,
+                                    isHostDriven);
+                                await _meetingRepo.CreateRoundWithFirstInvocationAsync(
+                                    sessionId,
+                                    runId,
+                                    continuationRound - 1,
+                                    continuationRound,
+                                    decisionSchedule,
+                                    ct).ConfigureAwait(false);
+                                await _meetingRepo.TransitionInvocationStatusAsync(
+                                    decisionSchedule.InvocationId,
+                                    "Scheduled",
+                                    "Running",
+                                    ct).ConfigureAwait(false);
+
+                                var decisionContext = isHostDriven
+                                    ? await CreateHostInvocationRequestAsync(
+                                        runId,
+                                        sessionId,
+                                        request,
+                                        options,
+                                        currentActiveParticipants,
+                                        continuationRound,
+                                        projectionStrategyOverride,
+                                        decisionSchedule.InvocationId,
+                                        ct).ConfigureAwait(false)
+                                    : await CreateSelectorInvocationRequestAsync(
+                                        runId,
+                                        sessionId,
+                                        request,
+                                        options,
+                                        currentActiveParticipants,
+                                        continuationRound,
+                                        projectionStrategyOverride,
+                                        decisionSchedule.InvocationId,
+                                        ct).ConfigureAwait(false);
+
+                                yield return await CreateInvocationStartedEnvelopeAsync(
+                                    decisionContext.Request,
+                                    runtimeInstanceId,
+                                    runSequence++,
+                                    ct).ConfigureAwait(false);
+
+                                var decisionResult = await ExecuteInvocationAsync(
+                                    decisionContext.Request).ConfigureAwait(false);
+                                foreach (var evt in decisionResult.Events)
+                                {
+                                    yield return evt;
+                                }
+
+                                (currentActiveParticipants, currentSelectionVersion) =
+                                    await ReloadActiveParticipantsAsync(sessionId, options, ct)
+                                        .ConfigureAwait(false);
+                                if (currentActiveParticipants.Count == 0)
+                                {
+                                    throw new InvalidOperationException(
+                                        "No active participants remain during continued discussion.");
+                                }
+
+                                MeetingParticipant? selectedContinuation = null;
+                                var concludeContinuation = false;
+                                if (isHostDriven && decisionResult.Succeeded)
+                                {
+                                    var endSnap = await _meetingRepo
+                                        .GetMeetingSnapshotAsync(sessionId, ct)
+                                        .ConfigureAwait(false);
+                                    if (endSnap?.Session.EndConfirmed == true)
+                                    {
+                                        concludeContinuation = true;
+                                    }
+                                    else
+                                    {
+                                        _ = TryResolveHostDecision(
+                                            decisionResult.Text,
+                                            currentActiveParticipants,
+                                            out selectedContinuation,
+                                            out concludeContinuation);
+                                    }
+
+                                    if (!string.IsNullOrWhiteSpace(decisionResult.Text))
+                                    {
+                                        hostContinuationMessageId = CreateStableId(
+                                            "meeting-host-message-v1",
+                                            decisionSchedule.InvocationId);
+                                        await PersistAssistantMessageAsync(
+                                            sessionId,
+                                            decisionContext.Request,
+                                            decisionResult.Text!,
+                                            hostContinuationMessageId,
+                                            ct).ConfigureAwait(false);
+                                    }
+                                }
+                                else if (decisionResult.Succeeded
+                                    && !string.IsNullOrWhiteSpace(decisionResult.Text))
+                                {
+                                    selectedContinuation = TryResolveSelectorParticipant(
+                                        decisionResult.Text!,
+                                        currentActiveParticipants);
+                                }
+
+                                if (concludeContinuation)
+                                {
+                                    var conclusionStep = await CompleteRoleStepAsync(
+                                        decisionSchedule.InvocationId,
+                                        hostContinuationMessageId,
+                                        CreateHostDecisionJson(null, conclude: true),
+                                        continuationRound,
+                                        currentSelectionVersion,
+                                        nextRoundSchedule: null,
+                                        conclusionWithoutParticipant: true).ConfigureAwait(false);
+                                    foreach (var conclusionEvent in conclusionStep.Events)
+                                    {
+                                        yield return conclusionEvent;
+                                    }
+
+                                    if (conclusionStep.FatalError is not null)
+                                    {
+                                        throw new InvalidOperationException(
+                                            "Summarizer failed after continued Host conclude: "
+                                            + conclusionStep.FatalError.Message);
+                                    }
+
+                                    completedRoundIndex = continuationRound;
+                                    continuationConcluded = true;
+                                    break;
+                                }
+
+                                selectedContinuation ??= SelectDeterministicFallback(
+                                    currentActiveParticipants,
+                                    continuationRound);
+                                if (selectedContinuation is null)
+                                {
+                                    throw new InvalidOperationException(
+                                        $"Continuation round {continuationRound} could not select a participant.");
+                                }
+
+                                continuationParticipant = selectedContinuation;
+                                continuationSchedule = CreateParticipantRoleSchedule(
+                                    sessionId,
+                                    runId,
+                                    continuationRound,
+                                    currentSelectionVersion,
+                                    continuationParticipant);
+                                continuationDecisionJson = isHostDriven
+                                    ? CreateHostDecisionJson(
+                                        continuationParticipant.ParticipantId,
+                                        conclude: false)
+                                    : CreateSelectorDecisionJson(
+                                        continuationParticipant.ParticipantId,
+                                        "selector");
+
+                                await _meetingRepo.CompleteInvocationAsync(
+                                    decisionSchedule.InvocationId,
+                                    "Completed",
+                                    hostContinuationMessageId,
+                                    continuationDecisionJson,
+                                    null,
+                                    null,
+                                    continuationSchedule,
+                                    ct).ConfigureAwait(false);
+                                yield return await CreateInvocationCompletedEnvelopeAsync(
+                                    runId,
+                                    runtimeInstanceId,
+                                    decisionSchedule.InvocationId,
+                                    runSequence++,
+                                    ct).ConfigureAwait(false);
+                            }
+                            else
+                            {
+                                continuationParticipant = currentActiveParticipants[
+                                    (continuationRound - 1) % currentActiveParticipants.Count];
+                                continuationSchedule = CreateParticipantRoleSchedule(
+                                    sessionId,
+                                    runId,
+                                    continuationRound,
+                                    currentSelectionVersion,
+                                    continuationParticipant);
+                                await _meetingRepo.CreateRoundWithFirstInvocationAsync(
+                                    sessionId,
+                                    runId,
+                                    continuationRound - 1,
+                                    continuationRound,
+                                    continuationSchedule,
+                                    ct).ConfigureAwait(false);
+                            }
+
                             await _meetingRepo.TransitionInvocationStatusAsync(
                                 continuationSchedule.InvocationId,
                                 "Scheduled",
@@ -1950,8 +2349,10 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                                 ct).ConfigureAwait(false);
                             successfulTexts.Add(continuationResult.Text!);
 
+                            // Do not pre-schedule the next continuation round here: the loop body
+                            // always creates the next round explicitly (avoids double-create for Host/Selector).
                             MeetingInvocationScheduleInput? nextContinuation = null;
-                            if (!isContinuationLast)
+                            if (!isContinuationLast && !isHostDriven && !isSelectorDriven)
                             {
                                 var nextParticipant = currentActiveParticipants[
                                     continuationRound % currentActiveParticipants.Count];
@@ -1983,6 +2384,15 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                             }
 
                             completedRoundIndex = continuationRound;
+
+                            // Host confirm_end during continuation also ends the segment.
+                            var postSnap = await _meetingRepo
+                                .GetMeetingSnapshotAsync(sessionId, ct)
+                                .ConfigureAwait(false);
+                            if (postSnap?.Session.EndConfirmed == true)
+                            {
+                                continuationConcluded = true;
+                            }
                         }
 
                         continue;
@@ -2255,7 +2665,7 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                         .. projection.Messages,
                     ],
                     snapshot,
-                    AvailableTools: ResolveAvailableTools(agent, providerId),
+                    AvailableTools: ResolveAvailableTools(agent, providerId, "participant"),
                     HistoryMessageCount: 1 + projection.Messages.Length),
                 agent.SkillIds,
                 skillCatalogSnapshot,
@@ -2628,61 +3038,100 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
     {
         foreach (var participant in options.Participants)
         {
-            if (participant.Agent.AllowedToolIds is not { Length: > 0 })
-            {
-                continue;
-            }
-
             var providerId = participant.Agent.ProviderId
                 ?? request.Selection.DefaultSelection.ProviderId;
-            ResolveAvailableTools(participant.Agent, providerId);
+            _ = ResolveAvailableTools(participant.Agent, providerId, "participant");
+        }
+
+        if (options.HostAgent is { } hostAgent)
+        {
+            var hostProviderId = hostAgent.ProviderId
+                ?? request.Selection.DefaultSelection.ProviderId;
+            _ = ResolveAvailableTools(hostAgent, hostProviderId, "meeting-host");
+        }
+        else if (options.EffectiveSelectorPolicy.Type == MeetingSelectorPolicy.HostDriven)
+        {
+            var hostProviderId = request.Selection.DefaultSelection.ProviderId;
+            _ = ResolveAvailableTools(BuiltInHostAgent, hostProviderId, "meeting-host");
         }
     }
 
-    private ToolDescriptor[]? ResolveAvailableTools(AgentRef agent, string providerId)
+    /// <summary>
+    /// Builds the Meeting tool directory for a role (host / participant) via
+    /// <see cref="ToolCatalogSnapshot.FilterByMode"/>, optionally intersected with
+    /// <see cref="AgentRef.AllowedToolIds"/>.
+    /// </summary>
+    private ToolDescriptor[]? ResolveAvailableTools(
+        AgentRef agent,
+        string providerId,
+        string meetingRole)
     {
-        if (agent.AllowedToolIds is not { Length: > 0 } allowedToolIds)
-        {
-            return null;
-        }
-
         var catalog = CaptureCatalogSnapshot();
         if (_toolGateway is null || catalog is null)
         {
-            throw new InvalidOperationException(
-                $"Meeting participant agent '{agent.AgentId}' declares tools, but the Runtime has no tool gateway or catalog snapshot.");
+            if (agent.AllowedToolIds is { Length: > 0 })
+            {
+                throw new InvalidOperationException(
+                    $"Meeting agent '{agent.AgentId}' declares tools, but the Runtime has no tool gateway or catalog snapshot.");
+            }
+
+            return null;
         }
 
-        var requestedToolIds = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var toolId in allowedToolIds)
+        var roleCatalog = catalog.FilterByMode("meeting", meetingRole);
+        IEnumerable<ToolDescriptor> selected = roleCatalog.Tools;
+
+        // null AllowedToolIds => role default catalog;
+        // empty AllowedToolIds => explicitly no tools for this agent.
+        if (agent.AllowedToolIds is not null)
         {
-            ArgumentException.ThrowIfNullOrWhiteSpace(toolId);
-            if (!requestedToolIds.Add(toolId))
+            if (agent.AllowedToolIds.Length == 0)
             {
-                throw new ArgumentException(
-                    $"Meeting participant agent '{agent.AgentId}' declares duplicate tool ID '{toolId}'.",
-                    nameof(agent));
+                return null;
             }
 
-            if (!catalog.TryGetTool(toolId, out _))
+            var requestedToolIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var toolId in agent.AllowedToolIds)
             {
-                throw new ArgumentException(
-                    $"Meeting participant agent '{agent.AgentId}' declares unknown tool ID '{toolId}'.",
-                    nameof(agent));
+                ArgumentException.ThrowIfNullOrWhiteSpace(toolId);
+                if (!requestedToolIds.Add(toolId))
+                {
+                    throw new ArgumentException(
+                        $"Meeting agent '{agent.AgentId}' declares duplicate tool ID '{toolId}'.",
+                        nameof(agent));
+                }
+
+                if (!catalog.TryGetTool(toolId, out _))
+                {
+                    throw new ArgumentException(
+                        $"Meeting agent '{agent.AgentId}' declares unknown tool ID '{toolId}'.",
+                        nameof(agent));
+                }
             }
+
+            selected = roleCatalog.Tools.Where(tool => requestedToolIds.Contains(tool.ToolId));
+        }
+
+        var tools = selected.ToArray();
+        if (tools.Length == 0)
+        {
+            return null;
         }
 
         var provider = _providerFactory(providerId);
         if (!provider.Capabilities.ToolCalling)
         {
-            throw new ArgumentException(
-                $"Provider '{providerId}' does not support tools required by meeting participant agent '{agent.AgentId}'.",
-                nameof(agent));
+            if (agent.AllowedToolIds is { Length: > 0 })
+            {
+                throw new ArgumentException(
+                    $"Provider '{providerId}' does not support tools required by meeting agent '{agent.AgentId}'.",
+                    nameof(agent));
+            }
+
+            return null;
         }
 
-        return catalog.Tools
-            .Where(tool => requestedToolIds.Contains(tool.ToolId))
-            .ToArray();
+        return tools;
     }
 
     private ToolCatalogSnapshot? CaptureCatalogSnapshot()
@@ -3519,11 +3968,18 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
         }
 
         var reason = snapshot.Session.PauseReason ?? "Paused by host request.";
-        await _meetingRepo.TryTransitionMeetingStatusAsync(
+        var paused = await _meetingRepo.TryTransitionMeetingStatusAsync(
             sessionId,
             "Running",
             "Paused",
             ct).ConfigureAwait(false);
+        if (!paused)
+        {
+            // Already left Running (e.g. concurrent terminal transition); clear stale pause flag only.
+            await _meetingRepo.ClearPauseRequestAsync(sessionId, ct).ConfigureAwait(false);
+            return null;
+        }
+
         await _meetingRepo.ClearPauseRequestAsync(sessionId, ct).ConfigureAwait(false);
         await _sessionRepo.TransitionRunToTerminalAsync(
             runId,
@@ -3542,6 +3998,43 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             value: new RunCancelledEvent(runId, sessionId),
             typeInfo: RuntimeJsonContext.Default.RunCancelledEvent,
             ct: ct).ConfigureAwait(false);
+    }
+
+    private async Task PersistContinuationResumeInputAsync(
+        string sessionId,
+        string runId,
+        ContentBlock[]? inputOverride,
+        CancellationToken ct)
+    {
+        var resumeText = "Meeting continuation after cooperative pause. "
+            + "Absorb any pending user interrupts, then select the next participant or conclude.";
+        if (inputOverride is { Length: > 0 })
+        {
+            var overrideText = string.Join(
+                "\n",
+                inputOverride.OfType<TextContentBlock>().Select(static block => block.Text));
+            if (!string.IsNullOrWhiteSpace(overrideText))
+            {
+                resumeText = resumeText + "\n\nHost note:\n" + overrideText;
+            }
+        }
+
+        ContentBlock[] content = [new TextContentBlock(resumeText)];
+        var messageId = CreateStableId(
+            "meeting-continuation-input-v1",
+            sessionId,
+            runId);
+        var invocationId = CreateStableId(
+            "meeting-continuation-invocation-v1",
+            sessionId,
+            runId);
+        await PersistMeetingUserMessageAsync(
+            sessionId,
+            messageId,
+            invocationId,
+            content,
+            "meeting continuation resume input",
+            ct).ConfigureAwait(false);
     }
 
     private static void ValidateHitlResumeSnapshot(
@@ -3700,8 +4193,13 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
     private static AgentRef BuiltInHostAgent => new(
         "meeting.host",
         "runtime-v1",
-        "Manage the meeting agenda. Return only JSON with conclude and participantId. "
-        + "Set conclude true when the meeting should end; otherwise select one active participantId.");
+        "You are the meeting host. Speak in natural language to open the floor, steer discussion, "
+        + "and handle interruptions. Use meeting tools when needed: mcli_meeting_list_attachments, "
+        + "mcli_check_pending_user_input, mcli_ask_user, mcli_meeting_output_summary, "
+        + "mcli_meeting_confirm_end. To give the floor to one participant, end with a decision line "
+        + "JSON {\"conclude\":false,\"participantId\":\"...\"}. To end after an explicit user approval "
+        + "and a written summary, call mcli_meeting_confirm_end (or emit {\"conclude\":true,\"participantId\":null} "
+        + "only as a soft exit signal). Do not invent participant ids.");
 
     private static AgentRef BuiltInSummarizerAgent => new(
         "meeting.summarizer",
@@ -3717,17 +4215,6 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             "meeting_selector_decision",
             document.RootElement.Clone(),
             "Select exactly one active meeting participant.");
-    }
-
-    private static RuntimeStructuredOutput CreateHostStructuredOutput()
-    {
-        using var document = JsonDocument.Parse("""
-            {"type":"object","properties":{"conclude":{"type":"boolean"},"participantId":{"type":["string","null"]}},"required":["conclude","participantId"],"additionalProperties":false}
-            """);
-        return new RuntimeStructuredOutput(
-            "meeting_host_decision",
-            document.RootElement.Clone(),
-            "Conclude the meeting or select exactly one active meeting participant.");
     }
 
     private async Task<ProjectedInvocationRequest> CreateHostInvocationRequestAsync(
@@ -3803,6 +4290,7 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             SkillSourceIds: skillCatalogSnapshot?.Skills.Select(static skill => skill.SourceId).ToArray(),
             SkillMaterializedPaths: skillCatalogSnapshot?.Skills.Select(static skill => skill.MaterializedPath).ToArray());
 
+        var availableTools = ResolveAvailableTools(agent, providerId, "meeting-host");
         return new ProjectedInvocationRequest(
             ApplyHostSkills(
                 new AgentInvocationRequest(
@@ -3819,11 +4307,17 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
                             RuntimeProviderRoles.User,
                             [new TextContentBlock(
                                 "Active participants:\n" + CreateCandidateJson(candidates)
-                                + "\nReturn conclude=true and participantId=null to end, or conclude=false with one participantId.")])
+                                + "\nHost this round in natural language. Use meeting tools when needed. "
+                                + "When giving the floor, include a final decision JSON "
+                                + "{\"conclude\":false,\"participantId\":\"<id>\"}. "
+                                + "Closing sequence: mcli_meeting_output_summary → "
+                                + "mcli_check_pending_user_input → mcli_ask_user (if ending) → "
+                                + "mcli_meeting_confirm_end after explicit approval. "
+                                + "Soft exit without tools: {\"conclude\":true,\"participantId\":null}.")])
                     ],
                     snapshot,
-                    AvailableTools: null,
-                    StructuredOutput: CreateHostStructuredOutput(),
+                    AvailableTools: availableTools,
+                    StructuredOutput: null,
                     HistoryMessageCount: 1 + projection.Messages.Length),
                 agent.SkillIds,
                 skillCatalogSnapshot,
@@ -3989,19 +4483,96 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
             return false;
         }
 
-        try
+        if (TryParseHostDecisionJson(hostText, candidates, out participant, out conclude))
         {
-            using var document = JsonDocument.Parse(hostText);
-            if (!document.RootElement.TryGetProperty("conclude", out var concludeElement)
-                || concludeElement.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            return true;
+        }
+
+        // Prefer the last JSON object embedded in natural-language host speech.
+        var embedded = ExtractLastJsonObject(hostText);
+        if (embedded is not null
+            && TryParseHostDecisionJson(embedded, candidates, out participant, out conclude))
+        {
+            return true;
+        }
+
+        // Soft conclude phrases without tools (compat path).
+        if (ContainsHostConcludePhrase(hostText))
+        {
+            conclude = true;
+            return true;
+        }
+
+        // Match an explicit participantId token or unique display name.
+        foreach (var candidate in candidates)
+        {
+            if (hostText.Contains(candidate.ParticipantId, StringComparison.Ordinal))
+            {
+                participant = candidate;
+                conclude = false;
+                return true;
+            }
+        }
+
+        MeetingParticipant? byName = null;
+        foreach (var candidate in candidates)
+        {
+            if (string.IsNullOrWhiteSpace(candidate.DisplayName))
+            {
+                continue;
+            }
+
+            if (!hostText.Contains(candidate.DisplayName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (byName is not null
+                && !string.Equals(
+                    byName.ParticipantId,
+                    candidate.ParticipantId,
+                    StringComparison.Ordinal))
             {
                 return false;
             }
 
-            conclude = concludeElement.GetBoolean();
-            if (conclude)
+            byName = candidate;
+        }
+
+        if (byName is not null)
+        {
+            participant = byName;
+            conclude = false;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryParseHostDecisionJson(
+        string jsonText,
+        List<MeetingParticipant> candidates,
+        out MeetingParticipant? participant,
+        out bool conclude)
+    {
+        participant = null;
+        conclude = false;
+        try
+        {
+            using var document = JsonDocument.Parse(jsonText);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
             {
-                return true;
+                return false;
+            }
+
+            if (document.RootElement.TryGetProperty("conclude", out var concludeElement)
+                && concludeElement.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            {
+                conclude = concludeElement.GetBoolean();
+                if (conclude)
+                {
+                    return true;
+                }
             }
 
             if (!document.RootElement.TryGetProperty("participantId", out var participantId)
@@ -4021,6 +4592,57 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
         {
             return false;
         }
+    }
+
+    private static string? ExtractLastJsonObject(string text)
+    {
+        var end = text.LastIndexOf('}');
+        if (end < 0)
+        {
+            return null;
+        }
+
+        var depth = 0;
+        for (var i = end; i >= 0; i--)
+        {
+            var ch = text[i];
+            if (ch == '}')
+            {
+                depth++;
+            }
+            else if (ch == '{')
+            {
+                depth--;
+                if (depth == 0)
+                {
+                    return text[i..(end + 1)];
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static bool ContainsHostConcludePhrase(string text)
+    {
+        string[] phrases =
+        [
+            "conclude the meeting",
+            "end the meeting",
+            "meeting is concluded",
+            "会议结束",
+            "结束会议",
+            "可以结束"
+        ];
+        foreach (var phrase in phrases)
+        {
+            if (text.Contains(phrase, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static MeetingParticipant? SelectDeterministicFallback(

@@ -91,6 +91,14 @@ public interface IRuntimeClient : IAsyncDisposable
         MeetingPauseRequest request,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Checks that a paused Meeting can continue. Start the continuation with
+    /// <c>run.existing_session</c> after this call returns ReadyForContinuation.
+    /// </summary>
+    public ValueTask<MeetingResumeResult> ResumeMeetingAsync(
+        MeetingResumeRequest request,
+        CancellationToken cancellationToken = default);
+
     public ValueTask<SessionMessagesListResult> ListSessionMessagesAsync(
         SessionMessagesListParameters parameters,
         CancellationToken cancellationToken = default);

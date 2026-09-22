@@ -21,8 +21,11 @@ internal sealed class MeetingInvocationExecutor(
     ToolCatalogSnapshot? toolCatalogSnapshot,
     RuntimeLimits? runtimeLimits,
     ToolConsentCoordinator? toolConsentCoordinator,
-    Func<ToolCatalogSnapshot>? liveCatalogProvider = null)
+    Func<ToolCatalogSnapshot>? liveCatalogProvider = null,
+    Func<MeetingHitlRequest, CancellationToken, Task<MeetingHitlResponse>>? askUserHitlHandler = null)
 {
+    private const string AskUserToolId = "mcli_ask_user";
+
     private readonly IAgentInvocationExecutor _providerExecutor = providerExecutor
         ?? throw new ArgumentNullException(nameof(providerExecutor));
     private readonly ConversationStore _store = store
@@ -31,6 +34,8 @@ internal sealed class MeetingInvocationExecutor(
     private readonly ToolCatalogSnapshot? _toolCatalogSnapshot = toolCatalogSnapshot;
     private readonly Func<ToolCatalogSnapshot>? _liveCatalogProvider = liveCatalogProvider;
     private readonly ToolConsentCoordinator? _toolConsentCoordinator = toolConsentCoordinator;
+    private readonly Func<MeetingHitlRequest, CancellationToken, Task<MeetingHitlResponse>>? _askUserHitlHandler =
+        askUserHitlHandler;
     private readonly RuntimeLimits _runtimeLimits = runtimeLimits ?? new RuntimeLimits(
         MaxToolResultBytesPerInvocation: 4 * 1024 * 1024);
 
@@ -186,10 +191,36 @@ internal sealed class MeetingInvocationExecutor(
                         ct).ConfigureAwait(false);
                 }
 
-                var toolResult = CreateToolResultContent(toolCall, gatewayResult);
-                if (request.IsHostModeSkills
+                var resolvedGatewayResult = gatewayResult;
+                if (string.Equals(toolCall.ToolId, AskUserToolId, StringComparison.Ordinal)
                     && gatewayResult.Kind is ToolGatewayResultKind.Success
-                    && gatewayResult.Result is { Success: true, OutputJson: { } outputJson })
+                    && gatewayResult.Result is { Success: true, OutputJson: { } askOutput }
+                    && TryReadWaitingAskUser(askOutput, out var askRequestId, out var question))
+                {
+                    resolvedGatewayResult = await ResolveAskUserHitlAsync(
+                        request,
+                        toolCall,
+                        gatewayResult.Result,
+                        askRequestId,
+                        question,
+                        ct).ConfigureAwait(false);
+                    if (resolvedGatewayResult.Kind is not ToolGatewayResultKind.Success
+                        || resolvedGatewayResult.Result is not { Success: true })
+                    {
+                        return Failed(
+                            resolvedGatewayResult.Error?.Code
+                                ?? RuntimeErrorCodes.ToolPermissionRequired,
+                            resolvedGatewayResult.Error?.Message
+                                ?? resolvedGatewayResult.Result?.Error
+                                ?? "mcli_ask_user was cancelled or failed while waiting for the user.",
+                            providerEvents);
+                    }
+                }
+
+                var toolResult = CreateToolResultContent(toolCall, resolvedGatewayResult);
+                if (request.IsHostModeSkills
+                    && resolvedGatewayResult.Kind is ToolGatewayResultKind.Success
+                    && resolvedGatewayResult.Result is { Success: true, OutputJson: { } outputJson })
                 {
                     HostModeSkillsSnapshot.TryApplyToolResult(
                         request.SkillActivationStore,
@@ -491,6 +522,196 @@ internal sealed class MeetingInvocationExecutor(
         Convert.ToHexString(SHA256.HashData(
             Encoding.UTF8.GetBytes(string.Join("\n", components))))
             .ToLowerInvariant();
+
+    private static string WriteAskUserAnswerJson(
+        string requestId,
+        string question,
+        string answer,
+        string action)
+    {
+        var buffer = new System.Buffers.ArrayBufferWriter<byte>();
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            writer.WriteStartObject();
+            writer.WriteBoolean("ok", true);
+            writer.WriteBoolean("waitingForUser", false);
+            writer.WriteString("requestId", requestId);
+            writer.WriteString("question", question);
+            writer.WriteString("userAnswer", answer);
+            writer.WriteString("action", action);
+            writer.WriteEndObject();
+        }
+
+        return Encoding.UTF8.GetString(buffer.WrittenSpan);
+    }
+
+    private static bool TryReadWaitingAskUser(
+        string outputJson,
+        out string requestId,
+        out string question)
+    {
+        requestId = string.Empty;
+        question = string.Empty;
+        try
+        {
+            using var document = JsonDocument.Parse(outputJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            if (!document.RootElement.TryGetProperty("waitingForUser", out var waiting)
+                || waiting.ValueKind != JsonValueKind.True)
+            {
+                return false;
+            }
+
+            question = document.RootElement.TryGetProperty("question", out var questionElement)
+                ? questionElement.GetString() ?? string.Empty
+                : string.Empty;
+            requestId = document.RootElement.TryGetProperty("requestId", out var requestElement)
+                ? requestElement.GetString() ?? string.Empty
+                : string.Empty;
+            return !string.IsNullOrWhiteSpace(question) && !string.IsNullOrWhiteSpace(requestId);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private async Task<ToolGatewayResult> ResolveAskUserHitlAsync(
+        AgentInvocationRequest request,
+        ToolCallContentBlock toolCall,
+        ToolResult pendingResult,
+        string requestId,
+        string question,
+        CancellationToken ct)
+    {
+        if (_askUserHitlHandler is null)
+        {
+            return new ToolGatewayResult(
+                ToolGatewayResultKind.Failed,
+                Result: new ToolResult(
+                    toolCall.CallId,
+                    toolCall.ToolId,
+                    false,
+                    Error: "mcli_ask_user requires a meeting HITL handler."),
+                Error: new RuntimeError(
+                    RuntimeErrorCodes.ToolPermissionRequired,
+                    "orchestration",
+                    "mcli_ask_user requires a meeting HITL handler.",
+                    IsRetryable: false,
+                    ProviderDetails: null,
+                    Guid.NewGuid().ToString("N")));
+        }
+
+        var roundIndex = request.Snapshot.RoundIndex ?? 0;
+        var hitlRequest = new MeetingHitlRequest(
+            requestId,
+            request.SessionId,
+            request.RunId,
+            RoundIndex: roundIndex,
+            HostInvocationId: request.InvocationId,
+            Prompt: "meeting.hitl.question.ask-user",
+            Context:
+            [
+                new TextContentBlock(question)
+            ],
+            CreatedAt: DateTimeOffset.UtcNow,
+            ExpiresAt: null);
+
+        MeetingHitlResponse response;
+        try
+        {
+            response = await _askUserHitlHandler(hitlRequest, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+
+        if (response is null
+            || !string.Equals(response.ApprovalRequestId, requestId, StringComparison.Ordinal))
+        {
+            return new ToolGatewayResult(
+                ToolGatewayResultKind.Failed,
+                Result: new ToolResult(
+                    toolCall.CallId,
+                    toolCall.ToolId,
+                    false,
+                    Error: "mcli_ask_user HITL returned a null or mismatched response."),
+                Error: new RuntimeError(
+                    RuntimeErrorCodes.ToolPermissionRequired,
+                    "orchestration",
+                    "mcli_ask_user HITL returned a null or mismatched response.",
+                    IsRetryable: false,
+                    ProviderDetails: null,
+                    Guid.NewGuid().ToString("N")));
+        }
+
+        switch (response.Action)
+        {
+            case MeetingHitlAction.Approve:
+            case MeetingHitlAction.Supplement:
+            {
+                var answer = !string.IsNullOrWhiteSpace(response.Supplement)
+                    ? response.Supplement
+                    : !string.IsNullOrWhiteSpace(response.Reason)
+                        ? response.Reason
+                        : "approved";
+                var answeredJson = WriteAskUserAnswerJson(
+                    requestId,
+                    question,
+                    answer,
+                    response.Action.ToString());
+                return new ToolGatewayResult(
+                    ToolGatewayResultKind.Success,
+                    Result: pendingResult with
+                    {
+                        Success = true,
+                        OutputJson = answeredJson,
+                        Error = null
+                    });
+            }
+
+            case MeetingHitlAction.Reject:
+            case MeetingHitlAction.Cancel:
+            {
+                var reason = response.Reason ?? "User rejected or cancelled mcli_ask_user.";
+                return new ToolGatewayResult(
+                    ToolGatewayResultKind.Failed,
+                    Result: new ToolResult(
+                        toolCall.CallId,
+                        toolCall.ToolId,
+                        false,
+                        Error: reason),
+                    Error: new RuntimeError(
+                        "meeting_ask_user_cancelled",
+                        "orchestration",
+                        reason,
+                        IsRetryable: false,
+                        ProviderDetails: null,
+                        Guid.NewGuid().ToString("N")));
+            }
+
+            default:
+                return new ToolGatewayResult(
+                    ToolGatewayResultKind.Failed,
+                    Result: new ToolResult(
+                        toolCall.CallId,
+                        toolCall.ToolId,
+                        false,
+                        Error: $"Unknown mcli_ask_user HITL action '{response.Action}'."),
+                    Error: new RuntimeError(
+                        "meeting_ask_user_invalid",
+                        "orchestration",
+                        $"Unknown mcli_ask_user HITL action '{response.Action}'.",
+                        IsRetryable: false,
+                        ProviderDetails: null,
+                        Guid.NewGuid().ToString("N")));
+        }
+    }
 
     private sealed record ProviderRoundResult(
         bool Succeeded,

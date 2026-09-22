@@ -691,6 +691,63 @@ public sealed class SqliteMeetingRepository(
         _ = await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Claims a paused meeting for a continuation Run: binds the new run id,
+    /// clears pause flags, and moves status Paused → Running.
+    /// </summary>
+    public async Task ClaimPausedMeetingForContinuationAsync(
+        string sessionId,
+        string newRunId,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(newRunId);
+        var now = FormatTimestamp(DateTimeOffset.UtcNow);
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            UPDATE meeting_sessions
+            SET status = 'Running',
+                run_id = $runId,
+                pause_requested = 0,
+                pause_request_id = NULL,
+                pause_reason = NULL,
+                updated_at = $now
+            WHERE session_id = $sessionId
+              AND status = 'Paused';
+            """;
+        cmd.Parameters.AddWithValue("$runId", newRunId);
+        cmd.Parameters.AddWithValue("$now", now);
+        cmd.Parameters.AddWithValue("$sessionId", sessionId);
+        if (await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false) != 1)
+        {
+            throw new InvalidOperationException(
+                $"Meeting session '{sessionId}' is not paused and cannot be claimed for continuation.");
+        }
+    }
+
+    /// <summary>Updates the active run id for a live meeting without changing status.</summary>
+    public async Task BindActiveRunAsync(
+        string sessionId,
+        string runId,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(runId);
+        var now = FormatTimestamp(DateTimeOffset.UtcNow);
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            UPDATE meeting_sessions
+            SET run_id = $runId,
+                updated_at = $now
+            WHERE session_id = $sessionId
+              AND status IN ('Running', 'WaitingForApproval');
+            """;
+        cmd.Parameters.AddWithValue("$runId", runId);
+        cmd.Parameters.AddWithValue("$now", now);
+        cmd.Parameters.AddWithValue("$sessionId", sessionId);
+        _ = await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+    }
+
     public async Task MarkEndConfirmedAsync(
         string sessionId,
         string? finalSummaryMessageId,
