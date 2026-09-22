@@ -149,6 +149,9 @@ public sealed class ToolCatalogSnapshot
                 : Array.AsReadOnly(descriptor.Tags.ToArray()),
             Capabilities = descriptor.Capabilities is null
                 ? Array.Empty<string>()
-                : Array.AsReadOnly(descriptor.Capabilities.ToArray())
+                : Array.AsReadOnly(descriptor.Capabilities.ToArray()),
+            SupportedModes = descriptor.SupportedModes is null
+                ? null
+                : Array.AsReadOnly(descriptor.SupportedModes.ToArray())
         };
 }

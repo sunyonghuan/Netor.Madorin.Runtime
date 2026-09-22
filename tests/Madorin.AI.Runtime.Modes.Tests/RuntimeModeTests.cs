@@ -96,6 +96,7 @@ public sealed class RuntimeModeTests
                 store,
                 repository,
                 outbox,
+                dataDirectory,
                 new AgentContextComposer(memoryFiles),
                 skillCatalogSnapshotProvider: async token =>
                     await skillCatalog.GetSnapshotForInvocationAsync(token));
@@ -268,7 +269,8 @@ public sealed class RuntimeModeTests
                 new LargeDeltaProviderAdapter(),
                 new ConversationStore(dataDirectory),
                 repository,
-                outbox);
+                outbox,
+                dataDirectory);
 
             var events = new List<RuntimeEventEnvelope>();
             await foreach (var envelope in orchestrator.RunAsync(
@@ -341,6 +343,7 @@ public sealed class RuntimeModeTests
                 new ConversationStore(dataDirectory),
                 repository,
                 outbox,
+                dataDirectory,
                 credentialRefreshHandler: async (request, ct) =>
                 {
                     refreshCount++;

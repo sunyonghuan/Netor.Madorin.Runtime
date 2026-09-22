@@ -183,7 +183,8 @@ public sealed partial class ToolCatalogStore : IToolCatalogStore
                 item.Capabilities,
                 item.Risk,
                 item.ExecutionTarget,
-                item.IsIdempotent);
+                item.IsIdempotent,
+                SupportedModes: null);  // Host tools are visible in all modes
             ValidateDescriptor(descriptor);
             if (!tools.TryAdd(descriptor.ToolId, CloneDescriptor(descriptor)))
             {
@@ -322,6 +323,9 @@ public sealed partial class ToolCatalogStore : IToolCatalogStore
                 : Array.AsReadOnly(descriptor.Tags.ToArray()),
             Capabilities = descriptor.Capabilities is null
                 ? Array.Empty<string>()
-                : Array.AsReadOnly(descriptor.Capabilities.ToArray())
+                : Array.AsReadOnly(descriptor.Capabilities.ToArray()),
+            SupportedModes = descriptor.SupportedModes is null
+                ? null
+                : Array.AsReadOnly(descriptor.SupportedModes.ToArray())
         };
 }

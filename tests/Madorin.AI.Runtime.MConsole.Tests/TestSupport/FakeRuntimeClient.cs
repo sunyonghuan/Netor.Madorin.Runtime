@@ -253,5 +253,31 @@ internal sealed class FakeRuntimeClient : IRuntimeClient
         return ValueTask.CompletedTask;
     }
 
+    public ValueTask<MeetingInputEnqueueResult> EnqueueMeetingInputAsync(
+        MeetingInputEnqueueRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        Operations.Add("enqueue-meeting-input");
+        return ValueTask.FromResult(new MeetingInputEnqueueResult(
+            request.SessionId,
+            "request-1",
+            true,
+            "enqueued",
+            null));
+    }
+
+    public ValueTask<MeetingPauseResult> PauseMeetingAsync(
+        MeetingPauseRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        Operations.Add("pause-meeting");
+        return ValueTask.FromResult(new MeetingPauseResult(
+            request.SessionId,
+            "request-1",
+            true,
+            "paused",
+            null));
+    }
+
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }

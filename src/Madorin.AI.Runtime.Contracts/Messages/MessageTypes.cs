@@ -57,4 +57,7 @@ public static class MessageTypes
     public const string SkillCatalogChanged = "skill.catalog.changed";
     public const string WorkPlanUpdated = "work.plan.updated";
     public const string WorkStepSkipped = "work.step.skipped";
+    public const string ExpertPlanCreated = "expert.plan.created";
+    public const string ExpertStepStatusChanged = "expert.step.status.changed";
+    public const string ExpertPlanStatusChanged = "expert.plan.status.changed";
 }

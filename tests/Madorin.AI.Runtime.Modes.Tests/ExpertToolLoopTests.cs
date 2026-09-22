@@ -35,6 +35,31 @@ public sealed class ExpertToolLoopTests
     }
 
     [TestMethod]
+    public void DiagnosticTest_ToolFilteringForExpertMode()
+    {
+        var registry = new TestToolRegistry();
+        var validator = new JsonSchemaToolValidator();
+        var catalogStore = new ToolCatalogStore(registry, validator);
+        var catalog = catalogStore.CaptureSnapshot();
+
+        Console.WriteLine($"Before filtering: {catalog.Tools.Count} tools");
+        foreach (var tool in catalog.Tools)
+        {
+            Console.WriteLine($"  - {tool.ToolId}, SupportedModes: {(tool.SupportedModes == null ? "null" : string.Join(",", tool.SupportedModes))}");
+        }
+
+        var filtered = catalog.FilterByMode("expert");
+        Console.WriteLine($"After filtering: {filtered.Tools.Count} tools");
+        foreach (var tool in filtered.Tools)
+        {
+            Console.WriteLine($"  - {tool.ToolId}, SupportedModes: {(tool.SupportedModes == null ? "null" : string.Join(",", tool.SupportedModes))}");
+        }
+
+        Assert.IsTrue(filtered.Tools.Any(t => t.ToolId == TestToolRegistry.ToolId),
+            $"Test tool {TestToolRegistry.ToolId} should be visible in expert mode");
+    }
+
+    [TestMethod]
     public async Task RunAsync_ToolCall_ExecutesOnceAndContinuesSameProvider()
     {
         var dataDirectory = Path.Combine(
@@ -77,6 +102,36 @@ public sealed class ExpertToolLoopTests
             var authorization = new ToolAuthorizationService(
                 toolState,
                 RuntimeToolPolicy.CreateRestricted(dataDirectory));
+
+            // Create a Grant to allow the test tool
+            var grant = new ToolGrant(
+                GrantId: "test-grant",
+                RunId: runId,
+                WorkspaceRoot: dataDirectory,
+                AllowedReadRoots: [dataDirectory],
+                AllowedWriteRoots: [dataDirectory],
+                AllowOverwrite: true,
+                AllowMove: true,
+                AllowDelete: true,
+                AllowedExecutables: [],
+                AllowPowerShell: false,
+                NetworkPolicy: new NetworkPolicy(DenyAll: false, AllowedHosts: []),
+                ExpiresAt: DateTimeOffset.UtcNow.AddHours(1),
+                AllowDelegation: false,
+                DelegatedAgentIds: [],
+                AllowedToolIds: [TestToolRegistry.ToolId],
+                AllowedCallIds: null,
+                MaximumRisk: ToolRiskLevel.Network,
+                AllowedEnvironmentVariables: null,
+                AgentId: null,
+                ParentGrantId: null,
+                RootGrantId: null,
+                DelegationChain: null,
+                ApprovalRequestId: null,
+                AllowedSkillScriptKeys: null,
+                SkillCatalogVersion: null);
+            await authorization.SaveGrantAsync(grant, agentId: null, TestContext.CancellationToken);
+
             var executor = new TestToolExecutor();
             using var gateway = new ToolGateway(
                 catalogStore,
@@ -91,6 +146,7 @@ public sealed class ExpertToolLoopTests
                 new ConversationStore(dataDirectory),
                 repository,
                 outbox,
+                dataDirectory,
                 toolGateway: gateway,
                 toolAuthorizationService: authorization,
                 toolCatalogSnapshot: catalog);
@@ -104,7 +160,14 @@ public sealed class ExpertToolLoopTests
                 TestContext.CancellationToken))
             {
                 events.Add(envelope);
+                Console.WriteLine($"Event: {envelope.MessageType}");
             }
+
+            Console.WriteLine($"Total events: {events.Count}");
+            Console.WriteLine($"Event types: {string.Join(", ", events.Select(e => e.MessageType))}");
+
+            var toolCompletedEvents = events.Where(e => e.MessageType == MessageTypes.ToolCallCompleted).ToList();
+            Console.WriteLine($"ToolCallCompleted events: {toolCompletedEvents.Count}");
 
             Assert.AreEqual(2, provider.CallCount);
             Assert.AreEqual(1, executor.CallCount);
@@ -207,6 +270,7 @@ public sealed class ExpertToolLoopTests
                 new ConversationStore(dataDirectory),
                 repository,
                 outbox,
+                dataDirectory,
                 agentContextComposer: new AgentContextComposer(memoryFiles),
                 toolGateway: gateway,
                 toolAuthorizationService: authorization,
@@ -283,6 +347,36 @@ public sealed class ExpertToolLoopTests
             var authorization = new ToolAuthorizationService(
                 toolState,
                 RuntimeToolPolicy.CreateRestricted(dataDirectory));
+
+            // Create a Grant to allow the test tool
+            var grant = new ToolGrant(
+                GrantId: "test-grant",
+                RunId: runId,
+                WorkspaceRoot: dataDirectory,
+                AllowedReadRoots: [dataDirectory],
+                AllowedWriteRoots: [dataDirectory],
+                AllowOverwrite: true,
+                AllowMove: true,
+                AllowDelete: true,
+                AllowedExecutables: [],
+                AllowPowerShell: false,
+                NetworkPolicy: new NetworkPolicy(DenyAll: false, AllowedHosts: []),
+                ExpiresAt: DateTimeOffset.UtcNow.AddHours(1),
+                AllowDelegation: false,
+                DelegatedAgentIds: [],
+                AllowedToolIds: [TestToolRegistry.ToolId],
+                AllowedCallIds: null,
+                MaximumRisk: ToolRiskLevel.Network,
+                AllowedEnvironmentVariables: null,
+                AgentId: null,
+                ParentGrantId: null,
+                RootGrantId: null,
+                DelegationChain: null,
+                ApprovalRequestId: null,
+                AllowedSkillScriptKeys: null,
+                SkillCatalogVersion: null);
+            await authorization.SaveGrantAsync(grant, agentId: null, TestContext.CancellationToken);
+
             var executor = new TestToolExecutor();
             using var gateway = new ToolGateway(
                 catalogStore,
@@ -297,6 +391,7 @@ public sealed class ExpertToolLoopTests
                 new ConversationStore(dataDirectory),
                 repository,
                 outbox,
+                dataDirectory,
                 toolGateway: gateway,
                 toolAuthorizationService: authorization,
                 toolCatalogSnapshot: catalog);
@@ -383,6 +478,7 @@ public sealed class ExpertToolLoopTests
                 new ConversationStore(dataDirectory),
                 repository,
                 outbox,
+                dataDirectory,
                 toolGateway: gateway,
                 toolAuthorizationService: authorization,
                 toolCatalogSnapshot: catalog);
@@ -492,6 +588,7 @@ public sealed class ExpertToolLoopTests
                 new ConversationStore(dataDirectory),
                 repository,
                 outbox,
+                dataDirectory,
                 toolGateway: gateway,
                 toolAuthorizationService: authorization,
                 toolCatalogSnapshot: catalog);
@@ -594,13 +691,23 @@ public sealed class ExpertToolLoopTests
             [EnumeratorCancellation] CancellationToken ct = default)
         {
             CallCount++;
+            Console.WriteLine($"ToolLoopProvider.CompleteStreamingAsync called, CallCount={CallCount}");
+            Console.WriteLine($"request.Tools count: {request.Tools?.Length ?? 0}");
+            if (request.Tools != null)
+            {
+                foreach (var tool in request.Tools)
+                {
+                    Console.WriteLine($"  - {tool.ToolId}");
+                }
+            }
             await Task.Yield();
             ct.ThrowIfCancellationRequested();
             if (CallCount == 1)
             {
-                Assert.IsNotNull(request.Tools);
+                Assert.IsNotNull(request.Tools, "request.Tools should not be null");
                 Assert.IsTrue(request.Tools.Any(static tool =>
-                    tool.ToolId == TestToolRegistry.ToolId));
+                    tool.ToolId == TestToolRegistry.ToolId),
+                    $"request.Tools should contain {TestToolRegistry.ToolId}");
                 yield return new ReasoningDeltaProviderEvent(
                     request.InvocationId,
                     "I should use the calculate tool.");
@@ -899,6 +1006,274 @@ public sealed class ExpertToolLoopTests
             yield return new TextDeltaProviderEvent(
                 request.InvocationId,
                 "Delegation failed as expected.");
+            yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
+        }
+
+        public Task ValidateCapabilitiesAsync(
+            ContentBlock[] input,
+            CancellationToken ct = default) => Task.CompletedTask;
+    }
+
+    // ============================================================
+    // @ Syntax Delegation Tests
+    // ============================================================
+
+    [TestMethod]
+    public async Task RunAsync_AtSyntaxDelegation_InvokesSubAgent()
+    {
+        var dataDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"madorin-expert-atsyntax-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dataDirectory);
+        try
+        {
+            await using var connection = await DataDirectoryInitializer.InitializeAsync(
+                dataDirectory,
+                TestContext.CancellationToken);
+            var repository = new SqliteSessionRepository(connection);
+            var sessionId = await repository.CreateSessionAsync(
+                RuntimeMode.Expert,
+                "atsyntax-session",
+                TimeSpan.FromDays(1),
+                TestContext.CancellationToken);
+            var runId = await repository.CreateRunAsync(
+                sessionId,
+                "atsyntax-run",
+                TimeSpan.FromDays(1),
+                TestContext.CancellationToken);
+            await repository.TransitionRunStatusAsync(
+                runId,
+                RunStatus.Accepted,
+                RunStatus.Preparing,
+                TestContext.CancellationToken);
+            await repository.TransitionRunStatusAsync(
+                runId,
+                RunStatus.Preparing,
+                RunStatus.Running,
+                TestContext.CancellationToken);
+
+            using var outbox = new SqliteEventOutbox(connection);
+            using var toolState = new SqliteToolIntentRepository(connection);
+            var registry = new TestToolRegistry();
+            var validator = new JsonSchemaToolValidator();
+            var catalogStore = new ToolCatalogStore(registry, validator);
+            var catalog = catalogStore.CaptureSnapshot();
+            var authorization = new ToolAuthorizationService(
+                toolState,
+                RuntimeToolPolicy.CreateRestricted(dataDirectory));
+            using var gateway = new ToolGateway(
+                catalogStore,
+                validator,
+                authorization,
+                [new TestToolExecutor()],
+                toolState,
+                outbox);
+            var provider = new AtSyntaxDelegationProvider();
+            var orchestrator = new ExpertModeOrchestrator(
+                provider,
+                new ConversationStore(dataDirectory),
+                repository,
+                outbox,
+                dataDirectory,
+                toolGateway: gateway,
+                toolAuthorizationService: authorization,
+                toolCatalogSnapshot: catalog);
+
+            var events = new List<RuntimeEventEnvelope>();
+            await foreach (var envelope in orchestrator.RunAsync(
+                runId,
+                sessionId,
+                CreateAtSyntaxDelegationRequest(),
+                "runtime-atsyntax",
+                TestContext.CancellationToken))
+            {
+                events.Add(envelope);
+            }
+
+            Assert.AreEqual(1, provider.SubAgentCallCount, "Sub-agent should be called once");
+            Assert.AreEqual("developer", provider.InvokedAgentId);
+            Assert.AreEqual("say hello", provider.InvokedTask);
+            Assert.AreEqual(RunStatus.Completed, await repository.GetRunStatusAsync(runId));
+            Assert.IsTrue(events.Any(item => item.MessageType == MessageTypes.RunCompleted));
+        }
+        finally
+        {
+            if (Directory.Exists(dataDirectory))
+            {
+                Directory.Delete(dataDirectory, recursive: true);
+            }
+        }
+    }
+
+    [TestMethod]
+    public async Task RunAsync_AtSyntaxDelegation_UnknownAgent_ThrowsException()
+    {
+        var dataDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"madorin-expert-atsyntax-unknown-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dataDirectory);
+        try
+        {
+            await using var connection = await DataDirectoryInitializer.InitializeAsync(
+                dataDirectory,
+                TestContext.CancellationToken);
+            var repository = new SqliteSessionRepository(connection);
+            var sessionId = await repository.CreateSessionAsync(
+                RuntimeMode.Expert,
+                "atsyntax-unknown-session",
+                TimeSpan.FromDays(1),
+                TestContext.CancellationToken);
+            var runId = await repository.CreateRunAsync(
+                sessionId,
+                "atsyntax-unknown-run",
+                TimeSpan.FromDays(1),
+                TestContext.CancellationToken);
+            await repository.TransitionRunStatusAsync(
+                runId,
+                RunStatus.Accepted,
+                RunStatus.Preparing,
+                TestContext.CancellationToken);
+            await repository.TransitionRunStatusAsync(
+                runId,
+                RunStatus.Preparing,
+                RunStatus.Running,
+                TestContext.CancellationToken);
+
+            using var outbox = new SqliteEventOutbox(connection);
+            using var toolState = new SqliteToolIntentRepository(connection);
+            var registry = new TestToolRegistry();
+            var validator = new JsonSchemaToolValidator();
+            var catalogStore = new ToolCatalogStore(registry, validator);
+            var catalog = catalogStore.CaptureSnapshot();
+            var authorization = new ToolAuthorizationService(
+                toolState,
+                RuntimeToolPolicy.CreateRestricted(dataDirectory));
+            using var gateway = new ToolGateway(
+                catalogStore,
+                validator,
+                authorization,
+                [new TestToolExecutor()],
+                toolState,
+                outbox);
+            var provider = new AtSyntaxDelegationProvider();
+            var orchestrator = new ExpertModeOrchestrator(
+                provider,
+                new ConversationStore(dataDirectory),
+                repository,
+                outbox,
+                dataDirectory,
+                toolGateway: gateway,
+                toolAuthorizationService: authorization,
+                toolCatalogSnapshot: catalog);
+
+            InvalidOperationException? exception = null;
+            try
+            {
+                await foreach (var _ in orchestrator.RunAsync(
+                    runId,
+                    sessionId,
+                    CreateAtSyntaxUnknownAgentRequest(),
+                    "runtime-atsyntax-unknown",
+                    TestContext.CancellationToken))
+                {
+                }
+            }
+            catch (InvalidOperationException ex)
+            {
+                exception = ex;
+            }
+
+            Assert.IsNotNull(exception, "Should throw InvalidOperationException");
+            StringAssert.Contains(exception.Message, "unknown_agent");
+            StringAssert.Contains(exception.Message, "not found");
+        }
+        finally
+        {
+            if (Directory.Exists(dataDirectory))
+            {
+                Directory.Delete(dataDirectory, recursive: true);
+            }
+        }
+    }
+
+    // Helper methods for @ syntax tests
+    private static NewSessionRunRequest CreateAtSyntaxDelegationRequest()
+    {
+        var primary = new AgentRef("expert", "v1", "You coordinate specialists.");
+        var developer = new AgentRef("developer", "v1", "You are a developer assistant.");
+        return new(
+            "atsyntax-session-key",
+            "atsyntax-run-key",
+            RuntimeMode.Expert,
+            new NextTurnSelection(
+                1,
+                RuntimeMode.Expert,
+                new DefaultSelection("tool-loop", "tool-model"),
+                new ExpertModeOptions(primary, [primary, developer])),
+            [new TextContentBlock("@developer say hello")]);
+    }
+
+    private static NewSessionRunRequest CreateAtSyntaxUnknownAgentRequest()
+    {
+        var primary = new AgentRef("expert", "v1", "You coordinate specialists.");
+        var developer = new AgentRef("developer", "v1", "You are a developer assistant.");
+        return new(
+            "atsyntax-unknown-session-key",
+            "atsyntax-unknown-run-key",
+            RuntimeMode.Expert,
+            new NextTurnSelection(
+                1,
+                RuntimeMode.Expert,
+                new DefaultSelection("tool-loop", "tool-model"),
+                new ExpertModeOptions(primary, [primary, developer])),
+            [new TextContentBlock("@unknown_agent do something")]);
+    }
+
+    private sealed class AtSyntaxDelegationProvider : IRuntimeProviderAdapter
+    {
+        public string ProviderId => "tool-loop";
+
+        public ProviderCapabilities Capabilities { get; } = new(
+            Streaming: true,
+            ToolCalling: true);
+
+        public IReadOnlyList<ProviderModel> Models { get; } =
+            [new("tool-model", "Tool Model", ContextWindow: 8192)];
+
+        public int SubAgentCallCount { get; private set; }
+
+        public string? InvokedAgentId { get; private set; }
+
+        public string? InvokedTask { get; private set; }
+
+        public async IAsyncEnumerable<RuntimeProviderEvent> CompleteStreamingAsync(
+            RuntimeProviderRequest request,
+            [EnumeratorCancellation] CancellationToken ct = default)
+        {
+            await Task.Yield();
+            ct.ThrowIfCancellationRequested();
+
+            // Detect sub-agent invocation by agent ID
+            if (string.Equals(request.AgentId, "developer", StringComparison.Ordinal))
+            {
+                SubAgentCallCount++;
+                InvokedAgentId = request.AgentId;
+
+                // Extract task from system prompt injection
+                var userMsg = request.Messages.LastOrDefault(m => m.Role == "user");
+                if (userMsg != null)
+                {
+                    var textContent = userMsg.Content.OfType<TextContentBlock>().FirstOrDefault();
+                    InvokedTask = textContent?.Text ?? string.Empty;
+                }
+
+                yield return new TextDeltaProviderEvent(request.InvocationId, "Hello from developer!");
+                yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
+                yield break;
+            }
+
+            // Main expert should not be called when delegation is active
+            yield return new TextDeltaProviderEvent(request.InvocationId, "Unexpected call to expert.");
             yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
         }
 

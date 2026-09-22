@@ -1,8 +1,11 @@
+using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using Madorin.AI.Runtime.Contracts;
+using Madorin.AI.Runtime.Contracts.Expert;
 using Madorin.AI.Runtime.Contracts.Serialization;
 using Madorin.AI.Runtime.Core;
 using Madorin.AI.Runtime.Entities;
@@ -24,6 +27,7 @@ public sealed class ExpertModeOrchestrator(
     ConversationStore store,
     SqliteSessionRepository sessionRepo,
     SqliteEventOutbox outbox,
+    string workspaceRoot,
     AgentContextComposer? agentContextComposer = null,
     Func<CredentialsRefreshRequestedEvent, CancellationToken, Task<bool>>?
         credentialRefreshHandler = null,
@@ -50,6 +54,16 @@ public sealed class ExpertModeOrchestrator(
     private const string ProjectionVersion = "expert-full-tail-v1";
     /// <summary>与 BuiltinToolRegistry.DelegateToAgentToolId 保持一致，避免 Modes.Expert 反向依赖 Tools.Builtin。</summary>
     private const string DelegateToAgentToolId = "mcli_delegate_agent";
+    /// <summary>与 BuiltinToolRegistry.ExpertCreatePlanToolId 保持一致。</summary>
+    private const string ExpertCreatePlanToolId = "mcli_expert_create_plan";
+    /// <summary>与 BuiltinToolRegistry.ExpertExecuteStepToolId 保持一致。</summary>
+    private const string ExpertExecuteStepToolId = "mcli_expert_execute_step";
+    /// <summary>与 BuiltinToolRegistry.ExpertGetPlanToolId 保持一致。</summary>
+    private const string ExpertGetPlanToolId = "mcli_expert_get_plan";
+    /// <summary>与 BuiltinToolRegistry.ExpertUpdateStepStatusToolId 保持一致。</summary>
+    private const string ExpertUpdateStepStatusToolId = "mcli_expert_update_step_status";
+    /// <summary>与 BuiltinToolRegistry.ExpertAbandonPlanToolId 保持一致。</summary>
+    private const string ExpertAbandonPlanToolId = "mcli_expert_abandon_plan";
     private readonly SqliteEventOutbox _outbox = outbox
         ?? throw new ArgumentNullException(nameof(outbox));
     private readonly IRuntimeProviderAdapter _provider = provider
@@ -58,6 +72,8 @@ public sealed class ExpertModeOrchestrator(
         ?? throw new ArgumentNullException(nameof(sessionRepo));
     private readonly ConversationStore _store = store
         ?? throw new ArgumentNullException(nameof(store));
+    private readonly string _workspaceRoot = workspaceRoot
+        ?? throw new ArgumentNullException(nameof(workspaceRoot));
     private readonly AgentContextComposer? _agentContextComposer = agentContextComposer;
     private readonly Func<CredentialsRefreshRequestedEvent, CancellationToken, Task<bool>>?
         _credentialRefreshHandler = credentialRefreshHandler;
@@ -97,6 +113,7 @@ public sealed class ExpertModeOrchestrator(
     private IReadOnlyDictionary<string, string>? _hostCatalogPathsByName;
     private IReadOnlyDictionary<string, string>? _hostCatalogDescriptionsByName;
     private IReadOnlyList<SkillScopeSourceRoot>? _hostScopeSourceRoots;
+    private ExpertPlanManager? _planManager;
 
     public RuntimeMode Mode => RuntimeMode.Expert;
 
@@ -137,12 +154,16 @@ public sealed class ExpertModeOrchestrator(
         var invocationId = Guid.NewGuid().ToString("N");
         var startedAt = DateTimeOffset.UtcNow;
 
-        // Inject available sub-agents list into system prompt when provided
+        // Initialize plan manager for this session
+        _planManager = new ExpertPlanManager(_workspaceRoot, _outbox);
+
+        // Inject available sub-agents list and plan progress into system prompt
         var baseSystemPrompt = expert.Agent.SystemPrompt;
-        var enhancedSystemPrompt = AppendAvailableSubAgentsList(
+        var withSubAgents = AppendAvailableSubAgentsList(
             baseSystemPrompt,
             expert.Agent,
             expert.AvailableAgents);
+        var enhancedSystemPrompt = PrepareSystemPromptWithPlan(withSubAgents);
 
         var agentContext = _agentContextComposer is null
             ? AgentContextComposer.WithoutMemory(enhancedSystemPrompt)
@@ -323,7 +344,7 @@ public sealed class ExpertModeOrchestrator(
         var systemMessage = new RuntimeProviderMessage(
             RuntimeProviderRoles.System,
             [new TextContentBlock(agentContext.Instructions)]);
-        var catalogSnapshot = CaptureCatalogSnapshot();
+        var catalogSnapshot = CaptureCatalogSnapshot()?.FilterByMode("expert");
         ToolDescriptor[]? tools = _toolGateway is not null && catalogSnapshot is not null
             ? [.. catalogSnapshot.Tools]
             : null;
@@ -529,6 +550,22 @@ public sealed class ExpertModeOrchestrator(
                 runSequence++,
                 MessageTypes.ContextProjectionAdjusted,
                 adjustedPayload,
+                ct).ConfigureAwait(false);
+        }
+
+        // Attempt to restore active plan from previous session
+        var restoredPlan = await _planManager.RestoreActivePlanAsync(ct).ConfigureAwait(false);
+        if (restoredPlan is not null)
+        {
+            var planRestoredPayload = JsonSerializer.SerializeToElement(
+                new { PlanId = restoredPlan.PlanId, Goal = restoredPlan.Goal, StepCount = restoredPlan.Steps.Length },
+                RuntimeJsonContext.Default.JsonElement);
+            yield return await CreateEnvelopeAsync(
+                runtimeInstanceId,
+                runId,
+                runSequence++,
+                "plan.restored",
+                planRestoredPayload,
                 ct).ConfigureAwait(false);
         }
 
@@ -757,7 +794,7 @@ public sealed class ExpertModeOrchestrator(
             }
 
             // 每轮工具调用前刷新 live catalog（search 命中注入后必须可见）
-            catalogSnapshot = CaptureCatalogSnapshot();
+            catalogSnapshot = CaptureCatalogSnapshot()?.FilterByMode("expert");
             if (_toolGateway is null || catalogSnapshot is null)
             {
                 failure = CreateRuntimeError(
@@ -789,7 +826,7 @@ public sealed class ExpertModeOrchestrator(
             foreach (var toolCall in toolCalls)
             {
                 // 单次调用再采一次，覆盖 search 注入与并发 Patch
-                var liveCatalog = CaptureCatalogSnapshot() ?? catalogSnapshot;
+                var liveCatalog = CaptureCatalogSnapshot()?.FilterByMode("expert") ?? catalogSnapshot;
                 var invocation = new ToolInvocation(
                     toolCall.CallId,
                     toolCall.ToolId,
@@ -834,7 +871,7 @@ public sealed class ExpertModeOrchestrator(
                     gatewayResult = await ResolveConsentAndExecuteAsync(
                         invocation,
                         gatewayResult,
-                        CaptureCatalogSnapshot() ?? catalogSnapshot,
+                        CaptureCatalogSnapshot()?.FilterByMode("expert") ?? catalogSnapshot,
                         ct).ConfigureAwait(false);
                     runSequence = await _outbox.GetNextRunSequenceAsync(runId, ct)
                         .ConfigureAwait(false);
@@ -863,6 +900,18 @@ public sealed class ExpertModeOrchestrator(
                     toolResult = await RouteDelegateAgentToolAsync(
                         toolCall,
                         expert,
+                        runId,
+                        sessionId,
+                        invocationId,
+                        ct).ConfigureAwait(false);
+                }
+                // 计划工具受理后，由 Expert 编排器处理计划创建和步骤执行。
+                else if (IsExpertPlanTool(toolCall.ToolId)
+                    && gatewayResult.Kind is ToolGatewayResultKind.Success
+                    && gatewayResult.Result is { Success: true })
+                {
+                    toolResult = await RouteExpertPlanToolAsync(
+                        toolCall,
                         runId,
                         sessionId,
                         invocationId,
@@ -1110,7 +1159,7 @@ public sealed class ExpertModeOrchestrator(
             _toolPermissionHandler,
             _approvalHandler,
             _toolStateStore,
-            liveCatalogProvider: () => CaptureCatalogSnapshot() ?? catalogSnapshot);
+            liveCatalogProvider: () => CaptureCatalogSnapshot()?.FilterByMode("expert") ?? catalogSnapshot);
         return await coordinator.ResolveAndExecuteAsync(
             invocation,
             pendingResult,
@@ -1172,6 +1221,10 @@ public sealed class ExpertModeOrchestrator(
 
     private static bool IsDelegateToAgentTool(string toolId) =>
         string.Equals(toolId, DelegateToAgentToolId, StringComparison.Ordinal);
+
+    private static bool IsExpertPlanTool(string toolId) =>
+        string.Equals(toolId, ExpertCreatePlanToolId, StringComparison.Ordinal)
+        || string.Equals(toolId, ExpertExecuteStepToolId, StringComparison.Ordinal);
 
     /// <summary>并行 Job Worker：解析 AvailableAgents 并复用 InvokeSubAgentAsync。</summary>
     private async Task<AgentJobWorkerResult> ExecuteAgentJobAsync(
@@ -1418,6 +1471,123 @@ public sealed class ExpertModeOrchestrator(
             [new TextContentBlock(outputJson)]);
     }
 
+    /// <summary>
+    /// 路由 Expert 计划工具调用到 ExpertPlanManager。
+    /// </summary>
+    private async Task<ToolResultContentBlock> RouteExpertPlanToolAsync(
+        ToolCallContentBlock toolCall,
+        string runId,
+        string sessionId,
+        string invocationId,
+        CancellationToken ct)
+    {
+        try
+        {
+            if (string.Equals(toolCall.ToolId, ExpertCreatePlanToolId, StringComparison.Ordinal))
+            {
+                return await HandleCreatePlanAsync(toolCall, runId, sessionId, invocationId, ct)
+                    .ConfigureAwait(false);
+            }
+
+            if (string.Equals(toolCall.ToolId, ExpertExecuteStepToolId, StringComparison.Ordinal))
+            {
+                return await HandleExecuteStepAsync(toolCall, runId, sessionId, invocationId, ct)
+                    .ConfigureAwait(false);
+            }
+
+            if (string.Equals(toolCall.ToolId, ExpertGetPlanToolId, StringComparison.Ordinal))
+            {
+                return await HandleGetPlanAsync(toolCall, runId, sessionId, invocationId, ct)
+                    .ConfigureAwait(false);
+            }
+
+            if (string.Equals(toolCall.ToolId, ExpertUpdateStepStatusToolId, StringComparison.Ordinal))
+            {
+                return await HandleUpdateStepStatusAsync(toolCall, runId, sessionId, invocationId, ct)
+                    .ConfigureAwait(false);
+            }
+
+            if (string.Equals(toolCall.ToolId, ExpertAbandonPlanToolId, StringComparison.Ordinal))
+            {
+                return await HandleAbandonPlanAsync(toolCall, runId, sessionId, invocationId, ct)
+                    .ConfigureAwait(false);
+            }
+
+            return CreatePlanToolErrorResult(
+                toolCall,
+                $"Unknown plan tool: {toolCall.ToolId}");
+        }
+        catch (Exception ex)
+        {
+            return CreatePlanToolErrorResult(
+                toolCall,
+                $"Plan tool execution failed: {ex.Message}");
+        }
+    }
+
+    private async Task<ToolResultContentBlock> HandleCreatePlanAsync(
+        ToolCallContentBlock toolCall,
+        string runId,
+        string sessionId,
+        string invocationId,
+        CancellationToken ct)
+    {
+        if (!TryParseCreatePlanArguments(
+                toolCall.Arguments.GetRawText(),
+                out var goal,
+                out var stepDrafts,
+                out var parseError))
+        {
+            return CreatePlanToolErrorResult(toolCall, parseError ?? "Invalid create_plan arguments.");
+        }
+
+        var request = new CreateExpertPlanRequest(goal, stepDrafts);
+        var plan = await _planManager!.CreatePlanAsync(sessionId, runId, request, ct).ConfigureAwait(false);
+        var outputJson = SerializePlanResult(plan);
+        return new ToolResultContentBlock(
+            toolCall.CallId,
+            toolCall.ToolId,
+            Success: true,
+            [new TextContentBlock(outputJson)]);
+    }
+
+    private async Task<ToolResultContentBlock> HandleExecuteStepAsync(
+        ToolCallContentBlock toolCall,
+        string runId,
+        string sessionId,
+        string invocationId,
+        CancellationToken ct)
+    {
+        if (!TryParseExecuteStepArguments(
+                toolCall.Arguments.GetRawText(),
+                out var stepId,
+                out var parseError))
+        {
+            return CreatePlanToolErrorResult(toolCall, parseError ?? "Invalid execute_step arguments.");
+        }
+
+        var activePlan = _planManager!.ActivePlan;
+        if (activePlan is null)
+        {
+            return CreatePlanToolErrorResult(toolCall, "No active plan.");
+        }
+
+        var plan = await _planManager.UpdateStepStatusAsync(
+            stepId,
+            runId,
+            ExpertStepStatus.Completed,
+            progress: 100,
+            notes: null,
+            ct).ConfigureAwait(false);
+
+        var outputJson = SerializeStepExecutionResult(plan, stepId);
+        return new ToolResultContentBlock(
+            toolCall.CallId,
+            toolCall.ToolId,
+            Success: true,
+            [new TextContentBlock(outputJson)]);
+    }
+
     private static string BuildDelegateResultJson(
         bool delegated,
         bool success,
@@ -1452,6 +1622,429 @@ public sealed class ExpertModeOrchestrator(
         }
 
         return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    private static bool TryParseCreatePlanArguments(
+        string argumentsJson,
+        out string goal,
+        out ExpertPlanStepDraft[] stepDrafts,
+        out string? error)
+    {
+        goal = string.Empty;
+        stepDrafts = [];
+        error = null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(argumentsJson);
+            var root = document.RootElement;
+
+            if (!root.TryGetProperty("goal", out var goalElement)
+                || goalElement.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(goalElement.GetString()))
+            {
+                error = "Missing or invalid 'goal' parameter.";
+                return false;
+            }
+
+            if (!root.TryGetProperty("steps", out var stepsElement)
+                || stepsElement.ValueKind != JsonValueKind.Array)
+            {
+                error = "Missing or invalid 'steps' parameter (must be an array).";
+                return false;
+            }
+
+            var stepList = new List<ExpertPlanStepDraft>();
+            var stepIndex = 0;
+            foreach (var stepElement in stepsElement.EnumerateArray())
+            {
+                if (stepElement.ValueKind != JsonValueKind.Object)
+                {
+                    error = $"Step {stepIndex} must be an object.";
+                    return false;
+                }
+
+                if (!stepElement.TryGetProperty("title", out var titleElement)
+                    || titleElement.ValueKind != JsonValueKind.String
+                    || string.IsNullOrWhiteSpace(titleElement.GetString()))
+                {
+                    error = $"Step {stepIndex} missing or invalid 'title'.";
+                    return false;
+                }
+
+                var stepId = $"step-{stepIndex + 1}";
+                var title = titleElement.GetString()!.Trim();
+                var description = stepElement.TryGetProperty("description", out var descElement)
+                    && descElement.ValueKind == JsonValueKind.String
+                    ? descElement.GetString()?.Trim()
+                    : null;
+                var agentName = stepElement.TryGetProperty("agentName", out var agentElement)
+                    && agentElement.ValueKind == JsonValueKind.String
+                    ? agentElement.GetString()?.Trim()
+                    : null;
+
+                stepList.Add(new ExpertPlanStepDraft(stepId, title, description, agentName));
+                stepIndex++;
+            }
+
+            if (stepList.Count < 2 || stepList.Count > 15)
+            {
+                error = "Plan must have 2-15 steps.";
+                return false;
+            }
+
+            goal = goalElement.GetString()!.Trim();
+            stepDrafts = [.. stepList];
+            return true;
+        }
+        catch (JsonException ex)
+        {
+            error = ex.Message;
+            return false;
+        }
+    }
+
+    private static bool TryParseExecuteStepArguments(
+        string argumentsJson,
+        out string stepId,
+        out string? error)
+    {
+        stepId = string.Empty;
+        error = null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(argumentsJson);
+            var root = document.RootElement;
+
+            if (!root.TryGetProperty("stepId", out var stepIdElement)
+                || stepIdElement.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(stepIdElement.GetString()))
+            {
+                error = "Missing or invalid 'stepId' parameter.";
+                return false;
+            }
+
+            stepId = stepIdElement.GetString()!.Trim();
+            return true;
+        }
+        catch (JsonException ex)
+        {
+            error = ex.Message;
+            return false;
+        }
+    }
+
+    private static ToolResultContentBlock CreatePlanToolErrorResult(
+        ToolCallContentBlock toolCall,
+        string errorMessage)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            writer.WriteBoolean("success", false);
+            writer.WriteString("error", errorMessage);
+            writer.WriteEndObject();
+        }
+
+        var outputJson = Encoding.UTF8.GetString(stream.ToArray());
+        return new ToolResultContentBlock(
+            toolCall.CallId,
+            toolCall.ToolId,
+            Success: false,
+            [new TextContentBlock(outputJson)]);
+    }
+
+    private static string SerializePlanResult(ExpertPlan plan)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            writer.WriteBoolean("success", true);
+            writer.WriteString("planId", plan.PlanId);
+            writer.WriteString("goal", plan.Goal);
+            writer.WriteNumber("totalSteps", plan.Steps.Length);
+            writer.WriteStartArray("steps");
+            for (int i = 0; i < plan.Steps.Length; i++)
+            {
+                var step = plan.Steps[i];
+                writer.WriteStartObject();
+                writer.WriteNumber("index", i);
+                writer.WriteString("stepId", step.StepId);
+                writer.WriteString("title", step.Title);
+                if (step.Description is not null)
+                {
+                    writer.WriteString("description", step.Description);
+                }
+                writer.WriteString("status", step.Status.ToString().ToLowerInvariant());
+                writer.WriteEndObject();
+            }
+
+            writer.WriteEndArray();
+            writer.WriteEndObject();
+        }
+
+        return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    private static string SerializeStepExecutionResult(ExpertPlan plan, string executedStepId)
+    {
+        var executedStep = plan.Steps.FirstOrDefault(s => s.StepId == executedStepId);
+        var completedCount = plan.Steps.Count(s => s.Status == ExpertStepStatus.Completed);
+        var totalCount = plan.Steps.Length;
+
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            writer.WriteBoolean("success", true);
+            writer.WriteString("stepId", executedStepId);
+            writer.WriteString("status", executedStep?.Status.ToString().ToLowerInvariant() ?? "unknown");
+            writer.WriteNumber("completedSteps", completedCount);
+            writer.WriteNumber("totalSteps", totalCount);
+            writer.WriteBoolean("planCompleted", plan.Status == ExpertPlanStatus.Completed);
+            writer.WriteEndObject();
+        }
+
+        return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    private async Task<ToolResultContentBlock> HandleGetPlanAsync(
+        ToolCallContentBlock toolCall,
+        string runId,
+        string sessionId,
+        string invocationId,
+        CancellationToken ct)
+    {
+        if (_planManager?.ActivePlan is null)
+        {
+            using var stream = new MemoryStream();
+            using (var writer = new Utf8JsonWriter(stream))
+            {
+                writer.WriteStartObject();
+                writer.WriteBoolean("success", true);
+                writer.WriteBoolean("hasPlan", false);
+                writer.WriteString("message", "No active plan found.");
+                writer.WriteEndObject();
+            }
+
+            var outputJson = Encoding.UTF8.GetString(stream.ToArray());
+            return new ToolResultContentBlock(
+                toolCall.CallId,
+                toolCall.ToolId,
+                Success: true,
+                [new TextContentBlock(outputJson)]);
+        }
+
+        var plan = _planManager.ActivePlan;
+        var outputJsonWithPlan = SerializeGetPlanResult(plan);
+
+        return new ToolResultContentBlock(
+            toolCall.CallId,
+            toolCall.ToolId,
+            Success: true,
+            [new TextContentBlock(outputJsonWithPlan)]);
+    }
+
+    private async Task<ToolResultContentBlock> HandleUpdateStepStatusAsync(
+        ToolCallContentBlock toolCall,
+        string runId,
+        string sessionId,
+        string invocationId,
+        CancellationToken ct)
+    {
+        if (_planManager?.ActivePlan is null)
+        {
+            return CreatePlanToolErrorResult(toolCall, "No active plan to update.");
+        }
+
+        if (!TryParseUpdateStepStatusArguments(
+                toolCall.Arguments.GetRawText(),
+                out var stepIndex,
+                out var newStatus,
+                out var notes,
+                out var parseError))
+        {
+            return CreatePlanToolErrorResult(toolCall, parseError ?? "Invalid update_step_status arguments.");
+        }
+
+        try
+        {
+            var oldStatus = _planManager.ActivePlan.Steps[stepIndex].Status;
+            var updatedPlan = await _planManager.UpdateStepStatusByIndexAsync(
+                stepIndex,
+                runId,
+                newStatus,
+                notes,
+                ct).ConfigureAwait(false);
+
+            using var stream = new MemoryStream();
+            using (var writer = new Utf8JsonWriter(stream))
+            {
+                writer.WriteStartObject();
+                writer.WriteBoolean("success", true);
+                writer.WriteNumber("stepIndex", stepIndex);
+                writer.WriteString("oldStatus", oldStatus.ToString().ToLowerInvariant());
+                writer.WriteString("newStatus", newStatus.ToString().ToLowerInvariant());
+                writer.WriteString("message", $"Step {stepIndex} updated from {oldStatus} to {newStatus}.");
+                writer.WriteEndObject();
+            }
+
+            var outputJson = Encoding.UTF8.GetString(stream.ToArray());
+            return new ToolResultContentBlock(
+                toolCall.CallId,
+                toolCall.ToolId,
+                Success: true,
+                [new TextContentBlock(outputJson)]);
+        }
+        catch (Exception ex)
+        {
+            return CreatePlanToolErrorResult(toolCall, $"Failed to update step status: {ex.Message}");
+        }
+    }
+
+    private async Task<ToolResultContentBlock> HandleAbandonPlanAsync(
+        ToolCallContentBlock toolCall,
+        string runId,
+        string sessionId,
+        string invocationId,
+        CancellationToken ct)
+    {
+        if (_planManager?.ActivePlan is null)
+        {
+            return CreatePlanToolErrorResult(toolCall, "No active plan to abandon.");
+        }
+
+        var planId = _planManager.ActivePlan.PlanId;
+        await _planManager.AbandonPlanAsync(reason: null, ct).ConfigureAwait(false);
+
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            writer.WriteBoolean("success", true);
+            writer.WriteString("planId", planId);
+            writer.WriteString("message", $"Plan '{planId}' has been abandoned.");
+            writer.WriteEndObject();
+        }
+
+        var outputJson = Encoding.UTF8.GetString(stream.ToArray());
+        return new ToolResultContentBlock(
+            toolCall.CallId,
+            toolCall.ToolId,
+            Success: true,
+            [new TextContentBlock(outputJson)]);
+    }
+
+    private static string SerializeGetPlanResult(ExpertPlan plan)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            writer.WriteBoolean("success", true);
+            writer.WriteBoolean("hasPlan", true);
+            writer.WriteString("planId", plan.PlanId);
+            writer.WriteString("title", plan.Goal);
+            writer.WriteString("status", plan.Status.ToString().ToLowerInvariant());
+
+            writer.WriteStartArray("steps");
+            for (int i = 0; i < plan.Steps.Length; i++)
+            {
+                var step = plan.Steps[i];
+                writer.WriteStartObject();
+                writer.WriteNumber("index", i);
+                writer.WriteString("stepId", step.StepId);
+                writer.WriteString("title", step.Title);
+                if (step.Description is not null)
+                {
+                    writer.WriteString("description", step.Description);
+                }
+                writer.WriteString("status", step.Status.ToString().ToLowerInvariant());
+                writer.WriteNumber("progress", step.Progress);
+                if (step.AgentName is not null)
+                {
+                    writer.WriteString("agentName", step.AgentName);
+                }
+                if (step.Result is not null)
+                {
+                    writer.WriteString("result", step.Result);
+                }
+                if (step.ErrorMessage is not null)
+                {
+                    writer.WriteString("error", step.ErrorMessage);
+                }
+                writer.WriteEndObject();
+            }
+            writer.WriteEndArray();
+
+            writer.WriteString("message", $"Active plan: {plan.Goal} ({plan.Steps.Count(s => s.Status == ExpertStepStatus.Completed)}/{plan.Steps.Length} completed)");
+            writer.WriteEndObject();
+        }
+
+        return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    private static bool TryParseUpdateStepStatusArguments(
+        string argumentsJson,
+        out int stepIndex,
+        out ExpertStepStatus newStatus,
+        out string? notes,
+        out string? error)
+    {
+        stepIndex = -1;
+        newStatus = ExpertStepStatus.Pending;
+        notes = null;
+        error = null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(argumentsJson);
+            var root = document.RootElement;
+
+            if (!root.TryGetProperty("stepIndex", out var stepIndexElement)
+                || stepIndexElement.ValueKind != JsonValueKind.Number)
+            {
+                error = "Missing or invalid 'stepIndex' parameter.";
+                return false;
+            }
+
+            stepIndex = stepIndexElement.GetInt32();
+            if (stepIndex < 0)
+            {
+                error = "stepIndex must be non-negative.";
+                return false;
+            }
+
+            if (!root.TryGetProperty("newStatus", out var statusElement)
+                || statusElement.ValueKind != JsonValueKind.String)
+            {
+                error = "Missing or invalid 'newStatus' parameter.";
+                return false;
+            }
+
+            var statusString = statusElement.GetString();
+            if (!Enum.TryParse<ExpertStepStatus>(statusString, ignoreCase: true, out newStatus))
+            {
+                error = $"Invalid status value: {statusString}. Valid values: pending, running, completed, failed, skipped.";
+                return false;
+            }
+
+            if (root.TryGetProperty("notes", out var notesElement)
+                && notesElement.ValueKind == JsonValueKind.String)
+            {
+                notes = notesElement.GetString();
+            }
+
+            return true;
+        }
+        catch (JsonException ex)
+        {
+            error = ex.Message;
+            return false;
+        }
     }
 
     private static string FlattenContentText(ContentBlock[] content)
@@ -2273,6 +2866,131 @@ public sealed class ExpertModeOrchestrator(
     }
 
     /// <summary>
+    /// Injects active plan progress into system prompt to guide execution.
+    /// </summary>
+    private string PrepareSystemPromptWithPlan(string baseSystemPrompt)
+    {
+        if (_planManager?.ActivePlan is null)
+        {
+            return baseSystemPrompt;
+        }
+
+        return AppendPlanProgressReminder(baseSystemPrompt, _planManager.ActivePlan);
+    }
+
+    /// <summary>
+    /// Appends plan progress section to system prompt.
+    /// </summary>
+    private static string AppendPlanProgressReminder(string baseSystemPrompt, ExpertPlan plan)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine();
+        sb.AppendLine();
+        sb.AppendLine("## 📋 Active Execution Plan");
+        sb.AppendLine();
+        sb.AppendLine(System.Globalization.CultureInfo.InvariantCulture, $"**Goal:** {plan.Goal}");
+        sb.AppendLine(System.Globalization.CultureInfo.InvariantCulture, $"**Status:** {plan.Status}");
+        sb.AppendLine(System.Globalization.CultureInfo.InvariantCulture, $"**Progress:** {CalculateOverallProgress(plan.Steps)}%");
+        sb.AppendLine();
+        sb.AppendLine("### Steps:");
+        sb.AppendLine();
+
+        foreach (var step in plan.Steps)
+        {
+            var icon = step.Status switch
+            {
+                ExpertStepStatus.Completed => "✅",
+                ExpertStepStatus.Running => "▶️",
+                ExpertStepStatus.Failed => "❌",
+                ExpertStepStatus.Skipped => "⏭️",
+                _ => "⬜"
+            };
+
+            var progressBar = step.Progress > 0
+                ? $" [{new string('█', step.Progress / 10)}{new string('░', 10 - step.Progress / 10)}] {step.Progress}%"
+                : "";
+
+            sb.AppendLine(System.Globalization.CultureInfo.InvariantCulture,
+                $"{icon} **Step {step.StepId}**: {step.Title} ({step.Status}){progressBar}");
+
+            if (!string.IsNullOrEmpty(step.Result))
+            {
+                sb.AppendLine(System.Globalization.CultureInfo.InvariantCulture, $"   └─ {step.Result}");
+            }
+            if (!string.IsNullOrEmpty(step.ErrorMessage))
+            {
+                sb.AppendLine(System.Globalization.CultureInfo.InvariantCulture, $"   └─ ⚠️ {step.ErrorMessage}");
+            }
+        }
+
+        sb.AppendLine();
+
+        // Key guidance: indicate next action
+        var nextStep = plan.Steps.FirstOrDefault(s => s.Status == ExpertStepStatus.Pending);
+        if (nextStep is not null)
+        {
+            sb.AppendLine("### 🎯 Next Action:");
+            sb.AppendLine(System.Globalization.CultureInfo.InvariantCulture,
+                $"Execute **Step {nextStep.StepId}** using `mcli_expert_execute_step`:");
+            sb.AppendLine("```");
+            sb.AppendLine(System.Globalization.CultureInfo.InvariantCulture,
+                $"mcli_expert_execute_step(stepIndex: {Array.IndexOf(plan.Steps, nextStep)})");
+            sb.AppendLine("```");
+            sb.AppendLine();
+            if (!string.IsNullOrEmpty(nextStep.AgentName))
+            {
+                sb.AppendLine(System.Globalization.CultureInfo.InvariantCulture,
+                    $"This step should be delegated to agent: **{nextStep.AgentName}**");
+                sb.AppendLine();
+            }
+        }
+        else if (plan.Steps.All(s => s.Status == ExpertStepStatus.Completed))
+        {
+            sb.AppendLine("### ✨ All Steps Completed");
+            sb.AppendLine("Provide a comprehensive final summary to the user with:");
+            sb.AppendLine("- Key outcomes from each step");
+            sb.AppendLine("- Overall results and achievements");
+            sb.AppendLine("- Any recommendations or next steps");
+            sb.AppendLine();
+        }
+        else if (plan.Steps.Any(s => s.Status == ExpertStepStatus.Running))
+        {
+            var runningStep = plan.Steps.First(s => s.Status == ExpertStepStatus.Running);
+            sb.AppendLine("### ⚡ Step In Progress:");
+            sb.AppendLine(System.Globalization.CultureInfo.InvariantCulture,
+                $"Step {runningStep.StepId} is currently running.");
+            sb.AppendLine("Continue working on this step until completion.");
+            sb.AppendLine();
+        }
+        else if (plan.Steps.Any(s => s.Status == ExpertStepStatus.Failed))
+        {
+            sb.AppendLine("### ⚠️ Plan Has Failed Steps");
+            sb.AppendLine("Review the errors above and decide whether to:");
+            sb.AppendLine("- Retry the failed step by executing it again");
+            sb.AppendLine("- Skip to the next pending step");
+            sb.AppendLine("- Report the failure to the user");
+            sb.AppendLine();
+        }
+
+        return baseSystemPrompt + sb.ToString();
+    }
+
+    /// <summary>
+    /// Calculates overall progress percentage from step statuses.
+    /// </summary>
+    private static int CalculateOverallProgress(ExpertPlanStep[] steps)
+    {
+        if (steps.Length == 0)
+        {
+            return 0;
+        }
+
+        var totalWeight = steps.Length * 100;
+        var completedWeight = steps.Sum(s => s.Status == ExpertStepStatus.Completed ? 100 : s.Progress);
+        return (int)Math.Round(completedWeight * 100.0 / totalWeight);
+    }
+
+    /// <summary>
     /// Invokes a sub-agent with the delegated task, supporting full tool calling capabilities.
     /// </summary>
     private async Task<(ContentBlock[] content, bool success)> InvokeSubAgentAsync(
@@ -2307,7 +3025,7 @@ public sealed class ExpertModeOrchestrator(
         var subAgentMessages = new List<RuntimeProviderMessage> { systemMessage, userTaskMessage };
 
         // Capture tool catalog for sub-agent
-        var catalogSnapshot = CaptureCatalogSnapshot();
+        var catalogSnapshot = CaptureCatalogSnapshot()?.FilterByMode("expert");
         ToolDescriptor[]? tools = _toolGateway is not null && catalogSnapshot is not null
             ? [.. catalogSnapshot.Tools]
             : null;
@@ -2385,7 +3103,7 @@ public sealed class ExpertModeOrchestrator(
             // Execute tool calls with ParentAgentId
             foreach (var toolCall in toolCalls)
             {
-                var liveCatalog = CaptureCatalogSnapshot() ?? catalogSnapshot;
+                var liveCatalog = CaptureCatalogSnapshot()?.FilterByMode("expert") ?? catalogSnapshot;
                 if (liveCatalog is null || _toolGateway is null)
                 {
                     return ([], false);

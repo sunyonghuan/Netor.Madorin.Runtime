@@ -80,6 +80,7 @@ public sealed class ToolGateway(
     {
         ArgumentNullException.ThrowIfNull(invocation);
         ArgumentNullException.ThrowIfNull(catalogSnapshot);
+
         if (!catalogSnapshot.TryGetTool(invocation.ToolId, out var descriptor)
             || descriptor is null)
         {

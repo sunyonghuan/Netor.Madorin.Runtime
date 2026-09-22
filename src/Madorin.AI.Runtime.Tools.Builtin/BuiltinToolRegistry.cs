@@ -36,6 +36,11 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
     public const string MeetingListAttachmentsToolId = "mcli_meeting_list_attachments";
     public const string AskUserToolId = "mcli_ask_user";
     public const string CheckPendingUserInputToolId = "mcli_check_pending_user_input";
+    public const string ExpertCreatePlanToolId = "mcli_expert_create_plan";
+    public const string ExpertExecuteStepToolId = "mcli_expert_execute_step";
+    public const string ExpertGetPlanToolId = "mcli_expert_get_plan";
+    public const string ExpertUpdateStepStatusToolId = "mcli_expert_update_step_status";
+    public const string ExpertAbandonPlanToolId = "mcli_expert_abandon_plan";
 
     private static readonly IReadOnlyList<ToolDescriptor> AdvertisedTools = Array.AsReadOnly<ToolDescriptor>(
     [
@@ -298,7 +303,67 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
             RiskLevel: "low",
             Capabilities: ["meeting.hitl", "work.hitl"],
             Risk: ToolRiskLevel.Low,
-            SupportedModes: ["meeting", "work"])
+            SupportedModes: ["meeting", "work"]),
+        new(
+            ExpertCreatePlanToolId,
+            "mcli",
+            "Create execution plan",
+            "Create a step-by-step execution plan for medium-complexity tasks. Use this when the task requires multiple ordered steps. Returns planId for tracking.",
+            """{"type":"object","properties":{"title":{"type":"string","description":"Concise plan title"},"steps":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string","description":"Step title"},"description":{"type":"string","description":"Detailed step description"},"estimatedMinutes":{"type":"integer","minimum":1},"dependencies":{"type":"array","items":{"type":"integer"}}},"required":["title","description"],"additionalProperties":false}}},"required":["title","steps"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"success":{"type":"boolean"},"planId":{"type":"string"},"title":{"type":"string"},"stepCount":{"type":"integer"},"message":{"type":"string"}},"required":["success","message"],"additionalProperties":false}""",
+            RiskLevel: "low",
+            Capabilities: ["expert.plan"],
+            Risk: ToolRiskLevel.Low,
+            IsIdempotent: false,
+            SupportedModes: new[] { "expert" }),
+        new(
+            ExpertExecuteStepToolId,
+            "mcli",
+            "Execute plan step",
+            "Execute a single step from the active plan. Marks the step as in-progress, performs the work, then marks it completed or failed. Returns execution result.",
+            """{"type":"object","properties":{"stepIndex":{"type":"integer","minimum":0,"description":"Zero-based step index"},"notes":{"type":"string","description":"Optional execution notes"}},"required":["stepIndex"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"success":{"type":"boolean"},"stepIndex":{"type":"integer"},"stepTitle":{"type":"string"},"status":{"type":"string"},"result":{"type":"string"},"message":{"type":"string"}},"required":["success","message"],"additionalProperties":false}""",
+            RiskLevel: "low",
+            Capabilities: ["expert.plan"],
+            Risk: ToolRiskLevel.Low,
+            IsIdempotent: false,
+            SupportedModes: new[] { "expert" }),
+        new(
+            ExpertGetPlanToolId,
+            "mcli",
+            "Get active plan",
+            "Retrieves the currently active execution plan with all steps and their current status. Use this to check plan progress.",
+            """{"type":"object","properties":{},"additionalProperties":false}""",
+            """{"type":"object","properties":{"success":{"type":"boolean"},"hasPlan":{"type":"boolean"},"planId":{"type":"string"},"title":{"type":"string"},"status":{"type":"string"},"steps":{"type":"array","items":{"type":"object"}},"message":{"type":"string"}},"required":["success","hasPlan","message"],"additionalProperties":false}""",
+            RiskLevel: "low",
+            Capabilities: ["expert.plan"],
+            Risk: ToolRiskLevel.Low,
+            IsIdempotent: true,
+            SupportedModes: new[] { "expert" }),
+        new(
+            ExpertUpdateStepStatusToolId,
+            "mcli",
+            "Update step status",
+            "Manually update the status of a specific plan step. Useful for marking steps as skipped, failed, or completed without execution.",
+            """{"type":"object","properties":{"stepIndex":{"type":"integer","minimum":0,"description":"Zero-based step index"},"newStatus":{"type":"string","enum":["pending","running","completed","failed","skipped"],"description":"New step status"},"notes":{"type":"string","description":"Optional reason for status change"}},"required":["stepIndex","newStatus"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"success":{"type":"boolean"},"stepIndex":{"type":"integer"},"oldStatus":{"type":"string"},"newStatus":{"type":"string"},"message":{"type":"string"}},"required":["success","message"],"additionalProperties":false}""",
+            RiskLevel: "low",
+            Capabilities: ["expert.plan"],
+            Risk: ToolRiskLevel.Low,
+            IsIdempotent: false,
+            SupportedModes: new[] { "expert" }),
+        new(
+            ExpertAbandonPlanToolId,
+            "mcli",
+            "Abandon plan",
+            "Abandons the currently active plan and marks it as cancelled. Use this when the plan is no longer needed or cannot be completed.",
+            """{"type":"object","properties":{"reason":{"type":"string","description":"Optional reason for abandoning the plan"}},"additionalProperties":false}""",
+            """{"type":"object","properties":{"success":{"type":"boolean"},"planId":{"type":"string"},"message":{"type":"string"}},"required":["success","message"],"additionalProperties":false}""",
+            RiskLevel: "low",
+            Capabilities: ["expert.plan"],
+            Risk: ToolRiskLevel.Low,
+            IsIdempotent: false,
+            SupportedModes: new[] { "expert" })
     ]);
 
     private static readonly IReadOnlyList<ToolDescriptor> Tools = Array.AsReadOnly(

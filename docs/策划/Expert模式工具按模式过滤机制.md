@@ -336,15 +336,15 @@ public void HostTools_ShouldBeVisibleInAllModes()
 
 ## 5. 实施清单
 
-- [ ] 修改 `ToolDescriptor`，增加 `SupportedModes` 字段
-- [ ] 实现 `ToolCatalogSnapshot.FilterByMode()`
-- [ ] 实现 `IsAllowedForWorkRole()` 和 `IsAllowedForMeetingRole()`
-- [ ] 修改 `BuiltinToolRegistry`，给所有内置工具标记范围
-- [ ] 修改 `ExpertModeOrchestrator`，调用 `FilterByMode("expert")`
+- [x] 修改 `ToolDescriptor`，增加 `SupportedModes` 字段
+- [x] 实现 `ToolCatalogSnapshot.FilterByMode()`
+- [x] 实现 `IsAllowedForWorkRole()` 和 `IsAllowedForMeetingRole()`
+- [x] 修改 `BuiltinToolRegistry`，给所有内置工具标记范围
+- [x] 修改 `ExpertModeOrchestrator`，调用 `FilterByMode("expert")`
 - [ ] 修改 `WorkModeOrchestrator`，调用 `FilterByMode("work", agentRole)`
 - [ ] 修改 `MeetingModeOrchestrator`，调用 `FilterByMode("meeting", participantRole)`
-- [ ] 确认 `ToolCatalogStore.FromCatalogItem()` 中宿主工具的 `SupportedModes` 为 `null`
-- [ ] 编写单元测试：Expert/Work/Meeting 工具隔离、宿主工具可见性
+- [x] 确认 `ToolCatalogStore.FromCatalogItem()` 中宿主工具的 `SupportedModes` 为 `null`
+- [x] 编写单元测试：Expert/Work/Meeting 工具隔离、宿主工具可见性
 - [ ] 更新规格文档：`工作与会议模式.md` §7 增加过滤机制说明
 
 ## 6. 风险与缓解
@@ -373,6 +373,18 @@ public void HostTools_ShouldBeVisibleInAllModes()
 
 ---
 
-**状态**：设计完成，待实施
+**状态**：✅ 核心功能已实施（Expert 模式过滤已完成，Work/Meeting 模式待后续补充）
 **优先级**：P0（Expert 计划功能的前置依赖）
-**预计工作量**：1 个工作日
+**实际工作量**：约 0.5 个工作日
+
+### 已完成
+- ToolDescriptor 扩展 SupportedModes 字段
+- ToolCatalogSnapshot.FilterByMode() 实现（含角色过滤逻辑）
+- ExpertModeOrchestrator 集成过滤机制
+- BuiltinToolRegistry 标记 mcli_delegate_agent 为 Expert 专用
+- 单元测试覆盖（6 个测试全部通过）
+- 宿主工具默认 SupportedModes: null，所有模式可见
+
+### 待后续补充
+- WorkModeOrchestrator / MeetingModeOrchestrator 集成（当前这两个模式尚未实现）
+- 规格文档更新

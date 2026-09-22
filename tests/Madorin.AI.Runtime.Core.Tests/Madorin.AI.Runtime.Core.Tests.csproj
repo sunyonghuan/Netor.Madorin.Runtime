@@ -18,6 +18,8 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Madorin.AI.Runtime.Entities\Madorin.AI.Runtime.Entities.csproj" />
     <ProjectReference Include="..\..\src\Madorin.AI.Runtime.Core\Madorin.AI.Runtime.Core.csproj" />
+    <ProjectReference Include="..\..\src\Madorin.AI.Runtime.Contracts\Madorin.AI.Runtime.Contracts.csproj" />
+    <ProjectReference Include="..\..\src\Madorin.AI.Runtime.Tools.Abstractions\Madorin.AI.Runtime.Tools.Abstractions.csproj" />
   </ItemGroup>
 
 </Project>

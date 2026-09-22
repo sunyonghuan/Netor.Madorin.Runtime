@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using Madorin.AI.Runtime.Contracts.Expert;
 using Madorin.AI.Runtime.Contracts.Work;
 using Madorin.AI.Runtime.Entities;
 
@@ -33,6 +34,16 @@ namespace Madorin.AI.Runtime.Contracts.Serialization;
 [JsonSerializable(typeof(DeltaDroppedEvent))]
 [JsonSerializable(typeof(ExistingSessionRunRequest))]
 [JsonSerializable(typeof(ExpertModeOptions))]
+[JsonSerializable(typeof(ExpertPlan))]
+[JsonSerializable(typeof(ExpertPlanStep))]
+[JsonSerializable(typeof(ExpertPlanStatus))]
+[JsonSerializable(typeof(ExpertStepStatus))]
+[JsonSerializable(typeof(CreateExpertPlanRequest))]
+[JsonSerializable(typeof(ExpertPlanStepDraft))]
+[JsonSerializable(typeof(ExpertPlanStepDraft[]))]
+[JsonSerializable(typeof(ExpertPlanCreatedEvent))]
+[JsonSerializable(typeof(ExpertStepStatusChangedEvent))]
+[JsonSerializable(typeof(ExpertPlanStatusChangedEvent))]
 [JsonSerializable(typeof(HostProviderConfig))]
 [JsonSerializable(typeof(HostProviderConfig[]))]
 [JsonSerializable(typeof(IReadOnlyList<HostProviderConfig>))]

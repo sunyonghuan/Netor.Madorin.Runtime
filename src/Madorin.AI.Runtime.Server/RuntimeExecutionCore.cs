@@ -252,6 +252,7 @@ internal sealed class RuntimeExecutionCore(
                 new ConversationStore(_dataDirectory),
                 repository,
                 outbox,
+                _workspaceRoot,
                 _agentContextComposer,
                 credentialRefreshHandler,
                 toolGateway,
