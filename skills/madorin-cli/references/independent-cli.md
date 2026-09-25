@@ -68,10 +68,18 @@ Run `madorin` in the target workspace, or run `madorin run` without input. The f
 | selection | `/model [modelId]`, `/provider [providerId]`, `/agent [agentId]`, `/mode` |
 | session | `/session`, `/new`, `/resume [sessionId]`, `/history [n|all]`, `/export [path]` |
 | context | `/compact`, `/context`, `/tools` |
+| meeting | `/pause`, `/interrupt <text>` |
+| skill | `/skill <list\|show <name>\|refresh>` |
 | memory | `/memory [global|project|effective]`, `/remember <global|project>` |
-| utility | `/status`, `/clear`, `/help [command]`, `/exit`, `/quit` |
+| utility | `/status`, `/clear`, `/cd [path]`, `/help [command]`, `/exit`, `/quit` |
 
 Selection changes affect the next turn only. Session mode cannot change in place; create a new Session for a different mode.
+
+**Meeting mode**: First Ctrl+C requests cooperative pause; second Ctrl+C hard-cancels. Use `/pause` to request pause explicitly, or `/interrupt <text>` to enqueue input for the next safe point. During a paused Meeting, the next message continues the session with Host recovery first.
+
+**Workspace switching**: Use `/cd [path]` to switch workspace in the REPL. The current session resets, but Provider/Model/Agent selection is preserved. Relative paths and `~` (home directory) are supported.
+
+**Skill operations**: Use `/skill list`, `/skill show <name>`, or `/skill refresh` to inspect and reload Skills without leaving the REPL.
 
 ## Configuration, Agents, And Memory
 
