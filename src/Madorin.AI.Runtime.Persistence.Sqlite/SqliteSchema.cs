@@ -1260,12 +1260,38 @@ public static class SqliteSchema
                 consumed_by_run_id TEXT,
                 UNIQUE(session_id, ordinal)
             );
+            """;
+        await createCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+
+        // 表已存在时 CREATE TABLE IF NOT EXISTS 不会补列，索引会因缺 state 失败。
+        await AddColumnIfMissingAsync(
+                conn, transaction, "meeting_pending_inputs", "content_hash", "TEXT NOT NULL DEFAULT ''", ct)
+            .ConfigureAwait(false);
+        await AddColumnIfMissingAsync(
+                conn, transaction, "meeting_pending_inputs", "source", "TEXT NOT NULL DEFAULT 'user'", ct)
+            .ConfigureAwait(false);
+        await AddColumnIfMissingAsync(
+                conn, transaction, "meeting_pending_inputs", "state", "TEXT NOT NULL DEFAULT 'pending'", ct)
+            .ConfigureAwait(false);
+        await AddColumnIfMissingAsync(
+                conn, transaction, "meeting_pending_inputs", "enqueued_at", "TEXT NOT NULL DEFAULT ''", ct)
+            .ConfigureAwait(false);
+        await AddColumnIfMissingAsync(
+                conn, transaction, "meeting_pending_inputs", "consumed_at", "TEXT", ct)
+            .ConfigureAwait(false);
+        await AddColumnIfMissingAsync(
+                conn, transaction, "meeting_pending_inputs", "consumed_by_run_id", "TEXT", ct)
+            .ConfigureAwait(false);
+
+        await using var indexCommand = conn.CreateCommand();
+        indexCommand.Transaction = transaction;
+        indexCommand.CommandText = """
             CREATE INDEX IF NOT EXISTS idx_meeting_pending_inputs_session_state
             ON meeting_pending_inputs(session_id, state, ordinal);
             INSERT OR IGNORE INTO schema_versions(version, applied_at)
             VALUES(19, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
             """;
-        await createCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        await indexCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         transaction.Commit();
     }
 
