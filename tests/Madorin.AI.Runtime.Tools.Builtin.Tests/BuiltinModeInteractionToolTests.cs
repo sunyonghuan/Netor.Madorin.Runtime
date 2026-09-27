@@ -107,7 +107,10 @@ public sealed class BuiltinModeInteractionToolTests
     public void Registry_ExposesSharedToolsToWorkAndMeeting_NotExpert()
     {
         var registry = new BuiltinToolRegistry();
-        var snapshot = new ToolCatalogSnapshot("host", "effective", registry.GetTools());
+        var tools = registry.GetTools();
+        var distinctIds = tools.Select(static tool => tool.ToolId).Distinct(StringComparer.Ordinal).Count();
+        Assert.AreEqual(tools.Count, distinctIds);
+        var snapshot = new ToolCatalogSnapshot("host", "effective", tools);
         var expert = snapshot.FilterByMode("expert").Tools.Select(static t => t.ToolId).ToHashSet(StringComparer.Ordinal);
         var work = snapshot.FilterByMode("work", "general-manager").Tools.Select(static t => t.ToolId).ToHashSet(StringComparer.Ordinal);
         var lead = snapshot.FilterByMode("work", "project-lead").Tools.Select(static t => t.ToolId).ToHashSet(StringComparer.Ordinal);

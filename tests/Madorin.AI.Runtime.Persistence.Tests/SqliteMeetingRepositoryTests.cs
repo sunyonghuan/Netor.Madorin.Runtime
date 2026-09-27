@@ -121,6 +121,51 @@ public sealed class SqliteMeetingRepositoryTests
             await GetSchemaVersionAsync(conn, TestContext.CancellationToken));
     }
 
+    [TestMethod]
+    public async Task VersionNineteen_UpgradesLegacyPendingInputsAndKeepsBothQueues()
+    {
+        var ct = TestContext.CancellationToken;
+        await using var conn = new SqliteConnection("Data Source=:memory:");
+        await conn.OpenAsync(ct);
+        await SqliteSchema.MigrateAsync(conn, 0, 18, ct);
+
+        await using (var seed = conn.CreateCommand())
+        {
+            seed.CommandText = """
+                INSERT INTO meeting_pending_inputs(
+                    request_id, session_id, run_id, content_json, status, enqueued_at)
+                VALUES(
+                    'req-1', 'meeting-1', 'run-1', '{"text":"hold"}', 'Pending',
+                    '2026-07-22T00:00:00.0000000+00:00');
+                """;
+            await seed.ExecuteNonQueryAsync(ct);
+        }
+
+        await SqliteSchema.EnsureCreatedAsync(conn, ct);
+        var repo = new SqliteMeetingRepository(conn);
+
+        var legacy = await repo.ListPendingInputsAsync("meeting-1", ct);
+        Assert.HasCount(1, legacy);
+        Assert.AreEqual("req-1", legacy[0].RequestId);
+        Assert.HasCount(0, await repo.PeekPendingUserInputsAsync("meeting-1", ct: ct));
+
+        var first = await repo.EnqueuePendingUserInputAsync("meeting-1", "first", ct: ct);
+        var second = await repo.EnqueuePendingUserInputAsync("meeting-1", "second", ct: ct);
+        Assert.AreEqual(1, first.Ordinal);
+        Assert.AreEqual(2, second.Ordinal);
+
+        var peeked = await repo.PeekPendingUserInputsAsync("meeting-1", ct: ct);
+        Assert.HasCount(2, peeked);
+        Assert.AreEqual("first", peeked[0].ContentText);
+        Assert.AreEqual("second", peeked[1].ContentText);
+
+        Assert.IsTrue(await repo.EnqueuePendingInputAsync(
+            "meeting-1", "req-2", "{\"text\":\"later\"}", "run-1", ct));
+        Assert.HasCount(2, await repo.ListPendingInputsAsync("meeting-1", ct));
+        Assert.HasCount(2, await repo.PeekPendingUserInputsAsync("meeting-1", ct: ct));
+        Assert.AreEqual(SqliteSchema.CurrentVersion, await GetSchemaVersionAsync(conn, ct));
+    }
+
     #endregion
 
     #region Create Meeting, Round & First Scheduled Invocation

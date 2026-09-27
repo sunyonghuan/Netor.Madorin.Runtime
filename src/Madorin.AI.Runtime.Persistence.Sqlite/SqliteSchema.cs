@@ -138,6 +138,13 @@ public static class SqliteSchema
         ("meeting_pending_inputs", "enqueued_at"),
         ("meeting_pending_inputs", "consumed_at"),
         ("meeting_pending_inputs", "message_id"),
+        ("meeting_pending_inputs", "input_id"),
+        ("meeting_pending_inputs", "ordinal"),
+        ("meeting_pending_inputs", "content_text"),
+        ("meeting_pending_inputs", "content_hash"),
+        ("meeting_pending_inputs", "source"),
+        ("meeting_pending_inputs", "state"),
+        ("meeting_pending_inputs", "consumed_by_run_id"),
         ("meeting_rounds", "first_invocation_id"),
         ("meeting_rounds", "summary_message_id"),
         ("meeting_rounds", "summarizes_through_seq"),
@@ -1297,54 +1304,36 @@ public static class SqliteSchema
     }
 
     /// <summary>
-    /// Meeting 用户插话 FIFO 账本；check_pending 在 Meeting 侧 Peek，编排器处理后再 Consume。
+    /// Meeting 用户插话 FIFO 账本。v17 已创建同名中断队列表，这里重建并保留旧列。
+    /// 旧行 state 记为 legacy，不进入 FIFO Peek；新插话不写 request_id。
     /// </summary>
     private static async Task ApplyVersionNineteenAsync(SqliteConnection conn, CancellationToken ct)
     {
         using var transaction = conn.BeginTransaction(deferred: false);
 
-        await using var createCommand = conn.CreateCommand();
-        createCommand.Transaction = transaction;
-        createCommand.CommandText = """
-            CREATE TABLE IF NOT EXISTS meeting_pending_inputs (
-                input_id TEXT NOT NULL PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                ordinal INTEGER NOT NULL,
-                content_text TEXT NOT NULL,
-                content_hash TEXT NOT NULL,
-                source TEXT NOT NULL DEFAULT 'user',
-                state TEXT NOT NULL DEFAULT 'pending',
-                enqueued_at TEXT NOT NULL,
-                consumed_at TEXT,
-                consumed_by_run_id TEXT,
-                UNIQUE(session_id, ordinal)
-            );
-            """;
-        await createCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-
-        // 表已存在时 CREATE TABLE IF NOT EXISTS 不会补列，索引会因缺 state 失败。
-        await AddColumnIfMissingAsync(
-                conn, transaction, "meeting_pending_inputs", "content_hash", "TEXT NOT NULL DEFAULT ''", ct)
+        var hasOrdinal = await ColumnExistsAsync(conn, "meeting_pending_inputs", "ordinal", ct)
             .ConfigureAwait(false);
-        await AddColumnIfMissingAsync(
-                conn, transaction, "meeting_pending_inputs", "source", "TEXT NOT NULL DEFAULT 'user'", ct)
+        var hasState = await ColumnExistsAsync(conn, "meeting_pending_inputs", "state", ct)
             .ConfigureAwait(false);
-        await AddColumnIfMissingAsync(
-                conn, transaction, "meeting_pending_inputs", "state", "TEXT NOT NULL DEFAULT 'pending'", ct)
+        var hasInputId = await ColumnExistsAsync(conn, "meeting_pending_inputs", "input_id", ct)
             .ConfigureAwait(false);
-        await AddColumnIfMissingAsync(
-                conn, transaction, "meeting_pending_inputs", "enqueued_at", "TEXT NOT NULL DEFAULT ''", ct)
+        var hasContentText = await ColumnExistsAsync(conn, "meeting_pending_inputs", "content_text", ct)
             .ConfigureAwait(false);
-        await AddColumnIfMissingAsync(
-                conn, transaction, "meeting_pending_inputs", "consumed_at", "TEXT", ct)
+        var requestIdNotNull = await ColumnIsNotNullAsync(
+                conn, "meeting_pending_inputs", "request_id", ct)
             .ConfigureAwait(false);
-        await AddColumnIfMissingAsync(
-                conn, transaction, "meeting_pending_inputs", "consumed_by_run_id", "TEXT", ct)
-            .ConfigureAwait(false);
+        if (!hasOrdinal || !hasState || !hasInputId || !hasContentText || requestIdNotNull)
+        {
+            await RebuildMeetingPendingInputsV19Async(conn, transaction, ct).ConfigureAwait(false);
+        }
 
         await using var indexCommand = conn.CreateCommand();
         indexCommand.Transaction = transaction;
         indexCommand.CommandText = """
+            CREATE INDEX IF NOT EXISTS idx_meeting_pending_inputs_session_status
+            ON meeting_pending_inputs(session_id, status, enqueued_at);
+            CREATE INDEX IF NOT EXISTS idx_meeting_pending_inputs_enqueued
+            ON meeting_pending_inputs(enqueued_at, request_id);
             CREATE INDEX IF NOT EXISTS idx_meeting_pending_inputs_session_state
             ON meeting_pending_inputs(session_id, state, ordinal);
             INSERT OR IGNORE INTO schema_versions(version, applied_at)
@@ -1352,6 +1341,75 @@ public static class SqliteSchema
             """;
         await indexCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         transaction.Commit();
+    }
+
+    /// <summary>
+    /// v17 的 request_id / content_json / status 是 NOT NULL。只补列无法让 FIFO 插入成功，必须重建。
+    /// </summary>
+    private static async Task RebuildMeetingPendingInputsV19Async(
+        SqliteConnection conn,
+        SqliteTransaction transaction,
+        CancellationToken ct)
+    {
+        var tableExists = await SchemaObjectExistsAsync(conn, "table", "meeting_pending_inputs", ct)
+            .ConfigureAwait(false);
+        var legacy = tableExists
+            && await ColumnExistsAsync(conn, "meeting_pending_inputs", "request_id", ct)
+                .ConfigureAwait(false);
+        if (tableExists && !legacy)
+        {
+            throw new InvalidDataException(
+                "meeting_pending_inputs exists without request_id and cannot be migrated to version 19.");
+        }
+
+        await using (var create = conn.CreateCommand())
+        {
+            create.Transaction = transaction;
+            create.CommandText = """
+                CREATE TABLE meeting_pending_inputs_v19 (
+                    request_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    run_id TEXT,
+                    content_json TEXT,
+                    status TEXT,
+                    enqueued_at TEXT NOT NULL,
+                    consumed_at TEXT,
+                    message_id TEXT,
+                    input_id TEXT UNIQUE,
+                    ordinal INTEGER,
+                    content_text TEXT,
+                    content_hash TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT 'user',
+                    state TEXT NOT NULL DEFAULT 'legacy',
+                    consumed_by_run_id TEXT,
+                    UNIQUE(session_id, ordinal)
+                );
+                """;
+            await create.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
+
+        if (legacy)
+        {
+            await using var copy = conn.CreateCommand();
+            copy.Transaction = transaction;
+            copy.CommandText = """
+                INSERT INTO meeting_pending_inputs_v19 (
+                    request_id, session_id, run_id, content_json, status,
+                    enqueued_at, consumed_at, message_id, state)
+                SELECT
+                    request_id, session_id, run_id, content_json, status,
+                    enqueued_at, consumed_at, message_id,
+                    CASE WHEN status = 'Consumed' THEN 'consumed' ELSE 'legacy' END
+                FROM meeting_pending_inputs;
+                DROP TABLE meeting_pending_inputs;
+                """;
+            await copy.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
+
+        await using var rename = conn.CreateCommand();
+        rename.Transaction = transaction;
+        rename.CommandText = "ALTER TABLE meeting_pending_inputs_v19 RENAME TO meeting_pending_inputs;";
+        await rename.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 
     private static async Task EnsureVersionFifteenApprovalColumnsAsync(
@@ -1633,5 +1691,26 @@ public static class SqliteSchema
         command.Parameters.AddWithValue("$table", table);
         command.Parameters.AddWithValue("$column", column);
         return await command.ExecuteScalarAsync(ct).ConfigureAwait(false) is not null;
+    }
+
+    private static async Task<bool> ColumnIsNotNullAsync(
+        SqliteConnection conn,
+        string table,
+        string column,
+        CancellationToken ct)
+    {
+        await using var command = conn.CreateCommand();
+        command.CommandText = """
+            SELECT "notnull"
+            FROM pragma_table_info($table)
+            WHERE name = $column
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$table", table);
+        command.Parameters.AddWithValue("$column", column);
+        var value = await command.ExecuteScalarAsync(ct).ConfigureAwait(false);
+        return value is long notNull
+            ? notNull != 0
+            : value is int notNull32 && notNull32 != 0;
     }
 }

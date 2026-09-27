@@ -51,7 +51,6 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
     public const string WorkGetRecentCompletedTaskPlanToolId = "mcli_work_get_recent_completed_task_plan";
 
     private static readonly IReadOnlyList<string> WorkOnlyModes = Array.AsReadOnly(["work"]);
-    private static readonly IReadOnlyList<string> WorkAndMeetingModes = Array.AsReadOnly(["work", "meeting"]);
 
     private static readonly IReadOnlyList<ToolDescriptor> AdvertisedTools = Array.AsReadOnly<ToolDescriptor>(
     [
@@ -459,31 +458,7 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
             """{"type":"object","properties":{"ok":{"type":"boolean"},"found":{"type":"boolean"},"status":{"type":"string"},"planVersion":{"type":"string"},"plan":{"type":"object"},"note":{"type":"string"},"message":{"type":"string"},"error":{"type":"string"}},"required":["ok"],"additionalProperties":false}""",
             Capabilities: ["work.history"],
             Risk: ToolRiskLevel.SensitiveRead,
-            SupportedModes: WorkOnlyModes),
-        new(
-            AskUserToolId,
-            "mcli",
-            "Ask user",
-            "Asks the host/user a short decision question and waits for the answer. Call mcli_check_pending_user_input first. Do not invent the answer.",
-            """{"type":"object","properties":{"question":{"type":"string"}},"required":["question"],"additionalProperties":false}""",
-            """{"type":"object","properties":{"ok":{"type":"boolean"},"answered":{"type":"boolean"},"question":{"type":"string"},"answer":{"type":"string"},"error":{"type":"string"},"message":{"type":"string"}},"required":["ok"],"additionalProperties":false}""",
-            RiskLevel: "medium",
-            RequiresApproval: false,
-            Capabilities: ["mode.ask_user"],
-            Risk: ToolRiskLevel.Write,
-            IsIdempotent: false,
-            SupportedModes: WorkAndMeetingModes),
-        new(
-            CheckPendingUserInputToolId,
-            "mcli",
-            "Check pending user input",
-            "Checks unread pending user inputs for the current session. Work consumes FIFO; Meeting peeks. Call before mcli_ask_user.",
-            """{"type":"object","properties":{},"additionalProperties":false}""",
-            """{"type":"object","properties":{"ok":{"type":"boolean"},"hasPending":{"type":"boolean"},"consumed":{"type":"boolean"},"inputs":{"type":"array","items":{"type":"string"}},"count":{"type":"integer"},"error":{"type":"string"},"message":{"type":"string"}},"required":["ok"],"additionalProperties":false}""",
-            Capabilities: ["mode.pending_input"],
-            Risk: ToolRiskLevel.SensitiveRead,
-            IsIdempotent: false,
-            SupportedModes: WorkAndMeetingModes)
+            SupportedModes: WorkOnlyModes)
     ]);
 
     private static readonly IReadOnlyList<ToolDescriptor> Tools = Array.AsReadOnly(
