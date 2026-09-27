@@ -28,6 +28,7 @@ public sealed partial class ProviderWorkerProcess : IAsyncDisposable
     private CancellationTokenSource? _readerCts;
     private Task? _reader;
     private TaskCompletionSource<HelloFrameResult>? _hello;
+    private ProviderCapabilities? _negotiatedCapabilities;
     private bool _disposed;
     private int _stopping;
     private int _crashRecorded;
@@ -73,6 +74,9 @@ public sealed partial class ProviderWorkerProcess : IAsyncDisposable
     }
 
     public string Slug => _slug;
+
+    /// <summary>hello.ok 协商到的 Worker 能力声明；配置未写 capabilities 时供宿主投影使用。</summary>
+    public ProviderCapabilities? NegotiatedCapabilities => _negotiatedCapabilities;
 
     internal bool IsFused => _fuse.IsFused;
 
@@ -125,4 +129,8 @@ public sealed partial class ProviderWorkerProcess : IAsyncDisposable
     }
 }
 
-internal readonly record struct HelloFrameResult(bool Ok, string? Code, string? Message);
+internal readonly record struct HelloFrameResult(
+    bool Ok,
+    string? Code,
+    string? Message,
+    ProviderCapabilities? Capabilities = null);

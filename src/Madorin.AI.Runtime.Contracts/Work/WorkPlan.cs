@@ -93,4 +93,5 @@ public sealed record WorkResumeState(
     string[]? SentToolCallIds = null,
     bool RequiresManualIntervention = false,
     string? PendingApprovalRequestId = null,
-    WorkPlanRevisionSnapshot[]? PlanRevisions = null);
+    WorkPlanRevisionSnapshot[]? PlanRevisions = null,
+    int PendingUserInputCount = 0);

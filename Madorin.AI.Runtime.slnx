@@ -55,5 +55,6 @@
     <Project Path="tests/Madorin.AI.Runtime.Persistence.Tests/Madorin.AI.Runtime.Persistence.Tests.csproj" />
     <Project Path="tests/Madorin.AI.Runtime.Protocol.Tests/Madorin.AI.Runtime.Protocol.Tests.csproj" />
     <Project Path="tests/Madorin.AI.Runtime.Provider.Tests/Madorin.AI.Runtime.Provider.Tests.csproj" />
+    <Project Path="tests/Madorin.AI.Runtime.Tools.Builtin.Tests/Madorin.AI.Runtime.Tools.Builtin.Tests.csproj" />
   </Folder>
 </Solution>

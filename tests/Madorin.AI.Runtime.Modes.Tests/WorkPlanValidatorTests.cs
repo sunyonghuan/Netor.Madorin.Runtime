@@ -109,6 +109,49 @@ public sealed class WorkPlanValidatorTests
             () => WorkPlanValidator.ValidateOrThrow(plan, CreateOptions()));
     }
 
+    [TestMethod]
+    public void NormalizePlanRevision_WithNoPublishedPlan_ForcesVersionOne()
+    {
+        var plan = new WorkPlanDraft(
+            "9",
+            "Ship release",
+            [new WorkPlanStepDraft("step-a", "Prepare notes", "worker")],
+            PreviousPlanVersion: "8");
+
+        var normalized = WorkPlanValidator.NormalizePlanRevision(plan, latestPublishedPlanVersion: null);
+
+        Assert.AreEqual("1", normalized.PlanVersion);
+        Assert.IsNull(normalized.PreviousPlanVersion);
+    }
+
+    [TestMethod]
+    public void NormalizePlanRevision_WithPublishedPlan_AutoIncrementsAndLinksPrevious()
+    {
+        var plan = new WorkPlanDraft(
+            "1",
+            "Ship release",
+            [new WorkPlanStepDraft("step-a", "Prepare notes", "worker")]);
+
+        var normalized = WorkPlanValidator.NormalizePlanRevision(plan, latestPublishedPlanVersion: "1");
+
+        Assert.AreEqual("2", normalized.PlanVersion);
+        Assert.AreEqual("1", normalized.PreviousPlanVersion);
+    }
+
+    [TestMethod]
+    public void NormalizePlanRevision_WithCorrectNextVersion_KeepsPlan()
+    {
+        var plan = new WorkPlanDraft(
+            "2",
+            "Ship release",
+            [new WorkPlanStepDraft("step-a", "Prepare notes", "worker")],
+            PreviousPlanVersion: "1");
+
+        var normalized = WorkPlanValidator.NormalizePlanRevision(plan, latestPublishedPlanVersion: "1");
+
+        Assert.AreSame(plan, normalized);
+    }
+
     private static WorkModeOptions CreateOptions(WorkflowPolicy? policy = null)
     {
         var manager = new AgentRef(

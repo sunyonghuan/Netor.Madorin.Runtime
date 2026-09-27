@@ -25,6 +25,7 @@ public enum WorkSessionStatus
     Paused,
     WaitingForApproval,
     WaitingForCredentials,
+    /// <summary>计划已发布，等待用户确认后才执行步骤。</summary>
     WaitingForPlanConfirmation,
     Completed,
     Failed,

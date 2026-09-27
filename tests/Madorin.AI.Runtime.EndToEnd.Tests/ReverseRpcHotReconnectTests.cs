@@ -1156,7 +1156,8 @@ public sealed class ReverseRpcHotReconnectTests
                 await _releaseManager.Task.WaitAsync(ct);
                 yield return new TextDeltaProviderEvent(
                     request.InvocationId,
-                    "result:manager");
+                    "{\"planVersion\":\"1\",\"goal\":\"Create order\",\"steps\":["
+                    + "{\"stepId\":\"run-1:step-1\",\"goal\":\"Create order\",\"targetAgentId\":\"worker\",\"title\":\"Execute\"}]}");
                 yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
                 yield break;
             }

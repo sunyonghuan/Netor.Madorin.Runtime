@@ -17,4 +17,7 @@ public sealed record ToolDescriptor(
     ToolRiskLevel Risk = ToolRiskLevel.Low,
     ToolExecutionTarget ExecutionTarget = ToolExecutionTarget.Builtin,
     bool IsIdempotent = true,
+    /// <summary>
+    /// 适用模式：null 或空表示全模式，否则仅列出的模式可见。仅 Runtime 内部使用。
+    /// </summary>
     IReadOnlyList<string>? SupportedModes = null);

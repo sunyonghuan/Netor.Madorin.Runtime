@@ -49,95 +49,103 @@ public sealed class ToolCatalogSnapshot
             _allTools.Concat(descriptors));
     }
 
+    /// <summary>
+    /// 按 Mode（及可选 Agent 角色）过滤工具目录。宿主工具 / SupportedModes 为空的通用工具始终保留。
+    /// </summary>
+    public ToolCatalogSnapshot FilterByMode(string mode, string? agentRole = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(mode);
+        var filtered = _allTools.Where(tool => IsVisibleInMode(tool, mode, agentRole)).ToArray();
+        return new ToolCatalogSnapshot(HostCatalogVersion, EffectiveVersion, filtered);
+    }
+
     /// <summary>Looks up a tool within this fixed snapshot.</summary>
     public bool TryGetTool(string toolId, out ToolDescriptor? descriptor) =>
         _tools.TryGetValue(toolId, out descriptor);
 
-    /// <summary>按模式过滤工具目录。</summary>
-    /// <param name="mode">模式名称：expert / work / meeting</param>
-    /// <param name="agentRole">Agent 角色（Work/Meeting 模式需要）：general-manager / project-lead / meeting-host / participant</param>
-    public ToolCatalogSnapshot FilterByMode(string mode, string? agentRole = null)
+    private static bool IsVisibleInMode(ToolDescriptor tool, string mode, string? agentRole)
     {
-        var filtered = _allTools.Where(tool =>
+        if (tool.SupportedModes is { Count: > 0 } supported
+            && !supported.Contains(mode, StringComparer.OrdinalIgnoreCase))
         {
-            // 宿主工具或通用工具：不过滤（SupportedModes == null）
-            if (tool.SupportedModes is null || tool.SupportedModes.Count == 0)
-            {
-                return true;
-            }
+            return false;
+        }
 
-            // 检查是否支持当前模式
-            if (!tool.SupportedModes.Contains(mode, StringComparer.OrdinalIgnoreCase))
-            {
-                return false;
-            }
+        if (string.Equals(mode, "work", StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrWhiteSpace(agentRole))
+        {
+            return IsAllowedForWorkRole(tool.ToolId, agentRole);
+        }
 
-            // Work 模式需要按角色过滤
-            if (string.Equals(mode, "work", StringComparison.OrdinalIgnoreCase) && agentRole is not null)
-            {
-                return IsAllowedForWorkRole(tool, agentRole);
-            }
+        if (string.Equals(mode, "meeting", StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrWhiteSpace(agentRole))
+        {
+            return IsAllowedForMeetingRole(tool.ToolId, agentRole);
+        }
 
-            // Meeting 模式需要按角色过滤
-            if (string.Equals(mode, "meeting", StringComparison.OrdinalIgnoreCase) && agentRole is not null)
-            {
-                return IsAllowedForMeetingRole(tool, agentRole);
-            }
-
-            return true;
-        }).ToArray();
-
-        return new ToolCatalogSnapshot(HostCatalogVersion, EffectiveVersion, filtered);
+        return true;
     }
 
-    /// <summary>Work 模式按角色过滤（参考工作与会议模式.md §1）。</summary>
-    private static bool IsAllowedForWorkRole(ToolDescriptor tool, string agentRole)
+    /// <summary>Work 角色过滤：参考《工作与会议模式》§1。</summary>
+    private static bool IsAllowedForWorkRole(string toolId, string agentRole)
     {
-        // general-manager (A): 所有 Work 工具
         if (string.Equals(agentRole, "general-manager", StringComparison.OrdinalIgnoreCase))
         {
             return true;
         }
 
-        // project-lead (B): 只能用 dispatch_step + read_template_file，不能 ask_user / set_plan
+        // project-lead：dispatch + read_template + 通用工具
         if (string.Equals(agentRole, "project-lead", StringComparison.OrdinalIgnoreCase))
         {
-            return tool.ToolId switch
+            return toolId switch
             {
-                "mcli_ask_user" => false,  // B 不能问用户
+                "mcli_ask_user" => false,
+                "mcli_check_pending_user_input" => false,
                 "mcli_work_set_plan" => false,
                 "mcli_work_list_plan_templates" => false,
                 "mcli_work_load_plan_from_template" => false,
                 "mcli_work_load_plan_from_chat_history" => false,
                 "mcli_work_load_plan_from_groupchat" => false,
                 "mcli_work_get_recent_completed_task_plan" => false,
-                "mcli_work_dispatch_step" => true,  // B 可以执行步骤
-                "mcli_work_read_template_file" => true,  // B 可以读模板文件
-                _ => true  // 其他通用工具
+                "mcli_work_dispatch_step" => true,
+                "mcli_work_read_template_file" => true,
+                _ => true
             };
         }
 
-        return true;
+        // 其他执行 Agent：仅通用工具，不暴露规划/调度专用工具
+        return toolId switch
+        {
+            "mcli_ask_user" => false,
+            "mcli_check_pending_user_input" => false,
+            "mcli_work_set_plan" => false,
+            "mcli_work_list_plan_templates" => false,
+            "mcli_work_load_plan_from_template" => false,
+            "mcli_work_load_plan_from_chat_history" => false,
+            "mcli_work_load_plan_from_groupchat" => false,
+            "mcli_work_get_recent_completed_task_plan" => false,
+            "mcli_work_dispatch_step" => false,
+            "mcli_work_read_template_file" => false,
+            _ => true
+        };
     }
 
-    /// <summary>Meeting 模式按角色过滤（参考工作与会议模式.md §1）。</summary>
-    private static bool IsAllowedForMeetingRole(ToolDescriptor tool, string agentRole)
+    /// <summary>Meeting 角色过滤：参考《工作与会议模式》§1。</summary>
+    private static bool IsAllowedForMeetingRole(string toolId, string agentRole)
     {
-        // meeting-host: 所有 Meeting 工具
         if (string.Equals(agentRole, "meeting-host", StringComparison.OrdinalIgnoreCase))
         {
             return true;
         }
 
-        // 参会者 (participant): 只能 list_attachments，不能 output_summary / confirm_end / ask_user
-        return tool.ToolId switch
+        return toolId switch
         {
             "mcli_meeting_output_summary" => false,
             "mcli_meeting_confirm_end" => false,
             "mcli_ask_user" => false,
             "mcli_check_pending_user_input" => false,
             "mcli_meeting_list_attachments" => true,
-            _ => true  // 其他通用工具
+            _ => true
         };
     }
 

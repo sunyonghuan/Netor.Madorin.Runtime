@@ -332,6 +332,100 @@ public sealed class WorkToolLoopTests
         }
     }
 
+    [TestMethod]
+    public async Task RunAsync_IndependentReadySteps_ExecuteConcurrentWaveWithTools()
+    {
+        var ct = TestContext.CancellationToken;
+        var dataDirectory = Path.Combine(
+            TestContext.TestRunDirectory ?? Path.GetTempPath(),
+            $"work-tool-concurrent-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dataDirectory);
+
+        try
+        {
+            var connectionString = new SqliteConnectionStringBuilder
+            {
+                DataSource = Path.Combine(dataDirectory, "state.db"),
+                Pooling = false
+            }.ToString();
+            // 与生产 RuntimeExecutionCore 一致：Session/Work、Outbox、ToolIntent 分连接，
+            // 避免同连接对象在工具环并行时非线程安全。
+            await using var connection = new SqliteConnection(connectionString);
+            await SqliteSchema.EnsureCreatedAsync(connection, ct);
+            await using var outboxConnection = new SqliteConnection(connectionString);
+            await outboxConnection.OpenAsync(ct);
+            await using var toolConnection = new SqliteConnection(connectionString);
+            await toolConnection.OpenAsync(ct);
+            using var outbox = new SqliteEventOutbox(outboxConnection);
+            using var toolState = new SqliteToolIntentRepository(toolConnection);
+            var registry = new TestToolRegistry();
+            var validator = new JsonSchemaToolValidator();
+            var catalogStore = new ToolCatalogStore(registry, validator);
+            var catalog = catalogStore.CaptureSnapshot();
+            var authorization = new ToolAuthorizationService(
+                toolState,
+                RuntimeToolPolicy.CreateRestricted(dataDirectory));
+            await SaveConcurrentWorkerGrantsAsync(authorization, dataDirectory, ct);
+            var executor = new TestToolExecutor();
+            using var gateway = new ToolGateway(
+                catalogStore,
+                validator,
+                authorization,
+                [executor],
+                toolState,
+                outbox);
+            var provider = new ConcurrentWorkToolLoopProvider();
+            var memoryFiles = new MemoryFileService(
+                Path.Join(dataDirectory, "home"),
+                Path.Join(dataDirectory, "workspace"));
+            var sessionRepo = new SqliteSessionRepository(connection);
+            var orchestrator = new WorkModeOrchestrator(
+                _ => provider,
+                new ConversationStore(dataDirectory),
+                sessionRepo,
+                outbox,
+                new AgentContextComposer(memoryFiles),
+                toolStateStore: toolState,
+                toolGateway: gateway,
+                toolCatalogSnapshot: catalog,
+                workRepo: new SqliteWorkRepository(connection),
+                connection: connection);
+
+            await EnsureSessionRunAsync(connection, "session-1", "run-1", ct);
+
+            var events = await CollectAsync(
+                orchestrator.RunAsync(
+                    "run-1",
+                    "session-1",
+                    CreateConcurrentRequest(),
+                    "runtime-1",
+                    ct),
+                ct);
+
+            Assert.AreEqual(MessageTypes.RunCompleted, events[^1].MessageType);
+            Assert.AreEqual(RunStatus.Completed, await sessionRepo.GetRunStatusAsync("run-1", ct));
+            Assert.AreEqual(2, executor.CallCount);
+            Assert.AreEqual(4, provider.WorkerInvokeCount);
+            Assert.IsTrue(
+                provider.WorkerStartOverlap < TimeSpan.FromMilliseconds(80),
+                $"Tool-enabled ready steps should start concurrently; start delta was {provider.WorkerStartOverlap.TotalMilliseconds}ms.");
+
+            var intentA = await toolState.GetIntentAsync("call-work-a", ct);
+            var intentB = await toolState.GetIntentAsync("call-work-b", ct);
+            Assert.IsNotNull(intentA);
+            Assert.IsNotNull(intentB);
+            Assert.AreEqual(ToolIntentStatus.Succeeded, intentA.Status);
+            Assert.AreEqual(ToolIntentStatus.Succeeded, intentB.Status);
+        }
+        finally
+        {
+            if (Directory.Exists(dataDirectory))
+            {
+                Directory.Delete(dataDirectory, recursive: true);
+            }
+        }
+    }
+
     private static async Task<List<RuntimeEventEnvelope>> CollectAsync(
         IAsyncEnumerable<RuntimeEventEnvelope> events,
         CancellationToken ct)
@@ -359,6 +453,33 @@ public sealed class WorkToolLoopTests
                 "grant-worker",
                 workspaceRoot,
                 "call-work-1",
+                expiresAt,
+                approvalRequestId: null),
+            ct: ct);
+    }
+
+    private static async Task SaveConcurrentWorkerGrantsAsync(
+        ToolAuthorizationService authorization,
+        string workspaceRoot,
+        CancellationToken ct)
+    {
+        var expiresAt = DateTimeOffset.UtcNow.AddHours(1);
+        await authorization.SaveGrantAsync(
+            CreateManagerGrant(workspaceRoot, expiresAt),
+            ct: ct);
+        await authorization.SaveGrantAsync(
+            CreateWorkerGrant(
+                "grant-worker-a",
+                workspaceRoot,
+                "call-work-a",
+                expiresAt,
+                approvalRequestId: null),
+            ct: ct);
+        await authorization.SaveGrantAsync(
+            CreateWorkerGrant(
+                "grant-worker-b",
+                workspaceRoot,
+                "call-work-b",
                 expiresAt,
                 approvalRequestId: null),
             ct: ct);
@@ -454,6 +575,37 @@ public sealed class WorkToolLoopTests
             [new TextContentBlock("Prepare the release notes.")]);
     }
 
+    private static NewSessionRunRequest CreateConcurrentRequest()
+    {
+        var manager = new AgentRef(
+            "manager",
+            "v1",
+            "Create a two-step plan.",
+            "tool-loop",
+            "tool-model");
+        var worker = new AgentRef(
+            "worker",
+            "v1",
+            "Execute the assigned step.",
+            "tool-loop",
+            "tool-model",
+            AllowedToolIds: [TestToolRegistry.ToolId]);
+        return new NewSessionRunRequest(
+            "session-key",
+            "run-key",
+            RuntimeMode.Work,
+            new NextTurnSelection(
+                1,
+                RuntimeMode.Work,
+                new DefaultSelection("tool-loop", "tool-model"),
+                new WorkModeOptions(
+                    manager,
+                    [worker],
+                    WorkflowPolicy.Default with { MaxConcurrentSteps = 2 }),
+                ToolCatalogVersion: "tools-v1"),
+            [new TextContentBlock("Prepare A and B in parallel.")]);
+    }
+
     private static async Task EnsureSessionRunAsync(
         SqliteConnection connection,
         string sessionId,
@@ -505,7 +657,8 @@ public sealed class WorkToolLoopTests
             {
                 yield return new TextDeltaProviderEvent(
                     request.InvocationId,
-                    "result:manager");
+                    "{\"planVersion\":\"1\",\"goal\":\"Calculate\",\"steps\":["
+                    + "{\"stepId\":\"run-1:step-1\",\"goal\":\"Calculate\",\"targetAgentId\":\"worker\",\"title\":\"Execute\"}]}");
                 yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
                 yield break;
             }
@@ -535,6 +688,105 @@ public sealed class WorkToolLoopTests
             yield return new TextDeltaProviderEvent(
                 request.InvocationId,
                 "tool-result:worker");
+            yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
+        }
+
+        public Task ValidateCapabilitiesAsync(
+            ContentBlock[] input,
+            CancellationToken ct = default) => Task.CompletedTask;
+    }
+
+    /// <summary>两个独立步骤各走一轮工具调用，用于验证有工具并发波次。</summary>
+    private sealed class ConcurrentWorkToolLoopProvider : IRuntimeProviderAdapter
+    {
+        private readonly object _gate = new();
+        private readonly List<DateTimeOffset> _workerStarts = [];
+        private readonly HashSet<string> _toolRounds = new(StringComparer.Ordinal);
+
+        public string ProviderId => "tool-loop";
+
+        public ProviderCapabilities Capabilities { get; } = new(
+            Streaming: true,
+            ToolCalling: true);
+
+        public IReadOnlyList<ProviderModel> Models { get; } =
+            [new("tool-model", "Tool Model", ContextWindow: 8192)];
+
+        public int WorkerInvokeCount { get; private set; }
+
+        public TimeSpan WorkerStartOverlap { get; private set; } = TimeSpan.MaxValue;
+
+        public async IAsyncEnumerable<RuntimeProviderEvent> CompleteStreamingAsync(
+            RuntimeProviderRequest request,
+            [EnumeratorCancellation] CancellationToken ct = default)
+        {
+            await Task.Yield();
+            ct.ThrowIfCancellationRequested();
+            if (string.Equals(request.AgentId, "manager", StringComparison.Ordinal))
+            {
+                yield return new TextDeltaProviderEvent(
+                    request.InvocationId,
+                    "{\"planVersion\":\"1\",\"goal\":\"Ship\",\"steps\":["
+                    + "{\"stepId\":\"run-1:step-a\",\"goal\":\"Prepare A\",\"targetAgentId\":\"worker\"},"
+                    + "{\"stepId\":\"run-1:step-b\",\"goal\":\"Prepare B\",\"targetAgentId\":\"worker\"}]}");
+                yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
+                yield break;
+            }
+
+            // 步骤目标在本轮最新 user 文本里；不要扫历史里的计划 JSON（会同时含 A/B）。
+            var goalText = request.Messages
+                .Where(static message =>
+                    string.Equals(message.Role, RuntimeProviderRoles.User, StringComparison.Ordinal))
+                .SelectMany(static message => message.Content.OfType<TextContentBlock>())
+                .Select(static block => block.Text)
+                .LastOrDefault(static text =>
+                    text.Contains("Prepare A", StringComparison.Ordinal)
+                    || text.Contains("Prepare B", StringComparison.Ordinal))
+                ?? string.Empty;
+            var stepKey = goalText.Contains("Prepare A", StringComparison.Ordinal) ? "a" : "b";
+            var isContinuation = request.Messages.Any(static message =>
+                message.Content.OfType<ToolResultContentBlock>().Any());
+
+            if (!isContinuation)
+            {
+                lock (_gate)
+                {
+                    WorkerInvokeCount++;
+                    _workerStarts.Add(DateTimeOffset.UtcNow);
+                    if (_workerStarts.Count >= 2)
+                    {
+                        var ordered = _workerStarts.OrderBy(static value => value).ToArray();
+                        WorkerStartOverlap = ordered[1] - ordered[0];
+                    }
+                }
+
+                await Task.Delay(80, ct).ConfigureAwait(false);
+                var callId = stepKey == "a" ? "call-work-a" : "call-work-b";
+                lock (_gate)
+                {
+                    Assert.IsTrue(_toolRounds.Add(callId), $"Duplicate tool round for {callId}");
+                }
+
+                yield return new ToolCallCompleteProviderEvent(
+                    request.InvocationId,
+                    callId,
+                    TestToolRegistry.ToolId,
+                    "calculate",
+                    "{\"value\":21}");
+                yield return new InvocationCompletedProviderEvent(
+                    request.InvocationId,
+                    "tool_calls");
+                yield break;
+            }
+
+            lock (_gate)
+            {
+                WorkerInvokeCount++;
+            }
+
+            yield return new TextDeltaProviderEvent(
+                request.InvocationId,
+                $"tool-result:{stepKey}");
             yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
         }
 

@@ -2781,7 +2781,8 @@ public sealed class ExpertModeOrchestrator(
         }
 
         var snapshot = CaptureCatalogSnapshot();
-        return snapshot is null ? null : [.. snapshot.Tools];
+        // Expert 不得暴露 Work/Meeting 专用工具（SupportedModes 过滤）。
+        return snapshot is null ? null : [.. snapshot.FilterByMode("expert").Tools];
     }
 
     /// <summary>

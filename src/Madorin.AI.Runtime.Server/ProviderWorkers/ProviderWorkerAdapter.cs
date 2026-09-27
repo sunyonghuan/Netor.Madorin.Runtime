@@ -15,8 +15,18 @@ public sealed class ProviderWorkerAdapter(
 
     public string ProviderId => _connection.ProviderId;
 
+    /// <summary>
+    /// 优先用连接配置；否则用 Worker hello.ok 协商能力。
+    /// 二者皆空时不能回落成全 false，否则会把 DeepSeek reasoning 等真实能力误判掉。
+    /// </summary>
     public ProviderCapabilities Capabilities =>
-        _connection.Capabilities ?? new ProviderCapabilities();
+        _connection.Capabilities
+        ?? _process.NegotiatedCapabilities
+        ?? new ProviderCapabilities(
+            Streaming: true,
+            ToolCalling: true,
+            Reasoning: true,
+            Usage: true);
 
     public IReadOnlyList<ProviderModel> Models =>
         _connection.Models is null || _connection.Models.Count == 0

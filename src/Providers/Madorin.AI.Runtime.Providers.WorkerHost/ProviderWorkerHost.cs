@@ -15,6 +15,7 @@ public static partial class ProviderWorkerHost
         Stream stdin,
         Stream stdout,
         TextWriter stderr,
+        ProviderCapabilities? declaredCapabilities = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(protocol);
@@ -31,6 +32,7 @@ public static partial class ProviderWorkerHost
             stdin,
             stdout,
             stderr,
+            declaredCapabilities,
             cancellationToken);
         return await session.RunAsync().ConfigureAwait(false);
     }
@@ -42,6 +44,7 @@ public static partial class ProviderWorkerHost
         Stream stdin,
         Stream stdout,
         TextWriter stderr,
+        ProviderCapabilities? declaredCapabilities,
         CancellationToken cancellationToken) : IDisposable
     {
         private readonly SemaphoreSlim _writeLock = new(1, 1);

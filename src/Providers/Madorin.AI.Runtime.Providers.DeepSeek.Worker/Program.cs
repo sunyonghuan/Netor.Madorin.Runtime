@@ -22,13 +22,20 @@ if (!string.Equals(slug, Slug, StringComparison.Ordinal))
 }
 
 var streams = ProviderWorkerStreams.Bind();
+// 宿主侧投影在 hello 前后都可能读取能力；声明与 DeepSeekProviderAdapter 一致，避免配置缺 capabilities 时误杀 reasoning。
+var declaredCapabilities = new ProviderCapabilities(
+    Streaming: true,
+    ToolCalling: true,
+    Reasoning: true,
+    Usage: true);
 return await ProviderWorkerHost.RunAsync(
     Protocol,
     Slug,
     BuildAdapter,
     streams.Stdin,
     streams.Stdout,
-    streams.Stderr);
+    streams.Stderr,
+    declaredCapabilities);
 
 static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config)
 {

@@ -248,6 +248,7 @@ public sealed partial class ToolCatalogStore : IToolCatalogStore
                 WriteSortedStrings(writer, "capabilities", descriptor.Capabilities);
                 writer.WriteString("executionTarget", descriptor.ExecutionTarget.ToString());
                 writer.WriteBoolean("isIdempotent", descriptor.IsIdempotent);
+                WriteSortedStrings(writer, "supportedModes", descriptor.SupportedModes);
                 writer.WriteEndObject();
             }
 

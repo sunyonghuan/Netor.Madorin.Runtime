@@ -6,7 +6,7 @@ using Madorin.AI.Runtime.Contracts.Serialization;
 namespace Madorin.AI.Runtime.Tools.Builtin.Work;
 
 /// <summary>
-/// 把 mcli_work_set_plan 参数解析成 WorkPlanDraft。
+/// 把 mcli_work_set_plan / dispatch_step 参数解析成 WorkPlanDraft。
 /// 同时接受原生 planVersion/goal/steps，以及提示词里的 main_steps/sub_steps。
 /// </summary>
 internal static class WorkPlanToolCodec
@@ -63,6 +63,52 @@ internal static class WorkPlanToolCodec
 
         errorCode = "invalid_plan";
         message = "Provide WorkPlanDraft fields (planVersion/goal/steps) or main_steps[].sub_steps[].";
+        return false;
+    }
+
+    public static bool TryResolveDispatchTarget(
+        WorkPlanDraft plan,
+        int stepIndex,
+        int subStepIndex,
+        out WorkPlanStepDraft? step,
+        out string? errorCode,
+        out string? message)
+    {
+        step = null;
+        errorCode = null;
+        message = null;
+
+        if (stepIndex < 1 || subStepIndex < 1)
+        {
+            errorCode = "invalid_arguments";
+            message = "stepIndex and subStepIndex must be >= 1.";
+            return false;
+        }
+
+        foreach (var candidate in plan.Steps)
+        {
+            if (!TryReadIndexPair(candidate, out var main, out var sub))
+            {
+                continue;
+            }
+
+            if (main == stepIndex && sub == subStepIndex)
+            {
+                step = candidate;
+                return true;
+            }
+        }
+
+        if (subStepIndex == 1 && stepIndex <= plan.Steps.Length)
+        {
+            step = plan.Steps[stepIndex - 1];
+            return true;
+        }
+
+        errorCode = "step_not_found";
+        message = string.Create(
+            CultureInfo.InvariantCulture,
+            $"No step matches stepIndex={stepIndex}, subStepIndex={subStepIndex}.");
         return false;
     }
 
@@ -268,6 +314,28 @@ internal static class WorkPlanToolCodec
         return doc.RootElement.Clone();
     }
 
+    private static bool TryReadIndexPair(WorkPlanStepDraft step, out int mainIndex, out int subIndex)
+    {
+        mainIndex = 0;
+        subIndex = 0;
+        if (step.Inputs is not JsonElement inputs || inputs.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        if (!inputs.TryGetProperty("mainIndex", out var main)
+            || !inputs.TryGetProperty("subIndex", out var sub)
+            || main.ValueKind != JsonValueKind.Number
+            || sub.ValueKind != JsonValueKind.Number)
+        {
+            return false;
+        }
+
+        mainIndex = main.GetInt32();
+        subIndex = sub.GetInt32();
+        return mainIndex >= 1 && subIndex >= 1;
+    }
+
     private static string? ReadOptionalString(JsonElement element, string name)
     {
         if (!element.TryGetProperty(name, out var value)
@@ -285,4 +353,3 @@ internal static class WorkPlanToolCodec
         text.Contains("{{", StringComparison.Ordinal)
         && text.Contains("}}", StringComparison.Ordinal);
 }
-

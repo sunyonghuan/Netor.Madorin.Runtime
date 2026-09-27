@@ -178,6 +178,60 @@ public static class WorkPlanValidator
             ]);
     }
 
+    /// <summary>
+    /// Aligns GM-produced plan versions with already-published revisions.
+    /// First publish is forced to version "1"; later publishes auto-increment
+    /// and set <see cref="WorkPlanDraft.PreviousPlanVersion"/> when the model omits them.
+    /// </summary>
+    public static WorkPlanDraft NormalizePlanRevision(
+        WorkPlanDraft plan,
+        string? latestPublishedPlanVersion)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+
+        if (string.IsNullOrWhiteSpace(latestPublishedPlanVersion))
+        {
+            if (string.Equals(plan.PlanVersion, "1", StringComparison.Ordinal)
+                && string.IsNullOrWhiteSpace(plan.PreviousPlanVersion))
+            {
+                return plan;
+            }
+
+            return plan with
+            {
+                PlanVersion = "1",
+                PreviousPlanVersion = null
+            };
+        }
+
+        if (!int.TryParse(
+                latestPublishedPlanVersion,
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out var current))
+        {
+            throw new ArgumentException(
+                $"Published plan version '{latestPublishedPlanVersion}' must be a non-negative integer.",
+                nameof(latestPublishedPlanVersion));
+        }
+
+        var expectedNext = (current + 1).ToString(CultureInfo.InvariantCulture);
+        if (string.Equals(plan.PlanVersion, expectedNext, StringComparison.Ordinal)
+            && string.Equals(
+                plan.PreviousPlanVersion,
+                latestPublishedPlanVersion,
+                StringComparison.Ordinal))
+        {
+            return plan;
+        }
+
+        return plan with
+        {
+            PlanVersion = expectedNext,
+            PreviousPlanVersion = latestPublishedPlanVersion
+        };
+    }
+
     public static string ComputeStepInputHash(
         string stepId,
         string planVersion,

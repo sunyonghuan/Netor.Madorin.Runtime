@@ -77,6 +77,113 @@ public sealed class SqliteWorkRepository : IWorkRecoveryStore
         await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Starts a planning turn without wiping an already-published plan revision.
+    /// Existing sessions keep plan_version / plan_message_id / plan_json.
+    /// </summary>
+    public async Task BeginPlanningTurnAsync(
+        string sessionId,
+        string runId,
+        string generalManagerId,
+        WorkflowPolicy policy,
+        WorkContextPolicy contextPolicy,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(runId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(generalManagerId);
+        ArgumentNullException.ThrowIfNull(policy);
+        ArgumentNullException.ThrowIfNull(contextPolicy);
+
+        var now = FormatTimestamp(DateTimeOffset.UtcNow);
+        var policyJson = JsonSerializer.Serialize(policy, RuntimeJsonContext.Default.WorkflowPolicy);
+        var contextJson = JsonSerializer.Serialize(
+            contextPolicy,
+            RuntimeJsonContext.Default.WorkContextPolicy);
+
+        await using (var update = _connection.CreateCommand())
+        {
+            update.CommandText = """
+                UPDATE work_sessions
+                SET run_id = $runId,
+                    status = $status,
+                    general_manager_id = $gm,
+                    workflow_policy_json = $policyJson,
+                    context_policy_json = $contextJson,
+                    updated_at = $now
+                WHERE session_id = $sessionId;
+                """;
+            update.Parameters.AddWithValue("$runId", runId);
+            update.Parameters.AddWithValue("$status", ToDbStatus(WorkSessionStatus.Planning));
+            update.Parameters.AddWithValue("$gm", generalManagerId);
+            update.Parameters.AddWithValue("$policyJson", policyJson);
+            update.Parameters.AddWithValue("$contextJson", contextJson);
+            update.Parameters.AddWithValue("$now", now);
+            update.Parameters.AddWithValue("$sessionId", sessionId);
+            var updated = await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            if (updated > 0)
+            {
+                return;
+            }
+        }
+
+        await UpsertSessionAsync(
+            sessionId,
+            runId,
+            WorkSessionStatus.Planning,
+            generalManagerId,
+            policy,
+            contextPolicy,
+            planVersion: "1",
+            planMessageId: null,
+            plan: null,
+            ct).ConfigureAwait(false);
+    }
+
+    public async Task<string?> GetLatestPublishedPlanVersionAsync(
+        string sessionId,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        await using var command = _connection.CreateCommand();
+        command.CommandText = """
+            SELECT plan_version
+            FROM work_plan_revisions
+            WHERE session_id = $sessionId
+            ORDER BY created_at DESC, plan_version DESC
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$sessionId", sessionId);
+        return (string?)await command.ExecuteScalarAsync(ct).ConfigureAwait(false);
+    }
+
+    public async Task<WorkPlanDraft?> GetCurrentPlanDraftAsync(
+        string sessionId,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        await using var command = _connection.CreateCommand();
+        command.CommandText = """
+            SELECT plan_json
+            FROM work_sessions
+            WHERE session_id = $sessionId;
+            """;
+        command.Parameters.AddWithValue("$sessionId", sessionId);
+        var value = await command.ExecuteScalarAsync(ct).ConfigureAwait(false);
+        if (value is null or DBNull)
+        {
+            return null;
+        }
+
+        var json = Convert.ToString(value, CultureInfo.InvariantCulture);
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return null;
+        }
+
+        return JsonSerializer.Deserialize(json, RuntimeJsonContext.Default.WorkPlanDraft);
+    }
+
     public async Task UpdateSessionStatusAsync(
         string sessionId,
         WorkSessionStatus status,
@@ -930,6 +1037,219 @@ public sealed class SqliteWorkRepository : IWorkRecoveryStore
         }
     }
 
+    public async Task MarkStepSkippedAsync(
+        string sessionId,
+        string stepId,
+        string planVersion,
+        string reason,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(planVersion);
+        ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+
+        await using var command = _connection.CreateCommand();
+        command.CommandText = """
+            UPDATE work_steps
+            SET status = 'skipped',
+                error_message = $reason,
+                completed_at = $now
+            WHERE session_id = $sessionId
+              AND step_id = $stepId
+              AND plan_version = $planVersion
+              AND status = 'pending';
+            """;
+        command.Parameters.AddWithValue("$reason", reason);
+        command.Parameters.AddWithValue("$now", FormatTimestamp(DateTimeOffset.UtcNow));
+        command.Parameters.AddWithValue("$sessionId", sessionId);
+        command.Parameters.AddWithValue("$stepId", stepId);
+        command.Parameters.AddWithValue("$planVersion", planVersion);
+        await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <summary>将用户插话写入 FIFO 账本；完整 Run Control 控制面仍未接入。</summary>
+    public async Task<WorkPendingUserInput> EnqueuePendingUserInputAsync(
+        string sessionId,
+        string contentText,
+        string source = "user",
+        string? inputId = null,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(contentText);
+        ArgumentException.ThrowIfNullOrWhiteSpace(source);
+
+        var id = string.IsNullOrWhiteSpace(inputId)
+            ? Guid.NewGuid().ToString("N")
+            : inputId.Trim();
+        var now = DateTimeOffset.UtcNow;
+        var hash = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(contentText)))
+            .ToLowerInvariant();
+
+        using var transaction = _connection.BeginTransaction(deferred: false);
+        await using (var nextOrdinal = _connection.CreateCommand())
+        {
+            nextOrdinal.Transaction = transaction;
+            nextOrdinal.CommandText = """
+                SELECT COALESCE(MAX(ordinal), 0) + 1
+                FROM work_pending_inputs
+                WHERE session_id = $sessionId;
+                """;
+            nextOrdinal.Parameters.AddWithValue("$sessionId", sessionId);
+            var ordinalValue = await nextOrdinal.ExecuteScalarAsync(ct).ConfigureAwait(false);
+            var ordinal = Convert.ToInt32(ordinalValue, CultureInfo.InvariantCulture);
+
+            await using var insert = _connection.CreateCommand();
+            insert.Transaction = transaction;
+            insert.CommandText = """
+                INSERT INTO work_pending_inputs(
+                    input_id, session_id, ordinal, content_text, content_hash,
+                    source, state, enqueued_at)
+                VALUES(
+                    $inputId, $sessionId, $ordinal, $contentText, $contentHash,
+                    $source, 'pending', $enqueuedAt);
+                """;
+            insert.Parameters.AddWithValue("$inputId", id);
+            insert.Parameters.AddWithValue("$sessionId", sessionId);
+            insert.Parameters.AddWithValue("$ordinal", ordinal);
+            insert.Parameters.AddWithValue("$contentText", contentText);
+            insert.Parameters.AddWithValue("$contentHash", hash);
+            insert.Parameters.AddWithValue("$source", source);
+            insert.Parameters.AddWithValue("$enqueuedAt", FormatTimestamp(now));
+            await insert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+
+            transaction.Commit();
+            return new WorkPendingUserInput(
+                id,
+                sessionId,
+                ordinal,
+                contentText,
+                hash,
+                WorkPendingUserInputState.Pending,
+                now,
+                source);
+        }
+    }
+
+    public async Task<IReadOnlyList<WorkPendingUserInput>> PeekPendingUserInputsAsync(
+        string sessionId,
+        int? limit = null,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        await using var command = _connection.CreateCommand();
+        command.CommandText = """
+            SELECT input_id, session_id, ordinal, content_text, content_hash,
+                   source, state, enqueued_at, consumed_at, consumed_by_run_id
+            FROM work_pending_inputs
+            WHERE session_id = $sessionId
+              AND state = 'pending'
+            ORDER BY ordinal ASC
+            """ + (limit is null ? ";" : " LIMIT $limit;");
+        command.Parameters.AddWithValue("$sessionId", sessionId);
+        if (limit is not null)
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThan(limit.Value, 1);
+            command.Parameters.AddWithValue("$limit", limit.Value);
+        }
+
+        return await ReadPendingUserInputsAsync(command, ct).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<WorkPendingUserInput>> ConsumePendingUserInputsAsync(
+        string sessionId,
+        string runId,
+        int? limit = null,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(runId);
+
+        using var transaction = _connection.BeginTransaction(deferred: false);
+        await using var selectCommand = _connection.CreateCommand();
+        selectCommand.Transaction = transaction;
+        selectCommand.CommandText = """
+            SELECT input_id, session_id, ordinal, content_text, content_hash,
+                   source, state, enqueued_at, consumed_at, consumed_by_run_id
+            FROM work_pending_inputs
+            WHERE session_id = $sessionId
+              AND state = 'pending'
+            ORDER BY ordinal ASC
+            """ + (limit is null ? ";" : " LIMIT $limit;");
+        selectCommand.Parameters.AddWithValue("$sessionId", sessionId);
+        if (limit is not null)
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThan(limit.Value, 1);
+            selectCommand.Parameters.AddWithValue("$limit", limit.Value);
+        }
+
+        var pending = await ReadPendingUserInputsAsync(selectCommand, ct).ConfigureAwait(false);
+        if (pending.Count == 0)
+        {
+            transaction.Commit();
+            return pending;
+        }
+
+        var consumedAt = DateTimeOffset.UtcNow;
+        var consumed = new List<WorkPendingUserInput>(pending.Count);
+        foreach (var item in pending)
+        {
+            await using var update = _connection.CreateCommand();
+            update.Transaction = transaction;
+            update.CommandText = """
+                UPDATE work_pending_inputs
+                SET state = 'consumed',
+                    consumed_at = $consumedAt,
+                    consumed_by_run_id = $runId
+                WHERE input_id = $inputId
+                  AND state = 'pending';
+                """;
+            update.Parameters.AddWithValue("$consumedAt", FormatTimestamp(consumedAt));
+            update.Parameters.AddWithValue("$runId", runId);
+            update.Parameters.AddWithValue("$inputId", item.InputId);
+            if (await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false) != 1)
+            {
+                throw new InvalidOperationException(
+                    $"Pending work input '{item.InputId}' was already consumed.");
+            }
+
+            consumed.Add(item with
+            {
+                State = WorkPendingUserInputState.Consumed,
+                ConsumedAt = consumedAt,
+                ConsumedByRunId = runId
+            });
+        }
+
+        transaction.Commit();
+        return consumed;
+    }
+
+    public async Task<int> CountPendingUserInputsAsync(
+        string sessionId,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        await using var command = _connection.CreateCommand();
+        command.CommandText = """
+            SELECT COUNT(1)
+            FROM work_pending_inputs
+            WHERE session_id = $sessionId
+              AND state = 'pending';
+            """;
+        command.Parameters.AddWithValue("$sessionId", sessionId);
+        var value = await command.ExecuteScalarAsync(ct).ConfigureAwait(false);
+        return Convert.ToInt32(value, CultureInfo.InvariantCulture);
+    }
+
+    public async Task<bool> HasPendingUserInputsAsync(
+        string sessionId,
+        CancellationToken ct = default) =>
+        await CountPendingUserInputsAsync(sessionId, ct).ConfigureAwait(false) > 0;
+
     public async Task<WorkResumeState?> GetResumeStateAsync(
         string sessionId,
         CancellationToken ct = default)
@@ -969,6 +1289,7 @@ public sealed class SqliteWorkRepository : IWorkRecoveryStore
         var backgroundJobs = await ListBackgroundJobsAsync(sessionId, planVersion: planVersion, ct: ct)
             .ConfigureAwait(false);
         var revisions = await ListPlanRevisionsAsync(sessionId, ct).ConfigureAwait(false);
+        var pendingCount = await CountPendingUserInputsAsync(sessionId, ct).ConfigureAwait(false);
         return new WorkResumeState(
             status,
             gm,
@@ -980,7 +1301,8 @@ public sealed class SqliteWorkRepository : IWorkRecoveryStore
             SentToolCallIds: sentCallIds,
             RequiresManualIntervention: requiresManual,
             PendingApprovalRequestId: pendingApproval,
-            PlanRevisions: [.. revisions]);
+            PlanRevisions: [.. revisions],
+            PendingUserInputCount: pendingCount);
     }
 
     public async Task<IReadOnlyList<WorkPlanRevisionSnapshot>> ListPlanRevisionsAsync(
@@ -1189,9 +1511,10 @@ public sealed class SqliteWorkRepository : IWorkRecoveryStore
                 depCommand.Transaction = transaction;
                 depCommand.CommandText = """
                     INSERT INTO work_step_dependencies(
-                        step_id, plan_version, depends_on_step_id)
-                    VALUES($stepId, $planVersion, $dep);
+                        session_id, step_id, plan_version, depends_on_step_id)
+                    VALUES($sessionId, $stepId, $planVersion, $dep);
                     """;
+                depCommand.Parameters.AddWithValue("$sessionId", sessionId);
                 depCommand.Parameters.AddWithValue("$stepId", step.StepId);
                 depCommand.Parameters.AddWithValue("$planVersion", plan.PlanVersion);
                 depCommand.Parameters.AddWithValue("$dep", dep);
@@ -1323,6 +1646,38 @@ public sealed class SqliteWorkRepository : IWorkRecoveryStore
 
     private static DateTimeOffset ParseRequiredTimestamp(string value) =>
         DateTimeOffset.Parse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+
+    private static async Task<IReadOnlyList<WorkPendingUserInput>> ReadPendingUserInputsAsync(
+        SqliteCommand command,
+        CancellationToken ct)
+    {
+        var items = new List<WorkPendingUserInput>();
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            items.Add(new WorkPendingUserInput(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetInt32(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                ParsePendingInputState(reader.GetString(6)),
+                ParseRequiredTimestamp(reader.GetString(7)),
+                reader.GetString(5),
+                reader.IsDBNull(8) ? null : ParseRequiredTimestamp(reader.GetString(8)),
+                reader.IsDBNull(9) ? null : reader.GetString(9)));
+        }
+
+        return items;
+    }
+
+    private static WorkPendingUserInputState ParsePendingInputState(string value) =>
+        value.ToLowerInvariant() switch
+        {
+            "pending" => WorkPendingUserInputState.Pending,
+            "consumed" => WorkPendingUserInputState.Consumed,
+            _ => Enum.Parse<WorkPendingUserInputState>(value, ignoreCase: true)
+        };
 
     private static string ToDbStatus(WorkSessionStatus status) => status switch
     {

@@ -5,6 +5,7 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text;
 using Madorin.AI.Runtime.Contracts;
+using Madorin.AI.Runtime.Contracts.Serialization;
 using Madorin.AI.Runtime.Entities;
 using Madorin.AI.Runtime.Modes.Expert;
 using Madorin.AI.Runtime.Modes.Meeting;
@@ -20,7 +21,9 @@ using Madorin.AI.Runtime.Services.Skills;
 using Madorin.AI.Runtime.Services.Tools;
 using Madorin.AI.Runtime.Tools.Abstractions;
 using Madorin.AI.Runtime.Tools.Builtin;
+using Madorin.AI.Runtime.Tools.Builtin.ModeShared;
 using Madorin.AI.Runtime.Tools.Builtin.Work;
+using System.Security.Cryptography;
 using Madorin.AI.Runtime.Transport.Abstractions;
 using Microsoft.Data.Sqlite;
 
@@ -140,6 +143,11 @@ internal sealed class RuntimeExecutionCore(
         var meetingToolStore = new SqliteMeetingModeToolStore(
             new SqliteMeetingRepository(toolConnection),
             meetingConversationStore);
+        var workRepo = new SqliteWorkRepository(repositoryConnection);
+        var meetingRepo = new SqliteMeetingRepository(repositoryConnection);
+        var conversationStore = new ConversationStore(_dataDirectory);
+        var workDispatchBridge = new WorkStepDispatchBridge();
+        Func<ApprovalRequest, CancellationToken, Task<ApprovalResponse>>? askUserApproval = null;
         var executors = new List<IToolExecutor>
         {
             new BuiltinFsToolExecutor(_memoryFiles.WorkspaceMutationLock),
@@ -149,7 +157,145 @@ internal sealed class RuntimeExecutionCore(
             new BuiltinDelegateAgentToolExecutor(),
             new BuiltinWorkSetPlanToolExecutor(),
             new BuiltinAgentJobToolExecutor(agentJobCoordinator),
-            new BuiltinMeetingToolExecutor(meetingToolStore, _workspaceRoot)
+            new BuiltinMeetingToolExecutor(meetingToolStore, _workspaceRoot),
+            new BuiltinWorkTemplateToolExecutor(
+                planLookup: async (sessionId, token) =>
+                {
+                    var draft = await workRepo.GetCurrentPlanDraftAsync(sessionId, token)
+                        .ConfigureAwait(false);
+                    if (draft is null)
+                    {
+                        return null;
+                    }
+
+                    var resume = await workRepo.GetResumeStateAsync(sessionId, token)
+                        .ConfigureAwait(false);
+                    var planJson = JsonSerializer.Serialize(
+                        draft,
+                        RuntimeJsonContext.Default.WorkPlanDraft);
+                    return new WorkSessionPlanView(
+                        planJson,
+                        resume?.Status.ToString() ?? "Planning");
+                },
+                dispatchRunner: workDispatchBridge.RunAsync),
+            new BuiltinModeInteractionToolExecutor(
+                consumePending: async (sessionId, consumedByRunId, token) =>
+                {
+                    var snapshot = await repository.GetSessionSnapshotAsync(sessionId, token)
+                        .ConfigureAwait(false);
+                    if (snapshot?.Mode == RuntimeMode.Meeting)
+                    {
+                        var peeked = await meetingRepo
+                            .PeekPendingUserInputsAsync(sessionId, ct: token)
+                            .ConfigureAwait(false);
+                        return new WorkPendingInputsView(
+                            peeked.Select(static item => item.ContentText).ToArray(),
+                            Consumed: false,
+                            EmptyMessage: "没有未处理的用户插话",
+                            PendingMessage: "存在未处理的用户插话，请先处理插话后再继续或提问。");
+                    }
+
+                    var consumed = await workRepo
+                        .ConsumePendingUserInputsAsync(sessionId, consumedByRunId, ct: token)
+                        .ConfigureAwait(false);
+                    return new WorkPendingInputsView(
+                        consumed.Select(static item => item.ContentText).ToArray(),
+                        Consumed: true,
+                        EmptyMessage: "没有新的用户输入",
+                        PendingMessage: "已消费未读用户插话，请先处理这些输入再继续规划或提问。");
+                },
+                askUser: async (askRequest, token) =>
+                {
+                    if (askUserApproval is null)
+                    {
+                        return new AskUserToolResponse(
+                            false,
+                            ErrorCode: "ask_user_unavailable",
+                            ErrorMessage: "Host approval channel is unavailable for ask_user.");
+                    }
+
+                    var correlationId = Guid.NewGuid().ToString("N");
+                    var approvalRequestId = "ask-user:" + askRequest.CallId;
+                    var hash = Convert.ToHexString(
+                        SHA256.HashData(Encoding.UTF8.GetBytes(askRequest.Question)));
+                    var approvalRequest = new ApprovalRequest(
+                        correlationId,
+                        approvalRequestId,
+                        askRequest.CallId,
+                        askRequest.RunId,
+                        askRequest.AgentId,
+                        ParentAgentId: null,
+                        BuiltinToolRegistry.AskUserToolId,
+                        hash,
+                        ToolRiskLevel.Write,
+                        "ask_user",
+                        askRequest.Question,
+                        askRequest.SessionId,
+                        askRequest.InvocationId,
+                        ParentInvocationId: null,
+                        askRequest.WorkStepId,
+                        askRequest.PlanVersion);
+                    var approvalResponse = await askUserApproval(approvalRequest, token)
+                        .ConfigureAwait(false);
+                    if (approvalResponse.Decision is not ToolAuthorizationDecision.Granted)
+                    {
+                        return new AskUserToolResponse(
+                            false,
+                            ErrorCode: "ask_user_rejected",
+                            ErrorMessage: approvalResponse.Reason ?? "User rejected ask_user.");
+                    }
+
+                    if (string.IsNullOrWhiteSpace(approvalResponse.Reason))
+                    {
+                        return new AskUserToolResponse(
+                            false,
+                            ErrorCode: "ask_user_empty_answer",
+                            ErrorMessage: "Host granted ask_user without an answer text in Reason.");
+                    }
+
+                    return new AskUserToolResponse(true, approvalResponse.Reason.Trim());
+                }),
+            new BuiltinWorkHistoryToolExecutor(
+                recentPlanLookup: async (sessionId, token) =>
+                {
+                    var resume = await workRepo.GetResumeStateAsync(sessionId, token)
+                        .ConfigureAwait(false);
+                    if (resume is null
+                        || resume.Status is not WorkSessionStatus.Completed)
+                    {
+                        return null;
+                    }
+
+                    var draft = await workRepo.GetCurrentPlanDraftAsync(sessionId, token)
+                        .ConfigureAwait(false);
+                    if (draft is null)
+                    {
+                        return null;
+                    }
+
+                    return new WorkRecentPlanView(
+                        JsonSerializer.Serialize(draft, RuntimeJsonContext.Default.WorkPlanDraft),
+                        draft.PlanVersion,
+                        resume.Status.ToString());
+                },
+                transcriptLookup: async (query, token) =>
+                {
+                    if (string.Equals(query.Source, "groupchat", StringComparison.Ordinal))
+                    {
+                        var meeting = await meetingRepo.GetMeetingSnapshotAsync(query.SessionId, token)
+                            .ConfigureAwait(false);
+                        if (meeting is null)
+                        {
+                            throw new KeyNotFoundException(
+                                $"Meeting session '{query.SessionId}' was not found.");
+                        }
+                    }
+
+                    var records = await conversationStore.ReadAllAsync(query.SessionId, token)
+                        .ConfigureAwait(false);
+                    var messages = ProjectTranscriptMessages(records, query.Limit);
+                    return new WorkTranscriptView(query.SessionId, query.Source, messages);
+                })
         };
         if (skillCatalog is not null)
         {
@@ -181,7 +327,6 @@ internal sealed class RuntimeExecutionCore(
             outbox,
             resultBlobStore: _resultBlobStore,
             runtimeLimits: _runtimeLimits);
-        var workRepo = new SqliteWorkRepository(repositoryConnection);
         var recoveryService = new RecoveryService(
             repository,
             toolStateStore,
@@ -207,6 +352,9 @@ internal sealed class RuntimeExecutionCore(
             _workspaceRoot,
             toolStateStore,
             liveCatalogProvider);
+        askUserApproval = toolConsentCoordinator.CanRequestApproval
+            ? toolConsentCoordinator.RequestWorkflowApprovalAsync
+            : null;
 
         Func<RuntimeSkillScriptInvocation, CancellationToken, Task<RuntimeSkillScriptResult>>? scriptInvoker =
             skillCatalog is null
@@ -295,9 +443,9 @@ internal sealed class RuntimeExecutionCore(
                         $"Provider '{requestedProviderId}' is not available. "
                         + $"Only '{provider.ProviderId}' is configured in the current runtime session.");
                 },
-                new ConversationStore(_dataDirectory),
+                conversationStore,
                 repository,
-                new SqliteMeetingRepository(repositoryConnection),
+                meetingRepo,
                 outbox,
                 _agentContextComposer,
                 emitAccepted: false,
@@ -337,7 +485,7 @@ internal sealed class RuntimeExecutionCore(
                         $"Provider '{requestedProviderId}' is not available. "
                         + $"Only '{provider.ProviderId}' is configured in the current runtime session.");
                 },
-                new ConversationStore(_dataDirectory),
+                conversationStore,
                 repository,
                 outbox,
                 _agentContextComposer,
@@ -355,12 +503,16 @@ internal sealed class RuntimeExecutionCore(
                 scriptInvoker: scriptInvoker,
                 liveCatalogProvider: liveCatalogProvider,
                 isHostModeSkills: isHostModeSkills,
-                skillActivationStore: skillActivationStore,
-                workspaceRoot: _workspaceRoot),
+                skillActivationStore: skillActivationStore),
 
             _ => throw new NotSupportedException(
                 $"Runtime mode '{request.Mode}' is not supported.")
         };
+
+        if (orchestrator is WorkModeOrchestrator workOrchestrator)
+        {
+            workOrchestrator.AttachDispatchBridge(workDispatchBridge);
+        }
 
         await foreach (var envelope in orchestrator.RunAsync(
                 runId,
@@ -552,5 +704,70 @@ internal sealed class RuntimeExecutionCore(
         }
 
         return agents;
+    }
+
+    private static List<WorkTranscriptMessage> ProjectTranscriptMessages(
+        IReadOnlyList<ConversationRecordV1> records,
+        int limit)
+    {
+        if (records.Count == 0 || limit <= 0)
+        {
+            return [];
+        }
+
+        var start = Math.Max(0, records.Count - limit);
+        var messages = new List<WorkTranscriptMessage>(Math.Min(limit, records.Count - start));
+        for (var index = start; index < records.Count; index++)
+        {
+            var record = records[index];
+            var text = ExtractTranscriptText(record.Content);
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                continue;
+            }
+
+            messages.Add(
+                new WorkTranscriptMessage(
+                    record.Role,
+                    record.AgentId,
+                    text,
+                    record.Timestamp));
+        }
+
+        return messages;
+    }
+
+    private static string ExtractTranscriptText(JsonElement content)
+    {
+        try
+        {
+            var blocks = content.Deserialize(RuntimeJsonContext.Default.ContentBlockArray);
+            if (blocks is null || blocks.Length == 0)
+            {
+                return string.Empty;
+            }
+
+            var builder = new StringBuilder();
+            foreach (var block in blocks)
+            {
+                if (block is TextContentBlock text && !string.IsNullOrWhiteSpace(text.Text))
+                {
+                    if (builder.Length > 0)
+                    {
+                        builder.AppendLine();
+                    }
+
+                    builder.Append(text.Text.Trim());
+                }
+            }
+
+            return builder.ToString();
+        }
+        catch (JsonException)
+        {
+            return content.ValueKind == JsonValueKind.String
+                ? content.GetString()?.Trim() ?? string.Empty
+                : string.Empty;
+        }
     }
 }

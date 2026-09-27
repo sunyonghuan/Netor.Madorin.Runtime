@@ -287,6 +287,9 @@ internal sealed class MeetingInvocationExecutor(
             return previouslyExposed;
         }
 
+        // Meeting 不得暴露 Work 专用工具。
+        catalog = catalog.FilterByMode("meeting");
+
         if (previouslyExposed is null)
         {
             return [.. catalog.Tools];

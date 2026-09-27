@@ -155,6 +155,15 @@ public sealed class MeetingModeOrchestrator : IModeOrchestrator
     /// <inheritdoc />
     public RuntimeMode Mode => RuntimeMode.Meeting;
 
+    /// <summary>进程内入队会议插话；check_pending 默认 Peek，编排器处理后再 Consume。</summary>
+    public Task<MeetingPendingUserInput> EnqueueUserInputAsync(
+        string sessionId,
+        string contentText,
+        string source = "user",
+        string? inputId = null,
+        CancellationToken ct = default) =>
+        _meetingRepo.EnqueuePendingUserInputAsync(sessionId, contentText, source, inputId, ct);
+
     /// <summary>Runs one deterministic meeting round in participant join order.</summary>
     public async IAsyncEnumerable<RuntimeEventEnvelope> RunAsync(
         string runId,

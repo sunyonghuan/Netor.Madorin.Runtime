@@ -1,6 +1,6 @@
 # `state.db` 数据库参考
 
-> 适用版本：Madorin.AI.Runtime V1，协议 1.1，SQLite Schema 16
+> 适用版本：Madorin.AI.Runtime V1，协议 1.1，SQLite Schema 19
 >
 > 本文以 `Madorin.AI.Runtime.Persistence.Sqlite/SqliteSchema.cs` 的最终迁移结果为准，描述工作区状态库的全部表、字段、约束和索引。实现或后续迁移与本文冲突时，以代码中的 Schema 迁移为准。
 
@@ -36,21 +36,21 @@
 
 ## 2. 全库总览
 
-Schema 16 共包含 25 张业务表：
+Schema 19 共包含 27 张业务表：
 
 | 分类 | 表 |
 | --- | --- |
 | 版本与会话运行 | `schema_versions`、`sessions`、`runs`、`run_idempotency`、`session_idempotency`、`event_outbox`、`gsn_sequence` |
 | 消息与选择快照 | `message_index`、`session_selections`、`agent_snapshots`、`invocation_snapshots` |
 | 工具授权与审计 | `tool_intents`、`tool_grants`、`tool_approvals`、`tool_audit` |
-| Meeting 模式 | `meeting_sessions`、`meeting_rounds`、`meeting_participants`、`meeting_invocations` |
-| Work 模式 | `work_sessions`、`work_steps`、`work_step_dependencies`、`work_step_attempts`、`work_background_jobs`、`work_plan_revisions` |
+| Meeting 模式 | `meeting_sessions`、`meeting_rounds`、`meeting_participants`、`meeting_invocations`、`meeting_pending_inputs` |
+| Work 模式 | `work_sessions`、`work_steps`、`work_step_dependencies`、`work_step_attempts`、`work_background_jobs`、`work_plan_revisions`、`work_pending_inputs` |
 
 ## 3. 版本、会话与运行
 
 ### 3.1 `schema_versions`
 
-每成功完成一个迁移版本，记录一行。当前 Runtime 仅支持向前迁移到版本 `16`，不支持降级。
+每成功完成一个迁移版本，记录一行。当前 Runtime 仅支持向前迁移到版本 `19`，不支持降级。
 
 | 字段 | 类型 | 约束/默认值 | 说明 |
 | --- | --- | --- | --- |
@@ -660,6 +660,35 @@ Work 模式使用六张表保存总经理、计划版本、步骤 DAG、尝试�
 | --- | --- | --- |
 | `idx_work_plan_revisions_session` | `(session_id, created_at, plan_version)` | 按时间读取计划修订历史 |
 
+### 7.7 `work_pending_inputs`
+
+Work 模式用户插话 FIFO 账本（Schema 17）。这是 Work 可交付切片，不是完整 `run_control_inputs`。
+
+| 字段 | 类型 | 约束/默认值 | 说明 |
+| --- | --- | --- | --- |
+| `input_id` | `TEXT` | PK | 插话标识 |
+| `session_id` | `TEXT` | NN | 所属 Session |
+| `ordinal` | `INTEGER` | NN，与 `session_id` 唯一 | Session 内 FIFO 序号 |
+| `content_text` | `TEXT` | NN | 插话正文 |
+| `content_hash` | `TEXT` | NN | 正文 SHA-256 |
+| `source` | `TEXT` | NN，默认 `user` | 来源标记 |
+| `state` | `TEXT` | NN，默认 `pending` | `pending` / `consumed` |
+| `enqueued_at` | `TEXT` | NN | 入队时间 |
+| `consumed_at` | `TEXT` | NULL | 消费时间 |
+| `consumed_by_run_id` | `TEXT` | NULL | 消费该条的 Run |
+
+索引：
+
+| 索引 | 列 | 用途 |
+| --- | --- | --- |
+| `idx_work_pending_inputs_session_state` | `(session_id, state, ordinal)` | 按 Session 取未消费 FIFO |
+
+### 7.8 `meeting_pending_inputs`
+
+Meeting 模式用户插话 FIFO 账本（Schema 19）。`mcli_check_pending_user_input` 在 Meeting 侧默认 Peek；编排器处理后再 Consume。
+
+字段与索引语义同 `work_pending_inputs`（`input_id` / `session_id` / `ordinal` / `content_text` / `content_hash` / `source` / `state` / `enqueued_at` / `consumed_at` / `consumed_by_run_id`；索引 `idx_meeting_pending_inputs_session_state`）。
+
 ## 8. 外键与数据关系
 
 数据库定义的外键仅限下表。许多 `_id` 字段为跨子系统关联键，但没有声明 SQLite 外键，以保持恢复、归档和增量写入的兼容性。
@@ -679,7 +708,7 @@ Work 模式使用六张表保存总经理、计划版本、步骤 DAG、尝试�
 
 ## 9. Schema 迁移历史
 
-每个版本迁移在独立事务中完成后，向 `schema_versions` 写入对应版本。当前 Runtime 要求最终版本为 `16`。
+每个版本迁移在独立事务中完成后，向 `schema_versions` 写入对应版本。当前 Runtime 要求最终版本为 `19`。
 
 | 版本 | 变更 |
 | ---: | --- |
@@ -699,8 +728,11 @@ Work 模式使用六张表保存总经理、计划版本、步骤 DAG、尝试�
 | 14 | 为 `sessions` 增加 `title` |
 | 15 | 为 `tool_approvals` 增加 `request_kind` |
 | 16 | 为 `runs` 增加进度与结构化错误字段，并创建 `idx_runs_progress` |
+| 17 | 创建 `work_pending_inputs` 及 `idx_work_pending_inputs_session_state` |
+| 18 | `work_steps` / dependencies / attempts 主键纳入 `session_id` |
+| 19 | 创建 `meeting_pending_inputs` 及 `idx_meeting_pending_inputs_session_state` |
 
-启动时 Runtime 还会补齐 Schema 8、12 和 15 的兼容字段，随后验证全部必需表、索引和字段。发现版本高于 16、缺少必需对象或版本不匹配时，Runtime 会拒绝正常使用该数据库。
+启动时 Runtime 还会补齐 Schema 8、12 和 15 的兼容字段，随后验证全部必需表、索引和字段。发现版本高于 19、缺少必需对象或版本不匹配时，Runtime 会拒绝正常使用该数据库。
 
 ## 10. 运维与查询边界
 

@@ -724,7 +724,8 @@ public sealed class SqliteSessionRepository : ISessionRepository
                 checkpoint_json = $checkpointJson,
                 started_at = $createdAt,
                 attempt_count = COALESCE(attempt_count, 0) + 1
-            WHERE step_id = $stepId
+            WHERE session_id = $sessionId
+              AND step_id = $stepId
               AND plan_version = $planVersion
               AND status = $pending;
             """;
@@ -742,7 +743,14 @@ public sealed class SqliteSessionRepository : ISessionRepository
         if (await promoteCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false) == 1)
         {
             await InsertStepAttemptAsync(
-                stepId, planVersion, invocationId, RunningWorkStepStatus, createdAt, transaction, ct)
+                sessionId,
+                stepId,
+                planVersion,
+                invocationId,
+                RunningWorkStepStatus,
+                createdAt,
+                transaction,
+                ct)
                 .ConfigureAwait(false);
             await InsertInvocationSnapshotForStepAsync(
                 runId,
@@ -811,8 +819,14 @@ public sealed class SqliteSessionRepository : ISessionRepository
         }
 
         await InsertStepAttemptAsync(
-            stepId, planVersion, invocationId, RunningWorkStepStatus, createdAt, transaction, ct)
-            .ConfigureAwait(false);
+            sessionId,
+            stepId,
+            planVersion,
+            invocationId,
+            RunningWorkStepStatus,
+            createdAt,
+            transaction,
+            ct).ConfigureAwait(false);
         await InsertInvocationSnapshotForStepAsync(
             runId,
             sessionId,
@@ -856,6 +870,7 @@ public sealed class SqliteSessionRepository : ISessionRepository
     }
 
     private async Task InsertStepAttemptAsync(
+        string sessionId,
         string stepId,
         string planVersion,
         string invocationId,
@@ -868,12 +883,15 @@ public sealed class SqliteSessionRepository : ISessionRepository
         attemptCommand.Transaction = transaction;
         attemptCommand.CommandText = """
             INSERT INTO work_step_attempts(
-                step_id, plan_version, attempt_number, invocation_id, status, started_at)
-            SELECT $stepId, $planVersion,
+                session_id, step_id, plan_version, attempt_number, invocation_id, status, started_at)
+            SELECT $sessionId, $stepId, $planVersion,
                    COALESCE((SELECT MAX(attempt_number) FROM work_step_attempts
-                             WHERE step_id = $stepId AND plan_version = $planVersion), 0) + 1,
+                             WHERE session_id = $sessionId
+                               AND step_id = $stepId
+                               AND plan_version = $planVersion), 0) + 1,
                    $invocationId, $status, $startedAt;
             """;
+        attemptCommand.Parameters.AddWithValue("$sessionId", sessionId);
         attemptCommand.Parameters.AddWithValue("$stepId", stepId);
         attemptCommand.Parameters.AddWithValue("$planVersion", planVersion);
         attemptCommand.Parameters.AddWithValue("$invocationId", invocationId);
