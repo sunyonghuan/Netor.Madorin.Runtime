@@ -7,6 +7,8 @@
     <AnalysisLevel>latest-recommended</AnalysisLevel>
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- 网络环境会将 api.nuget.org 重定向到 nuget.azure.cn，NuGet 漏洞审计在该链路上失败并因 TreatWarningsAsErrors 阻断构建；审计与编译无关，统一关闭。 -->
+    <NuGetAudit>false</NuGetAudit>
     <Deterministic>true</Deterministic>
     <IsAotCompatible>true</IsAotCompatible>
     <AgentFrameworkRootProfile Condition="'$(AgentFrameworkRootProfile)' == ''">Full</AgentFrameworkRootProfile>
