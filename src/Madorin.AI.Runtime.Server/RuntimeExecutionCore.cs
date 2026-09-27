@@ -20,6 +20,7 @@ using Madorin.AI.Runtime.Services.Skills;
 using Madorin.AI.Runtime.Services.Tools;
 using Madorin.AI.Runtime.Tools.Abstractions;
 using Madorin.AI.Runtime.Tools.Builtin;
+using Madorin.AI.Runtime.Tools.Builtin.Work;
 using Madorin.AI.Runtime.Transport.Abstractions;
 using Microsoft.Data.Sqlite;
 
@@ -146,6 +147,7 @@ internal sealed class RuntimeExecutionCore(
             new BuiltinHttpToolExecutor(),
             new BuiltinMemoryToolExecutor(_memoryFiles),
             new BuiltinDelegateAgentToolExecutor(),
+            new BuiltinWorkSetPlanToolExecutor(),
             new BuiltinAgentJobToolExecutor(agentJobCoordinator),
             new BuiltinMeetingToolExecutor(meetingToolStore, _workspaceRoot)
         };

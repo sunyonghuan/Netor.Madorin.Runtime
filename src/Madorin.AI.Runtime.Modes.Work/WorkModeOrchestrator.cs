@@ -27,8 +27,10 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
 {
     private const string PlanProjectionVersion = "work-plan-v1";
     private const string StepProjectionVersion = "work-step-v2";
+    private const string WorkSetPlanToolId = "mcli_work_set_plan";
 
     private readonly Func<string, IRuntimeProviderAdapter> _providerFactory;
+    private WorkPlanDraft? _capturedSetPlanDraft;
     private readonly ConversationStore _store;
     private readonly SqliteSessionRepository _sessionRepo;
     private readonly SqliteWorkRepository _workRepo;
@@ -273,6 +275,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 runId, sessionId, runtimeInstanceId, runSequence++, ct).ConfigureAwait(false);
         }
 
+        _capturedSetPlanDraft = null;
         var managerInvocation = await CreateInvocationRequestAsync(
             runId, sessionId, request, options.GeneralManager, PlanProjectionVersion, ct)
             .ConfigureAwait(false);
@@ -328,9 +331,12 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             runId, runtimeInstanceId, managerInvocation.InvocationId, runSequence++, ct)
             .ConfigureAwait(false);
 
-        plan = TryParsePlan(managerText.ToString())
+        // 工具里的计划优先，正文 JSON 其次，都没有才用一步兜底。
+        plan = _capturedSetPlanDraft
+            ?? TryParsePlan(managerText.ToString())
             ?? WorkPlanValidator.CreateFallbackPlan(
                 goal, options, planVersion: "1", stepId: fallbackStepId);
+        _capturedSetPlanDraft = null;
         try
         {
             plan = WorkPlanValidator.ValidateOrThrow(plan, options);
@@ -878,6 +884,35 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 .Select(static intent => $"{intent.CallId}:{intent.Status}"));
         throw new InvalidOperationException(
             $"Work step '{workStepId}' cannot be completed because {recoverable.Count} tool intent(s) are not terminal: {sample}.");
+    }
+
+    private void TryCaptureSetPlanFromToolOutput(string outputJson)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(outputJson);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("ok", out var ok)
+                || ok.ValueKind != JsonValueKind.True
+                || !root.TryGetProperty("plan", out var planElement)
+                || planElement.ValueKind != JsonValueKind.Object)
+            {
+                return;
+            }
+
+            var plan = JsonSerializer.Deserialize(
+                planElement.GetRawText(),
+                RuntimeJsonContext.Default.WorkPlanDraft);
+            if (plan is not null)
+            {
+                _capturedSetPlanDraft = plan;
+            }
+        }
+        catch (JsonException)
+        {
+            // 工具输出坏了就继续走正文 JSON 或一步兜底。
+        }
     }
 
     private static WorkPlanDraft? TryParsePlan(string text)
@@ -1749,6 +1784,13 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 }
 
                 var toolResult = CreateToolResultContent(toolCall, gatewayResult);
+                if (gatewayResult.Kind is ToolGatewayResultKind.Success
+                    && gatewayResult.Result is { Success: true, OutputJson: { } setPlanOutput }
+                    && string.Equals(toolCall.ToolId, WorkSetPlanToolId, StringComparison.Ordinal))
+                {
+                    TryCaptureSetPlanFromToolOutput(setPlanOutput);
+                }
+
                 if (_isHostModeSkills
                     && gatewayResult.Kind is ToolGatewayResultKind.Success
                     && gatewayResult.Result is { Success: true, OutputJson: { } outputJson })
@@ -1976,7 +2018,10 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         var context = _agentContextComposer is null
             ? AgentContextComposer.WithoutMemory(agent.SystemPrompt)
             : await _agentContextComposer.ComposeAsync(agent.SystemPrompt, ct).ConfigureAwait(false);
-        var availableTools = ResolveAvailableTools(agent, providerId);
+        var availableTools = ResolveAvailableTools(
+            agent,
+            providerId,
+            request.Selection.ModeOptions as WorkModeOptions);
 
         // Append available agents list for GM if in Work mode with delegatable agents
         var systemInstructions = context.Instructions;
@@ -2189,18 +2234,32 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             JsonSerializer.Serialize(
                 options.EffectiveWorkflowPolicy,
                 RuntimeJsonContext.Default.WorkflowPolicy));
+        if (tools is { Length: > 0 }
+            && tools.Any(static tool => string.Equals(tool.ToolId, WorkSetPlanToolId, StringComparison.Ordinal)))
+        {
+            builder.AppendLine(
+                "Preferred path: call mcli_work_set_plan with a WorkPlanDraft (planVersion/goal/steps) or main_steps/sub_steps when proposing an executable plan.");
+            builder.AppendLine("Do not expand {{placeholders}}.");
+        }
+
         builder.AppendLine(
-            "Return only a WorkPlanDraft JSON object. The first planVersion is '1'.");
+            "Alternatively return only a WorkPlanDraft JSON object. The first planVersion is '1'.");
         return builder.ToString();
     }
 
-    private ToolDescriptor[]? ResolveAvailableTools(AgentRef agent, string providerId)
+    private ToolDescriptor[]? ResolveAvailableTools(
+        AgentRef agent,
+        string providerId,
+        WorkModeOptions? workOptions = null)
     {
         var catalog = CaptureCatalogSnapshot();
         if (_toolGateway is null || catalog is null)
         {
             return null;
         }
+
+        // 总经理看全部 Work 工具；项目组长沿用目录里的排除（不含 set_plan）。
+        catalog = catalog.FilterByMode("work", ResolveWorkToolRole(agent, workOptions));
 
         if (agent.AllowedToolIds is { Length: > 0 } allowedToolIds)
         {
@@ -2240,6 +2299,17 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         return [.. catalog.Tools];
     }
 
+    private static string ResolveWorkToolRole(AgentRef agent, WorkModeOptions? workOptions)
+    {
+        if (workOptions is not null
+            && string.Equals(agent.AgentId, workOptions.GeneralManager.AgentId, StringComparison.Ordinal))
+        {
+            return "general-manager";
+        }
+
+        return agent.AgentId;
+    }
+
     private ToolCatalogSnapshot? CaptureCatalogSnapshot()
     {
         if (_liveCatalogProvider is not null)
@@ -2263,6 +2333,8 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             return previouslyExposed;
         }
 
+        catalog = catalog.FilterByMode("work");
+
         if (previouslyExposed is null)
         {
             return [.. catalog.Tools];
@@ -2276,7 +2348,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         // (search/browse 注入后下一轮必须带上新短名)。
         // Allowlist: initial snapshot had tools not in previousIds -> do not expand.
         // initial 缺失时不推断为全量，避免把 allowlist 放大成 live 全目录。
-        var initial = _toolCatalogSnapshot;
+        var initial = _toolCatalogSnapshot?.FilterByMode("work");
         var wasFullCatalog = initial is not null
             && initial.Tools.Count > 0
             && initial.Tools.All(tool => previousIds.Contains(tool.ToolId))

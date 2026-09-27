@@ -130,6 +130,10 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
             SkillRuntimeTools.ReadToolId => SkillReadScope(arguments, workspaceRoot),
             SkillRuntimeTools.ReadResourceToolId => FileReadScope(workspaceRoot, ".", "read skill resource"),
             SkillRuntimeTools.RunToolId => SkillRuntimeRunScope(arguments),
+            BuiltinToolRegistry.WorkSetPlanToolId => Create(
+                "work:set-plan",
+                "set work plan",
+                canGrantForRun: false),
             _ => throw new NotSupportedException("The built-in tool scope is unknown.")
         };
 

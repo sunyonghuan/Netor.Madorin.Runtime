@@ -555,6 +555,7 @@ public sealed class ToolAuthorizationService(
         || string.Equals(toolId, "mcli_meeting_output_summary", StringComparison.Ordinal)
         || string.Equals(toolId, "mcli_meeting_confirm_end", StringComparison.Ordinal)
         || string.Equals(toolId, "mcli_meeting_list_attachments", StringComparison.Ordinal)
+        || string.Equals(toolId, "mcli_work_set_plan", StringComparison.Ordinal)
         || toolId.StartsWith("host.host..", StringComparison.Ordinal);
 
     private static string[] NormalizeValues(string[]? values) =>

@@ -36,6 +36,7 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
     public const string MeetingListAttachmentsToolId = "mcli_meeting_list_attachments";
     public const string AskUserToolId = "mcli_ask_user";
     public const string CheckPendingUserInputToolId = "mcli_check_pending_user_input";
+    public const string WorkSetPlanToolId = "mcli_work_set_plan";
     public const string ExpertCreatePlanToolId = "mcli_expert_create_plan";
     public const string ExpertExecuteStepToolId = "mcli_expert_execute_step";
     public const string ExpertGetPlanToolId = "mcli_expert_get_plan";
@@ -305,6 +306,19 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
             Risk: ToolRiskLevel.Low,
             SupportedModes: ["meeting", "work"]),
         new(
+            WorkSetPlanToolId,
+            "mcli",
+            "Set work plan",
+            "Validates and returns an executable WorkPlanDraft (native planVersion/goal/steps or main_steps/sub_steps). Runtime persists it and waits for user confirmation before dispatch.",
+            """{"type":"object","properties":{"planVersion":{"type":"string"},"goal":{"type":"string"},"steps":{"type":"array"},"main_steps":{"type":"array"},"previousPlanVersion":{"type":"string"},"summary":{"type":"string"},"plan":{"type":"object"}},"additionalProperties":true}""",
+            """{"type":"object","properties":{"ok":{"type":"boolean"},"error":{"type":"string"},"message":{"type":"string"},"planVersion":{"type":"string"},"goal":{"type":"string"},"stepCount":{"type":"integer"},"plan":{"type":"object"},"requiresConfirmation":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}""",
+            RiskLevel: "medium",
+            RequiresApproval: false,
+            Capabilities: ["work.plan"],
+            Risk: ToolRiskLevel.Write,
+            IsIdempotent: false,
+            SupportedModes: ["work"]),
+        new(
             ExpertCreatePlanToolId,
             "mcli",
             "Create execution plan",
@@ -369,7 +383,7 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
     private static readonly IReadOnlyList<ToolDescriptor> Tools = Array.AsReadOnly(
         [.. AdvertisedTools, .. BuiltinToolAliasCatalog.Tools]);
 
-    public string CatalogVersion => "3.3.0";
+    public string CatalogVersion => "3.4.0";
 
     public IReadOnlyList<ToolDescriptor> GetTools() => Tools;
 
