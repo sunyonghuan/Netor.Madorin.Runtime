@@ -16,7 +16,11 @@ public sealed record WorkflowPolicy(
     int MaxRetriesPerStep = 2,
     int RetryBackoffMilliseconds = 1000,
     WorkLoopDetection LoopDetection = WorkLoopDetection.Lenient,
-    bool RequireHumanConfirmationOnLoop = false)
+    bool RequireHumanConfirmationOnLoop = false,
+    /// <summary>
+    /// 为 true 时，计划发布后会话停在等待确认，下一轮明确批准才执行。
+    /// </summary>
+    bool RequirePlanConfirmation = false)
 {
     public static WorkflowPolicy Default { get; } = new();
 

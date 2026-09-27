@@ -189,6 +189,72 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             yield break;
         }
 
+        var priorResume = await _workRepo.GetResumeStateAsync(sessionId, ct).ConfigureAwait(false);
+        var executeSavedPlan = policy.RequirePlanConfirmation
+            && priorResume is { Status: WorkSessionStatus.WaitingForPlanConfirmation, Steps.Length: > 0 }
+            && IsExplicitPlanConfirmation(goal);
+        WorkPlanDraft plan;
+        string? planningInvocationId = null;
+        long runSequence = _startRunSequence;
+
+        if (policy.RequirePlanConfirmation
+            && priorResume?.Status == WorkSessionStatus.WaitingForPlanConfirmation
+            && !executeSavedPlan)
+        {
+            if (_emitAccepted)
+            {
+                yield return await CreateAcceptedEnvelopeAsync(
+                    runId, sessionId, runtimeInstanceId, runSequence++, ct).ConfigureAwait(false);
+            }
+
+            yield return await CreateStatusEnvelopeAsync(
+                runtimeInstanceId,
+                runId,
+                runSequence++,
+                RunStatus.Running,
+                ct,
+                workPhase: "waiting-for-plan-confirmation").ConfigureAwait(false);
+            await CompleteRunAsync(runId, ct).ConfigureAwait(false);
+            var stillWaiting = await CreateCompletedEnvelopeAsync(
+                runId, sessionId, runtimeInstanceId, runSequence, ct).ConfigureAwait(false);
+            if (stillWaiting is not null)
+            {
+                yield return stillWaiting;
+            }
+
+            yield break;
+        }
+
+        if (executeSavedPlan)
+        {
+            if (_emitAccepted)
+            {
+                yield return await CreateAcceptedEnvelopeAsync(
+                    runId, sessionId, runtimeInstanceId, runSequence++, ct).ConfigureAwait(false);
+            }
+
+            await _workRepo.UpdateSessionStatusAsync(
+                sessionId, WorkSessionStatus.Executing, ct).ConfigureAwait(false);
+            yield return await CreateStatusEnvelopeAsync(
+                runtimeInstanceId,
+                runId,
+                runSequence++,
+                RunStatus.Running,
+                ct,
+                workPhase: "executing").ConfigureAwait(false);
+            plan = new WorkPlanDraft(
+                priorResume!.PlanVersion,
+                goal,
+                priorResume.Steps.Select(step => new WorkPlanStepDraft(
+                    step.StepId,
+                    step.Goal,
+                    step.TargetAgentId,
+                    step.DependsOn,
+                    step.ParentStepId,
+                    step.Depth)).ToArray());
+        }
+        else
+        {
         await _workRepo.UpsertSessionAsync(
             sessionId,
             runId,
@@ -201,7 +267,6 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             plan: null,
             ct).ConfigureAwait(false);
 
-        long runSequence = _startRunSequence;
         if (_emitAccepted)
         {
             yield return await CreateAcceptedEnvelopeAsync(
@@ -263,7 +328,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             runId, runtimeInstanceId, managerInvocation.InvocationId, runSequence++, ct)
             .ConfigureAwait(false);
 
-        var plan = TryParsePlan(managerText.ToString())
+        plan = TryParsePlan(managerText.ToString())
             ?? WorkPlanValidator.CreateFallbackPlan(
                 goal, options, planVersion: "1", stepId: fallbackStepId);
         try
@@ -312,6 +377,32 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             runId,
             runSequence++,
             workPlanEvent);
+
+        planningInvocationId = managerInvocation.InvocationId;
+        if (policy.RequirePlanConfirmation)
+        {
+            await _workRepo.UpdateSessionStatusAsync(
+                sessionId,
+                WorkSessionStatus.WaitingForPlanConfirmation,
+                ct).ConfigureAwait(false);
+            yield return await CreateStatusEnvelopeAsync(
+                runtimeInstanceId,
+                runId,
+                runSequence++,
+                RunStatus.Running,
+                ct,
+                workPhase: "waiting-for-plan-confirmation").ConfigureAwait(false);
+            await CompleteRunAsync(runId, ct).ConfigureAwait(false);
+            var waitingCompleted = await CreateCompletedEnvelopeAsync(
+                runId, sessionId, runtimeInstanceId, runSequence, ct).ConfigureAwait(false);
+            if (waitingCompleted is not null)
+            {
+                yield return waitingCompleted;
+            }
+
+            yield break;
+        }
+        }
 
         var agentById = options.AvailableAgents.ToDictionary(
             static a => a.AgentId, StringComparer.Ordinal);
@@ -419,7 +510,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                     runId, sessionId, request, agent, StepProjectionVersion, ct,
                     stepGoal: readyStep.Goal ?? goal,
                     parentAgentId: options.GeneralManager.AgentId,
-                    parentInvocationId: managerInvocation.InvocationId,
+                    parentInvocationId: planningInvocationId,
                     workStepId: readyStep.StepId,
                     workPlanVersion: readyStep.PlanVersion,
                     workPlan: plan,
@@ -813,6 +904,36 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// 整段输入去掉空白后必须等于批准句。包含匹配会把「请确认执行报告」或「不要确认执行」误判成批准。
+    /// </summary>
+    private static bool IsExplicitPlanConfirmation(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var trimmed = text.Trim();
+        return string.Equals(trimmed, "确认执行", StringComparison.Ordinal)
+            || string.Equals(trimmed, "批准执行", StringComparison.Ordinal)
+            || string.Equals(trimmed, "同意执行", StringComparison.Ordinal)
+            || string.Equals(trimmed, "开始执行", StringComparison.Ordinal)
+            || string.Equals(trimmed, "可以执行", StringComparison.Ordinal)
+            || string.Equals(trimmed, "确认计划", StringComparison.Ordinal)
+            || string.Equals(trimmed, "批准计划", StringComparison.Ordinal)
+            || string.Equals(trimmed, "确认并执行", StringComparison.Ordinal)
+            || string.Equals(trimmed, "按计划执行", StringComparison.Ordinal)
+            || string.Equals(trimmed, "开始按计划执行", StringComparison.Ordinal)
+            || string.Equals(trimmed, "confirm and execute", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(trimmed, "approve and execute", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(trimmed, "execute the plan", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(trimmed, "confirm the plan", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(trimmed, "approve the plan", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(trimmed, "lgtm", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(trimmed, "ship it", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string ExtractGoalText(ContentBlock[] input)

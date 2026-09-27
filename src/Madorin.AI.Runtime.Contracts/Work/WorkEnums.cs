@@ -25,6 +25,7 @@ public enum WorkSessionStatus
     Paused,
     WaitingForApproval,
     WaitingForCredentials,
+    WaitingForPlanConfirmation,
     Completed,
     Failed,
     Cancelled,
