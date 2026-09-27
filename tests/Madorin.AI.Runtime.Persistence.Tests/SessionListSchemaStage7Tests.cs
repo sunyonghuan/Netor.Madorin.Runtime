@@ -138,4 +138,35 @@ public sealed class SessionListSchemaStage7Tests
             Assert.AreEqual(1, reader.GetInt32(3));
         }
     }
+
+    [TestMethod]
+    public async Task EnsureCreatedAsync_RepairsWorkPendingInputsMissingAfterVersion19()
+    {
+        var ct = _testContext.CancellationToken;
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync(ct);
+        await SqliteSchema.EnsureCreatedAsync(connection, ct);
+
+        await using (var drop = connection.CreateCommand())
+        {
+            drop.CommandText = "DROP TABLE work_pending_inputs;";
+            await drop.ExecuteNonQueryAsync(ct);
+        }
+
+        await SqliteSchema.EnsureCreatedAsync(connection, ct);
+
+        await using var table = connection.CreateCommand();
+        table.CommandText = """
+            SELECT 1 FROM sqlite_master
+            WHERE type = 'table' AND name = 'work_pending_inputs';
+            """;
+        Assert.IsNotNull(await table.ExecuteScalarAsync(ct));
+
+        await using var index = connection.CreateCommand();
+        index.CommandText = """
+            SELECT 1 FROM sqlite_master
+            WHERE type = 'index' AND name = 'idx_work_pending_inputs_session_state';
+            """;
+        Assert.IsNotNull(await index.ExecuteScalarAsync(ct));
+    }
 }

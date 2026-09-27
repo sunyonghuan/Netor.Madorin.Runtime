@@ -218,6 +218,9 @@ public static class SqliteSchema
                 $"The database schema version {version} is newer than supported version {CurrentVersion}.");
         }
 
+        // v17 后来才加入 Work 插话表。已越过 v17 的库不会重跑该版本，须在迁移校验前补齐。
+        await EnsureWorkPendingInputsAsync(conn, ct).ConfigureAwait(false);
+
         if (version < CurrentVersion)
         {
             await MigrateAsync(conn, version, ct).ConfigureAwait(false);
@@ -294,6 +297,7 @@ public static class SqliteSchema
 
         await ConfigureConnectionAsync(conn, ct).ConfigureAwait(false);
         await EnsureVersionTableAsync(conn, ct).ConfigureAwait(false);
+        await EnsureWorkPendingInputsAsync(conn, ct).ConfigureAwait(false);
         var actualVersion = await ReadCurrentVersionAsync(conn, ct).ConfigureAwait(false);
         if (actualVersion != fromVersion)
         {
@@ -1182,6 +1186,42 @@ public static class SqliteSchema
             ON work_pending_inputs(session_id, state, ordinal);
             """;
         await workPending.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        transaction.Commit();
+    }
+
+    /// <summary>
+    /// 补齐 v17 后加入的 Work 插话表。已记录 v17 及更高版本的库不会重跑 <see cref="ApplyVersionSeventeenAsync"/>。
+    /// </summary>
+    private static async Task EnsureWorkPendingInputsAsync(SqliteConnection conn, CancellationToken ct)
+    {
+        if (await SchemaObjectExistsAsync(conn, "table", "work_pending_inputs", ct).ConfigureAwait(false)
+            && await SchemaObjectExistsAsync(conn, "index", "idx_work_pending_inputs_session_state", ct)
+                .ConfigureAwait(false))
+        {
+            return;
+        }
+
+        using var transaction = conn.BeginTransaction(deferred: false);
+        await using var command = conn.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            CREATE TABLE IF NOT EXISTS work_pending_inputs (
+                input_id TEXT NOT NULL PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                content_text TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'user',
+                state TEXT NOT NULL DEFAULT 'pending',
+                enqueued_at TEXT NOT NULL,
+                consumed_at TEXT,
+                consumed_by_run_id TEXT,
+                UNIQUE(session_id, ordinal)
+            );
+            CREATE INDEX IF NOT EXISTS idx_work_pending_inputs_session_state
+            ON work_pending_inputs(session_id, state, ordinal);
+            """;
+        await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         transaction.Commit();
     }
 
