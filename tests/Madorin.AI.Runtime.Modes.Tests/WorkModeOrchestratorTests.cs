@@ -99,15 +99,19 @@ public sealed class WorkModeOrchestratorTests
             }
         }
 
-        Assert.HasCount(2, result.CanonicalHistory);
+        Assert.HasCount(3, result.CanonicalHistory);
+        Assert.AreEqual("user", result.CanonicalHistory[0].Role);
+        var canonical = result.CanonicalHistory
+            .Where(static message => message.SummaryMetadata is not null)
+            .ToArray();
         CollectionAssert.AreEqual(
             ExpectedCanonicalKinds,
-            result.CanonicalHistory
+            canonical
                 .Select(static message => message.SummaryMetadata?.GetProperty("kind").GetString())
                 .ToArray());
         var step = Assert.ContainsSingle(result.WorkSteps);
-        Assert.AreEqual(result.CanonicalHistory[0].MessageId, result.PlanRevisions[0].PlanMessageId);
-        Assert.AreEqual(result.CanonicalHistory[1].MessageId, step.StepMessageId);
+        Assert.AreEqual(canonical[0].MessageId, result.PlanRevisions[0].PlanMessageId);
+        Assert.AreEqual(canonical[1].MessageId, step.StepMessageId);
         Assert.IsNotNull(step.CheckpointJson);
         StringAssert.Contains(step.CheckpointJson, startedAgentIds[1].InvocationId);
     }
@@ -650,6 +654,86 @@ public sealed class WorkModeOrchestratorTests
         Assert.AreEqual("thinking...", delta.GetString());
         Assert.IsTrue(firstReasoning.Payload.TryGetProperty("invocationId", out var invocationId));
         Assert.IsFalse(string.IsNullOrEmpty(invocationId.GetString()));
+        Assert.IsTrue(
+            events.Any(static item => item.MessageType == MessageTypes.ReasoningCompleted),
+            "思考增量之后必须发出 reasoning.completed。");
+    }
+
+    [TestMethod]
+    public async Task InvalidPlan_KeepsPlanningAndHidesValidatorTextFromAssistant()
+    {
+        const string planJson =
+            "{\"planVersion\":\"1\",\"goal\":\"Ship\",\"steps\":["
+            + "{\"goal\":\"Do the work\",\"targetAgentId\":\"worker\"}]}";
+        var result = await RunMultiTurnAsync(
+            [new WorkTurnScript("run-1", planJson, "请先制定计划，先不要执行。")]);
+
+        Assert.AreEqual(RunStatus.Completed, result.RunStatus);
+        Assert.AreEqual(WorkSessionStatus.Planning, result.WorkSessionStatus);
+        Assert.IsEmpty(result.PlanRevisions);
+        Assert.IsFalse(result.InvokedAgentIds.Contains("worker"));
+        Assert.IsTrue(result.CanonicalHistory.Any(static record =>
+            record.Role == "user" && record.Content.GetRawText().Contains("请先制定计划", StringComparison.Ordinal)));
+        Assert.IsFalse(result.CanonicalHistory.Any(static record =>
+            record.Role == "assistant"
+            && record.Content.GetRawText().Contains("Plan was not published", StringComparison.Ordinal)));
+    }
+
+    [TestMethod]
+    public async Task RequirePlanConfirmation_PublishTurn_WaitsEvenWhenInputLooksLikeConfirm()
+    {
+        const string planJson =
+            "{\"planVersion\":\"1\",\"goal\":\"Ship\",\"steps\":["
+            + "{\"stepId\":\"step-a\",\"goal\":\"Prepare notes\",\"targetAgentId\":\"worker\"}]}";
+        var result = await RunMultiTurnAsync(
+            [new WorkTurnScript("run-1", planJson, "确认执行")],
+            requirePlanConfirmation: true);
+
+        Assert.AreEqual(RunStatus.Completed, result.RunStatus);
+        Assert.AreEqual(WorkSessionStatus.WaitingForPlanConfirmation, result.WorkSessionStatus);
+        Assert.HasCount(1, result.PlanRevisions);
+        Assert.IsFalse(result.InvokedAgentIds.Contains("worker"));
+        Assert.AreEqual(WorkStepLifecycleStatus.Pending, result.WorkSteps[0].Status);
+    }
+
+    [TestMethod]
+    public async Task WaitingPlan_DiscussionTurn_DoesNotRepublish()
+    {
+        const string planJson =
+            "{\"planVersion\":\"1\",\"goal\":\"Ship\",\"steps\":["
+            + "{\"stepId\":\"step-a\",\"goal\":\"Prepare notes\",\"targetAgentId\":\"worker\"}]}";
+        const string revisedJson =
+            "{\"planVersion\":\"2\",\"previousPlanVersion\":\"1\",\"goal\":\"Ship v2\",\"steps\":["
+            + "{\"stepId\":\"step-a\",\"goal\":\"Prepare notes again\",\"targetAgentId\":\"worker\"}]}";
+        var result = await RunMultiTurnAsync(
+            [
+                new WorkTurnScript("run-1", planJson, "请先制定计划，先不要执行。"),
+                new WorkTurnScript("run-2", revisedJson, "再看一下范围")
+            ],
+            requirePlanConfirmation: true);
+
+        Assert.AreEqual(WorkSessionStatus.WaitingForPlanConfirmation, result.WorkSessionStatus);
+        Assert.HasCount(1, result.PlanRevisions);
+        Assert.AreEqual("1", result.PlanRevisions[0].PlanVersion);
+        Assert.IsFalse(result.InvokedAgentIds.Contains("worker"));
+    }
+
+    [TestMethod]
+    public async Task Plan_StepThatCitesPriorStepWithoutDependsOn_IsRejected()
+    {
+        const string planJson =
+            "{\"planVersion\":\"1\",\"goal\":\"Ship\",\"steps\":["
+            + "{\"stepId\":\"step-1\",\"goal\":\"Write the file\",\"targetAgentId\":\"worker\"},"
+            + "{\"stepId\":\"step-2\",\"goal\":\"验收步骤 1 的结果\",\"targetAgentId\":\"worker\"}]}";
+        var result = await RunMultiTurnAsync(
+            [new WorkTurnScript("run-1", planJson, "请先制定计划，先不要执行。")]);
+
+        Assert.AreEqual(RunStatus.Completed, result.RunStatus);
+        Assert.IsEmpty(result.PlanRevisions);
+        Assert.IsFalse(result.InvokedAgentIds.Contains("worker"));
+        Assert.IsTrue(result.CanonicalHistory.Any(static record =>
+            record.Role == "tool"
+            && record.Content.GetRawText().Contains("does not depend on it", StringComparison.Ordinal)));
     }
 
     [TestMethod]

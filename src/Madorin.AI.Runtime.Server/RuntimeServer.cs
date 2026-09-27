@@ -4206,7 +4206,9 @@ public sealed class RuntimeServer : IAsyncDisposable
         var error = new RuntimeError(
             errorCode,
             "runtime",
-            "Run execution failed.",
+            string.IsNullOrWhiteSpace(exception.Message)
+                ? "Run execution failed."
+                : exception.Message,
             IsRetryable: false,
             ProviderDetails: null,
             Guid.NewGuid().ToString("N"));

@@ -6,6 +6,7 @@ namespace Madorin.AI.Runtime.Providers.Abstractions;
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "type")]
 [JsonDerivedType(typeof(TextDeltaProviderEvent), "text_delta")]
 [JsonDerivedType(typeof(ReasoningDeltaProviderEvent), "reasoning_delta")]
+[JsonDerivedType(typeof(ReasoningCompletedProviderEvent), "reasoning_completed")]
 [JsonDerivedType(typeof(ToolCallDeltaProviderEvent), "tool_call_delta")]
 [JsonDerivedType(typeof(ToolCallCompleteProviderEvent), "tool_call_complete")]
 [JsonDerivedType(typeof(UsageUpdatedProviderEvent), "usage_updated")]
@@ -22,6 +23,9 @@ public sealed record ReasoningDeltaProviderEvent(
     string InvocationId,
     string Delta,
     ProviderExtensionData[]? ProviderExtensions = null) : RuntimeProviderEvent(InvocationId);
+
+/// <summary>当前调用的思考段已结束。</summary>
+public sealed record ReasoningCompletedProviderEvent(string InvocationId) : RuntimeProviderEvent(InvocationId);
 
 public sealed record ToolCallDeltaProviderEvent(
     string InvocationId,

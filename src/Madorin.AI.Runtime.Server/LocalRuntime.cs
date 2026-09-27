@@ -1425,13 +1425,14 @@ public sealed class LocalRuntime : IAsyncDisposable
         Exception? exception,
         bool isCancelled)
     {
-        _ = exception;
         var error = isCancelled
             ? null
             : new RuntimeError(
                 "RunExecutionFailed",
                 "runtime",
-                "Run execution failed.",
+                string.IsNullOrWhiteSpace(exception?.Message)
+                    ? "Run execution failed."
+                    : exception.Message,
                 IsRetryable: false,
                 ProviderDetails: null,
                 Guid.NewGuid().ToString("N"));

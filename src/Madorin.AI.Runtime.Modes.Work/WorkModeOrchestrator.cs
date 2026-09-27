@@ -320,6 +320,17 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 pendingUserInputs: pendingTexts)
                 .ConfigureAwait(false);
             parentInvocationId = managerInvocation.InvocationId;
+            if (!string.IsNullOrWhiteSpace(planningGoal))
+            {
+                await AppendPlainDialogueAsync(
+                    sessionId,
+                    managerInvocation.InvocationId,
+                    "user",
+                    "user",
+                    planningGoal,
+                    ct).ConfigureAwait(false);
+            }
+
             yield return await CreateInvocationStartedEnvelopeAsync(
                 managerInvocation, runtimeInstanceId, sequence.Take(), ct).ConfigureAwait(false);
 
@@ -338,6 +349,11 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                     case ReasoningDeltaProviderEvent reasoningDelta:
                         yield return await CreateReasoningDeltaEnvelopeAsync(
                             runId, runtimeInstanceId, reasoningDelta.InvocationId, reasoningDelta.Delta,
+                            sequence.Take(), ct).ConfigureAwait(false);
+                        break;
+                    case ReasoningCompletedProviderEvent reasoningCompleted:
+                        yield return await CreateReasoningCompletedEnvelopeAsync(
+                            runId, runtimeInstanceId, reasoningCompleted.InvocationId,
                             sequence.Take(), ct).ConfigureAwait(false);
                         break;
                     case ToolCallDeltaProviderEvent toolCallDelta:
@@ -396,7 +412,6 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                     sessionId,
                     managerInvocation.InvocationId,
                     options.GeneralManager.AgentId,
-                    planningGoal,
                     managerText.ToString(),
                     validationError,
                     ct).ConfigureAwait(false);
@@ -419,6 +434,24 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
 
             plan = WorkPlanValidator.NormalizePlanRevision(validatedPlan, publishedPlanVersion);
             plan = WorkPlanValidator.ValidateOrThrow(plan, options);
+            if (ShouldKeepPublishedPlan(publishedPlanVersion, priorResume, userRequestsRevision))
+            {
+                await _workRepo.UpdateSessionStatusAsync(
+                    sessionId,
+                    policy.RequirePlanConfirmation
+                        ? WorkSessionStatus.WaitingForPlanConfirmation
+                        : priorSessionStatus ?? WorkSessionStatus.Planning,
+                    ct).ConfigureAwait(false);
+                await CompleteRunAsync(runId, ct).ConfigureAwait(false);
+                var kept = await CreateCompletedEnvelopeAsync(
+                    runId, sessionId, runtimeInstanceId, sequence.Current, ct).ConfigureAwait(false);
+                if (kept is not null)
+                {
+                    yield return kept;
+                }
+
+                yield break;
+            }
             var canonicalMessages = await AppendPlanRevisionAsync(
                 sessionId,
                 managerInvocation.InvocationId,
@@ -454,8 +487,8 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 sequence.Take(),
                 workPlanEvent);
 
-            // Plan confirmation gate: publish plan, wait for an explicit confirm turn.
-            if (policy.RequirePlanConfirmation && !userConfirmsPlan)
+            // 本轮新发布的计划一律等待下一轮明确确认，不因本轮输入像确认而立刻执行。
+            if (policy.RequirePlanConfirmation)
             {
                 await _workRepo.UpdateSessionStatusAsync(
                     sessionId,
@@ -480,6 +513,10 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             }
         }
 
+        await _workRepo.UpdateSessionStatusAsync(
+            sessionId,
+            WorkSessionStatus.Executing,
+            ct).ConfigureAwait(false);
         var agentById = options.AvailableAgents.ToDictionary(
             static a => a.AgentId, StringComparer.Ordinal);
         var completedCount = 0;
@@ -807,6 +844,11 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                         case ReasoningDeltaProviderEvent reasoningDelta:
                             yield return await CreateReasoningDeltaEnvelopeAsync(
                                 runId, runtimeInstanceId, reasoningDelta.InvocationId, reasoningDelta.Delta,
+                                sequence.Take(), ct).ConfigureAwait(false);
+                            break;
+                        case ReasoningCompletedProviderEvent reasoningCompleted:
+                            yield return await CreateReasoningCompletedEnvelopeAsync(
+                                runId, runtimeInstanceId, reasoningCompleted.InvocationId,
                                 sequence.Take(), ct).ConfigureAwait(false);
                             break;
                         case ToolCallDeltaProviderEvent toolCallDelta:
@@ -1237,6 +1279,14 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                             runSequence++,
                             ct).ConfigureAwait(false);
                         break;
+                    case ReasoningCompletedProviderEvent reasoningCompleted:
+                        yield return await CreateReasoningCompletedEnvelopeAsync(
+                            runId,
+                            runtimeInstanceId,
+                            reasoningCompleted.InvocationId,
+                            runSequence++,
+                            ct).ConfigureAwait(false);
+                        break;
                     case ToolCallDeltaProviderEvent toolCallDelta:
                         yield return await CreateToolCallDeltaEnvelopeAsync(
                             runId,
@@ -1482,17 +1532,10 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         string sessionId,
         string invocationId,
         string agentId,
-        string userText,
         string assistantText,
         string? validationError,
         CancellationToken ct)
     {
-        if (!string.IsNullOrWhiteSpace(userText))
-        {
-            await AppendPlainDialogueAsync(sessionId, invocationId, "user", "user", userText, ct)
-                .ConfigureAwait(false);
-        }
-
         if (!string.IsNullOrWhiteSpace(assistantText))
         {
             await AppendPlainDialogueAsync(sessionId, invocationId, agentId, "assistant", assistantText, ct)
@@ -1504,12 +1547,31 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             await AppendPlainDialogueAsync(
                 sessionId,
                 invocationId,
-                agentId,
-                "assistant",
-                "Plan was not published: " + validationError
-                + " Collapse create/verify gates into each deliverable's step goal and call mcli_work_set_plan again.",
+                "runtime",
+                "tool",
+                "Plan validation failed: " + validationError
+                + " Correct the plan with mcli_work_set_plan. Do not explain this failure to the user.",
                 ct).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// 已发布计划尚无完成结果，且用户没有要求修订时，保持原计划。
+    /// </summary>
+    private static bool ShouldKeepPublishedPlan(
+        string? publishedPlanVersion,
+        WorkResumeState? priorResume,
+        bool userRequestsRevision)
+    {
+        if (userRequestsRevision || string.IsNullOrWhiteSpace(publishedPlanVersion))
+        {
+            return false;
+        }
+
+        var steps = priorResume?.Steps;
+        return steps is { Length: > 0 }
+            && steps.All(static step => step.Status is WorkStepLifecycleStatus.Pending
+                or WorkStepLifecycleStatus.Interrupted);
     }
 
     private async Task AppendPlainDialogueAsync(
@@ -2060,6 +2122,13 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             runtimeInstanceId, runId, runSequence, MessageTypes.ReasoningDelta,
             new ReasoningDeltaEvent(invocationId, delta), RuntimeJsonContext.Default.ReasoningDeltaEvent, ct);
 
+    private Task<RuntimeEventEnvelope> CreateReasoningCompletedEnvelopeAsync(
+        string runId, string runtimeInstanceId, string invocationId,
+        long runSequence, CancellationToken ct) =>
+        CreateEnvelopeAsync(
+            runtimeInstanceId, runId, runSequence, MessageTypes.ReasoningCompleted,
+            new ReasoningCompletedEvent(invocationId), RuntimeJsonContext.Default.ReasoningCompletedEvent, ct);
+
     private Task<RuntimeEventEnvelope> CreateToolCallDeltaEnvelopeAsync(
         string runId, string runtimeInstanceId, string invocationId, string callId, string name, string delta,
         long runSequence, CancellationToken ct) =>
@@ -2130,6 +2199,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 failure = null;
                 completed = false;
                 var hasObservedProviderOutput = false;
+                var reasoningOpen = false;
                 var attemptRequest = providerRequest.CreateAttempt(providerAttempt);
                 await foreach (var providerEvent in ProviderInvocationBoundary.CompleteStreamingAsync(
                         provider,
@@ -2137,6 +2207,16 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                         ct)
                     .ConfigureAwait(false))
                 {
+                    if (providerEvent is ReasoningDeltaProviderEvent)
+                    {
+                        reasoningOpen = true;
+                    }
+                    else if (reasoningOpen)
+                    {
+                        reasoningOpen = false;
+                        yield return new ReasoningCompletedProviderEvent(request.InvocationId);
+                    }
+
                     switch (providerEvent)
                     {
                         case TextDeltaProviderEvent textDelta:
@@ -2174,6 +2254,11 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                     {
                         break;
                     }
+                }
+
+                if (reasoningOpen)
+                {
+                    yield return new ReasoningCompletedProviderEvent(request.InvocationId);
                 }
 
                 if (failure is null)
@@ -2311,26 +2396,34 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 yield break;
             }
 
-            // 允许集按「本轮暴露给模型的 tools」校验；tools 会在每轮后随 live catalog 刷新
-            if (tools is not null)
+            // 允许集外的调用回工具错误，不中断本轮，让模型改调已暴露的工具。
+            var allowedToolIds = tools is null
+                ? null
+                : tools.Select(static tool => tool.ToolId).ToHashSet(StringComparer.Ordinal);
+            var deniedCalls = allowedToolIds is null
+                ? []
+                : toolCalls.Where(call => !allowedToolIds.Contains(call.ToolId)).ToArray();
+            if (deniedCalls.Length > 0)
             {
-                var allowedToolIds = tools
-                    .Select(static tool => tool.ToolId)
-                    .ToHashSet(StringComparer.Ordinal);
-                if (toolCalls.Any(call => !allowedToolIds.Contains(call.ToolId)))
-                {
-                    yield return new InvocationFailedProviderEvent(
-                        request.InvocationId,
-                        CreateRuntimeError(
-                            RuntimeErrorCodes.ToolPermissionRequired,
-                            "The Provider requested a tool outside the Work invocation's allowed tool set."));
-                    yield break;
-                }
+                toolCalls = toolCalls
+                    .Where(call => allowedToolIds!.Contains(call.ToolId))
+                    .ToArray();
             }
 
             messages.Add(new RuntimeProviderMessage(
                 RuntimeProviderRoles.Assistant,
                 [.. assistantContent]));
+            foreach (var denied in deniedCalls)
+            {
+                messages.Add(new RuntimeProviderMessage(
+                    RuntimeProviderRoles.Tool,
+                    [CreateDeniedToolResult(denied)]));
+            }
+
+            if (toolCalls.Length == 0)
+            {
+                continue;
+            }
 
             foreach (var toolCall in toolCalls)
             {
@@ -2414,6 +2507,31 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                     && string.Equals(toolCall.ToolId, WorkSetPlanToolId, StringComparison.Ordinal))
                 {
                     TryCaptureSetPlanFromToolOutput(setPlanOutput);
+                    if (_capturedSetPlanDraft is { } captured
+                        && _dispatchContext?.Request.Selection.ModeOptions is WorkModeOptions workOptions)
+                    {
+                        try
+                        {
+                            WorkPlanValidator.ValidateOrThrow(captured, workOptions);
+                        }
+                        catch (ArgumentException ex)
+                        {
+                            _capturedSetPlanDraft = null;
+                            toolResult = CreateDeniedToolResult(toolCall) with
+                            {
+                                Content =
+                                [
+                                    new TextContentBlock(
+                                        "{\"ok\":false,\"error\":\"invalid_plan\",\"message\":\""
+                                        + ex.Message.Replace("\\", "\\\\", StringComparison.Ordinal)
+                                            .Replace("\"", "\\\"", StringComparison.Ordinal)
+                                            .Replace("\r", " ", StringComparison.Ordinal)
+                                            .Replace("\n", " ", StringComparison.Ordinal)
+                                        + "\"}")
+                                ]
+                            };
+                        }
+                    }
                 }
 
                 if (_isHostModeSkills
@@ -2527,6 +2645,19 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         }
 
         return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    private static ToolResultContentBlock CreateDeniedToolResult(ToolCallContentBlock toolCall)
+    {
+        var payload = "{\"ok\":false,\"error\":\"tool_not_allowed\",\"toolId\":\""
+            + toolCall.ToolId.Replace("\\", "\\\\", StringComparison.Ordinal)
+                .Replace("\"", "\\\"", StringComparison.Ordinal)
+            + "\",\"message\":\"The tool is outside this Work invocation's allowed tool set.\"}";
+        return new ToolResultContentBlock(
+            toolCall.CallId,
+            toolCall.ToolId,
+            false,
+            [new TextContentBlock(payload)]);
     }
 
     private static ToolResultContentBlock CreateToolResultContent(
@@ -2925,11 +3056,29 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             builder.AppendLine(
                 CultureInfo.InvariantCulture,
                 $"A plan is already published at planVersion '{publishedPlanVersion}'.");
-            builder.AppendLine(
-                CultureInfo.InvariantCulture,
-                $"Any revised executable plan must use planVersion '{nextVersion}' and previousPlanVersion '{publishedPlanVersion}'.");
-            builder.AppendLine(
-                "Preserve completed step outcomes via reusesStepId when the work should not be redone.");
+            var keepPublishedPlan = !IsPlanRevisionRequest(goal)
+                && !ContainsPlanJson(goal)
+                && priorResume?.Steps is { Length: > 0 } openSteps
+                && openSteps.All(static step => step.Status is WorkStepLifecycleStatus.Pending
+                    or WorkStepLifecycleStatus.Interrupted);
+            if (keepPublishedPlan)
+            {
+                builder.AppendLine(
+                    "This plan has no completed step result. Do not call mcli_work_set_plan and do not publish a new planVersion.");
+                builder.AppendLine(
+                    "Reply in plain text that the current plan is unchanged and still waiting for confirmation.");
+                builder.AppendLine(
+                    "Do not mention stepId, Interrupted, publish failures, or internal repairs.");
+            }
+            else
+            {
+                builder.AppendLine(
+                    CultureInfo.InvariantCulture,
+                    $"Any revised executable plan must use planVersion '{nextVersion}' and previousPlanVersion '{publishedPlanVersion}'.");
+                builder.AppendLine(
+                    "Preserve completed step outcomes via reusesStepId when the work should not be redone.");
+            }
+
             builder.AppendLine(
                 "If the user only wants discussion and has not approved a revised plan, reply in plain text with no JSON object and do not call set_plan.");
             if (priorResume?.Steps is { Length: > 0 } steps)
@@ -3390,6 +3539,15 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 ErrorMessage: "dispatch_step session/run does not match the active Work run.");
         }
 
+        var resume = await _workRepo.GetResumeStateAsync(context.SessionId, ct).ConfigureAwait(false);
+        if (resume?.Status is not WorkSessionStatus.Executing)
+        {
+            return new WorkDispatchStepResult(
+                false,
+                ErrorCode: "plan_not_confirmed",
+                ErrorMessage: "The published plan is not executing. Wait for explicit confirmation; the orchestrator dispatches steps.");
+        }
+
         var agentById = context.Options.AvailableAgents
             .Concat([context.Options.GeneralManager])
             .GroupBy(static agent => agent.AgentId, StringComparer.Ordinal)
@@ -3531,6 +3689,15 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                             context.RuntimeInstanceId,
                             reasoningDelta.InvocationId,
                             reasoningDelta.Delta,
+                            sequence.Take(),
+                            ct)
+                        .ConfigureAwait(false);
+                    break;
+                case ReasoningCompletedProviderEvent reasoningCompleted:
+                    _ = await CreateReasoningCompletedEnvelopeAsync(
+                            context.RunId,
+                            context.RuntimeInstanceId,
+                            reasoningCompleted.InvocationId,
                             sequence.Take(),
                             ct)
                         .ConfigureAwait(false);

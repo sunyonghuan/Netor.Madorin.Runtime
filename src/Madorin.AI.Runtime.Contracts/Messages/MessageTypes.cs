@@ -22,6 +22,7 @@ public static class MessageTypes
     public const string InvocationFailed = "invocation.failed";
     public const string TextDelta = "output.delta";
     public const string ReasoningDelta = "reasoning.delta";
+    public const string ReasoningCompleted = "reasoning.completed";
     public const string ToolCallDelta = "tool.call.delta";
     public const string ToolCallCompleted = "tool.call.completed";
     public const string UsageUpdated = "usage.updated";
