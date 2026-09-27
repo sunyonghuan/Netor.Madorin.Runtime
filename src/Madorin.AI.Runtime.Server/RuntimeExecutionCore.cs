@@ -155,7 +155,10 @@ internal sealed class RuntimeExecutionCore(
             new BuiltinHttpToolExecutor(),
             new BuiltinMemoryToolExecutor(_memoryFiles),
             new BuiltinDelegateAgentToolExecutor(),
-            new BuiltinWorkSetPlanToolExecutor(),
+            new BuiltinWorkSetPlanToolExecutor(
+                maxStepsPerRun: request.Selection.ModeOptions is WorkModeOptions workModeOptions
+                    ? workModeOptions.EffectiveWorkflowPolicy.MaxStepsPerRun
+                    : null),
             new BuiltinAgentJobToolExecutor(agentJobCoordinator),
             new BuiltinMeetingToolExecutor(meetingToolStore, _workspaceRoot),
             new BuiltinWorkTemplateToolExecutor(
