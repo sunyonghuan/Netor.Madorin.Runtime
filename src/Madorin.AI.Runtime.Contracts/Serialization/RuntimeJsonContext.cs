@@ -174,6 +174,7 @@ namespace Madorin.AI.Runtime.Contracts.Serialization;
 [JsonSerializable(typeof(TextContentBlock))]
 [JsonSerializable(typeof(TextDeltaEvent))]
 [JsonSerializable(typeof(ReasoningDeltaEvent))]
+[JsonSerializable(typeof(ReasoningCompletedEvent))]
 [JsonSerializable(typeof(ToolCallDeltaEvent))]
 [JsonSerializable(typeof(UsageUpdatedEvent))]
 [JsonSerializable(typeof(ToolCallContentBlock))]

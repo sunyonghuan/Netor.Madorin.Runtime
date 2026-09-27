@@ -127,6 +127,81 @@ public sealed class WorkToolLoopTests
     }
 
     [TestMethod]
+    public async Task RunAsync_DisallowedTool_ReturnsToolErrorAndCompletesRun()
+    {
+        var ct = TestContext.CancellationToken;
+        var dataDirectory = Path.Combine(
+            TestContext.TestRunDirectory ?? Path.GetTempPath(),
+            $"work-tool-denied-id-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dataDirectory);
+
+        try
+        {
+            var connectionString = new SqliteConnectionStringBuilder
+            {
+                DataSource = Path.Combine(dataDirectory, "state.db"),
+                Pooling = false
+            }.ToString();
+            await using var connection = new SqliteConnection(connectionString);
+            await SqliteSchema.EnsureCreatedAsync(connection, ct);
+            using var outbox = new SqliteEventOutbox(connection);
+            using var toolState = new SqliteToolIntentRepository(connection);
+            var registry = new TestToolRegistry();
+            var validator = new JsonSchemaToolValidator();
+            var catalogStore = new ToolCatalogStore(registry, validator);
+            var catalog = catalogStore.CaptureSnapshot();
+            var authorization = new ToolAuthorizationService(
+                toolState,
+                RuntimeToolPolicy.CreateRestricted(dataDirectory));
+            await SaveDelegatedWorkerGrantAsync(authorization, dataDirectory, ct);
+            var executor = new TestToolExecutor();
+            using var gateway = new ToolGateway(
+                catalogStore,
+                validator,
+                authorization,
+                [executor],
+                toolState,
+                outbox);
+            var provider = new WorkToolLoopProvider { EmitDisallowedTool = true };
+            var memoryFiles = new MemoryFileService(
+                Path.Join(dataDirectory, "home"),
+                Path.Join(dataDirectory, "workspace"));
+            var sessionRepo = new SqliteSessionRepository(connection);
+            var orchestrator = new WorkModeOrchestrator(
+                _ => provider,
+                new ConversationStore(dataDirectory),
+                sessionRepo,
+                outbox,
+                new AgentContextComposer(memoryFiles),
+                toolStateStore: toolState,
+                toolGateway: gateway,
+                toolCatalogSnapshot: catalog,
+                workRepo: new SqliteWorkRepository(connection),
+                connection: connection);
+
+            await EnsureSessionRunAsync(connection, "session-1", "run-1", ct);
+            await CollectAsync(orchestrator.RunAsync(
+                "run-1",
+                "session-1",
+                CreateRequest(),
+                "runtime-1",
+                ct), ct);
+
+            Assert.AreEqual(RunStatus.Completed, await sessionRepo.GetRunStatusAsync("run-1", ct));
+            Assert.AreEqual(0, executor.CallCount);
+            Assert.IsNotNull(provider.WorkerContinuationRequest);
+            Assert.AreEqual(2, provider.WorkerCallCount);
+        }
+        finally
+        {
+            if (Directory.Exists(dataDirectory))
+            {
+                Directory.Delete(dataDirectory, recursive: true);
+            }
+        }
+    }
+
+    [TestMethod]
     public async Task RunAsync_WorkerToolCallWithoutDelegatedGrant_RequiresPermissionAndPersistsLineage()
     {
         var ct = TestContext.CancellationToken;
@@ -645,6 +720,8 @@ public sealed class WorkToolLoopTests
 
         public int WorkerCallCount { get; private set; }
 
+        public bool EmitDisallowedTool { get; init; }
+
         public RuntimeProviderRequest? WorkerContinuationRequest { get; private set; }
 
         public async IAsyncEnumerable<RuntimeProviderEvent> CompleteStreamingAsync(
@@ -667,6 +744,20 @@ public sealed class WorkToolLoopTests
             if (WorkerCallCount == 1)
             {
                 Assert.IsNotNull(request.Tools);
+                if (EmitDisallowedTool)
+                {
+                    yield return new ToolCallCompleteProviderEvent(
+                        request.InvocationId,
+                        "call-work-1",
+                        "mcli_fs_write",
+                        "mcli_fs_write",
+                        "{\"path\":\"work-mode-smoke-test.txt\"}");
+                    yield return new InvocationCompletedProviderEvent(
+                        request.InvocationId,
+                        "tool_calls");
+                    yield break;
+                }
+
                 Assert.IsTrue(request.Tools.Any(static tool =>
                     tool.ToolId == TestToolRegistry.ToolId));
                 yield return new ToolCallCompleteProviderEvent(
@@ -684,6 +775,18 @@ public sealed class WorkToolLoopTests
             WorkerContinuationRequest = request;
             var toolResult = (ToolResultContentBlock)request.Messages[^1].Content[0];
             Assert.AreEqual("call-work-1", toolResult.CallId);
+            if (EmitDisallowedTool)
+            {
+                Assert.IsFalse(toolResult.Success);
+                var deniedText = toolResult.Content.OfType<TextContentBlock>().Single().Text;
+                StringAssert.Contains(deniedText, "tool_not_allowed");
+                yield return new TextDeltaProviderEvent(
+                    request.InvocationId,
+                    "tool-result:worker");
+                yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
+                yield break;
+            }
+
             Assert.IsTrue(toolResult.Success);
             yield return new TextDeltaProviderEvent(
                 request.InvocationId,

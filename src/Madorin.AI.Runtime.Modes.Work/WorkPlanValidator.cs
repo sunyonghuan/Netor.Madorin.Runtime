@@ -146,7 +146,48 @@ public static class WorkPlanValidator
         }
 
         DetectCycle(deps);
+        EnsureReferencedDependencies(plan);
         return plan;
+    }
+
+    /// <summary>
+    /// 后一步写明要使用前一步结果时，必须声明 dependsOn，避免并行开跑。
+    /// </summary>
+    private static void EnsureReferencedDependencies(WorkPlanDraft plan)
+    {
+        for (var index = 0; index < plan.Steps.Length; index++)
+        {
+            var step = plan.Steps[index];
+            var dependsOn = new HashSet<string>(step.DependsOn ?? [], StringComparer.Ordinal);
+            var text = string.Concat(step.Goal, "\n", step.Title);
+            for (var priorIndex = 0; priorIndex < index; priorIndex++)
+            {
+                var prior = plan.Steps[priorIndex];
+                if (!ReferencesPriorStep(text, prior.StepId, priorIndex))
+                {
+                    continue;
+                }
+
+                if (!dependsOn.Contains(prior.StepId))
+                {
+                    throw new ArgumentException(
+                        $"Step '{step.StepId}' uses the result of '{prior.StepId}' but does not depend on it.",
+                        nameof(plan));
+                }
+            }
+        }
+    }
+
+    private static bool ReferencesPriorStep(string text, string priorStepId, int priorIndex)
+    {
+        if (text.Contains(priorStepId, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var number = (priorIndex + 1).ToString(CultureInfo.InvariantCulture);
+        return text.Contains("步骤" + number, StringComparison.Ordinal)
+            || text.Contains("步骤 " + number, StringComparison.Ordinal);
     }
 
     public static WorkPlanDraft CreateFallbackPlan(
