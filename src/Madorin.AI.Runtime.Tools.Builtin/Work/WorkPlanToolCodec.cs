@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using System.Text.Json;
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Contracts.Serialization;
@@ -198,7 +199,7 @@ internal static class WorkPlanToolCodec
                 return false;
             }
 
-            if (!TryAppendSubSteps(
+            if (!TryAppendMainStep(
                     main,
                     subSteps,
                     mainOrdinal,
@@ -229,7 +230,7 @@ internal static class WorkPlanToolCodec
         return true;
     }
 
-    private static bool TryAppendSubSteps(
+    private static bool TryAppendMainStep(
         JsonElement main,
         JsonElement subSteps,
         int mainOrdinal,
@@ -242,6 +243,7 @@ internal static class WorkPlanToolCodec
     {
         errorCode = null;
         message = null;
+        var gates = new List<PlanGate>();
         var subOrdinal = 0;
         foreach (var sub in subSteps.EnumerateArray())
         {
@@ -275,25 +277,71 @@ internal static class WorkPlanToolCodec
                 ?? ReadOptionalString(sub, "target_agent_id")
                 ?? ReadOptionalString(main, "targetAgentId")
                 ?? fallbackAgent;
-            var stepId = ReadOptionalString(sub, "stepId")
-                ?? string.Create(CultureInfo.InvariantCulture, $"m{mainOrdinal}-s{subOrdinal}");
-            var goalText = string.Create(
-                CultureInfo.InvariantCulture,
-                $"{subTitle}. Acceptance: {acceptance}");
+            gates.Add(new PlanGate(subTitle, acceptance, target));
+        }
+
+        var distinctAgents = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var gate in gates)
+        {
+            distinctAgents.Add(gate.TargetAgentId);
+        }
+
+        // 同一主步骤、同一执行人：门禁留在 goal 里，只派发一次。
+        // 主步骤里换了执行人时才拆成多个派发步骤。
+        if (distinctAgents.Count == 1)
+        {
+            var stepId = string.Create(CultureInfo.InvariantCulture, $"m{mainOrdinal}");
             var dependsOn = previousStepId is null ? Array.Empty<string>() : new[] { previousStepId };
             steps.Add(new WorkPlanStepDraft(
                 stepId,
-                goalText,
-                target,
+                BuildFoldedGoal(mainTitle, gates),
+                gates[0].TargetAgentId,
                 DependsOn: dependsOn,
                 Depth: 0,
-                Title: subTitle,
-                Inputs: BuildIndexInputs(mainOrdinal, subOrdinal, mainTitle, acceptance)));
+                Title: mainTitle,
+                Inputs: BuildIndexInputs(mainOrdinal, 1, mainTitle, gates[0].Acceptance)));
+            previousStepId = stepId;
+            return true;
+        }
+
+        for (var index = 0; index < gates.Count; index++)
+        {
+            var gate = gates[index];
+            var subOrdinalForId = index + 1;
+            var stepId = string.Create(
+                CultureInfo.InvariantCulture,
+                $"m{mainOrdinal}-s{subOrdinalForId}");
+            var dependsOn = previousStepId is null ? Array.Empty<string>() : new[] { previousStepId };
+            steps.Add(new WorkPlanStepDraft(
+                stepId,
+                string.Create(CultureInfo.InvariantCulture, $"{gate.Title}. Acceptance: {gate.Acceptance}"),
+                gate.TargetAgentId,
+                DependsOn: dependsOn,
+                Depth: 0,
+                Title: gate.Title,
+                Inputs: BuildIndexInputs(mainOrdinal, subOrdinalForId, mainTitle, gate.Acceptance)));
             previousStepId = stepId;
         }
 
         return true;
     }
+
+    private static string BuildFoldedGoal(string mainTitle, List<PlanGate> gates)
+    {
+        var builder = new StringBuilder(mainTitle);
+        builder.AppendLine();
+        builder.AppendLine("Complete every gate in order. Redo the current gate when verification fails.");
+        for (var index = 0; index < gates.Count; index++)
+        {
+            var gate = gates[index];
+            builder.Append(CultureInfo.InvariantCulture, $"{index + 1}. {gate.Title}. Acceptance: {gate.Acceptance}");
+            builder.AppendLine();
+        }
+
+        return builder.ToString().TrimEnd();
+    }
+
+    private readonly record struct PlanGate(string Title, string Acceptance, string TargetAgentId);
 
     private static JsonElement BuildIndexInputs(
         int mainIndex,

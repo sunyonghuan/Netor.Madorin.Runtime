@@ -545,6 +545,26 @@ public sealed class WorkModeOrchestratorTests
     }
 
     [TestMethod]
+    public async Task RequirePlanConfirmation_StartButton_ExecutesPendingPlanWithoutManager()
+    {
+        const string planJson =
+            "{\"planVersion\":\"1\",\"goal\":\"Ship\",\"steps\":["
+            + "{\"stepId\":\"step-a\",\"goal\":\"Prepare notes\",\"targetAgentId\":\"worker\"}]}";
+
+        var result = await RunMultiTurnAsync(
+            [
+                new WorkTurnScript("run-1", planJson, "请先制定计划，先不要执行。"),
+                new WorkTurnScript("run-2", null, "开始")
+            ],
+            requirePlanConfirmation: true);
+
+        Assert.AreEqual(RunStatus.Completed, result.RunStatus);
+        Assert.AreEqual(WorkSessionStatus.Completed, result.WorkSessionStatus);
+        Assert.AreEqual(WorkStepLifecycleStatus.Completed, result.WorkSteps[0].Status);
+        CollectionAssert.AreEqual(ExpectedManagerThenWorkerAgentIds, result.InvokedAgentIds);
+    }
+
+    [TestMethod]
     public async Task RequirePlanConfirmation_DiscussionWhileWaiting_KeepsWaitingStatus()
     {
         const string planJson =

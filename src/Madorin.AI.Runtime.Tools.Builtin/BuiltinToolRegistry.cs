@@ -348,7 +348,7 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
             WorkSetPlanToolId,
             "mcli",
             "Set work plan",
-            "Validates and returns an executable WorkPlanDraft (native planVersion/goal/steps or main_steps/sub_steps). Runtime persists it and waits for user confirmation before dispatch.",
+            "Validates and returns an executable WorkPlanDraft. One step is one agent dispatch. Fold create/verify gates into the step goal; do not multiply deliverable count by internal gates. Step count must stay within MaxStepsPerRun. Runtime persists a valid plan and waits for user confirmation before dispatch.",
             """{"type":"object","properties":{"planVersion":{"type":"string"},"goal":{"type":"string"},"steps":{"type":"array"},"main_steps":{"type":"array"},"previousPlanVersion":{"type":"string"},"summary":{"type":"string"},"plan":{"type":"object"}},"additionalProperties":true}""",
             """{"type":"object","properties":{"ok":{"type":"boolean"},"error":{"type":"string"},"message":{"type":"string"},"planVersion":{"type":"string"},"goal":{"type":"string"},"stepCount":{"type":"integer"},"plan":{"type":"object"},"requiresConfirmation":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}""",
             RiskLevel: "medium",

@@ -10,10 +10,17 @@ namespace Madorin.AI.Runtime.Tools.Builtin.Work;
 public sealed class BuiltinWorkSetPlanToolExecutor : IToolExecutor
 {
     private readonly string? _defaultTargetAgentId;
+    private readonly int? _maxStepsPerRun;
 
-    public BuiltinWorkSetPlanToolExecutor(string? defaultTargetAgentId = null)
+    public BuiltinWorkSetPlanToolExecutor(string? defaultTargetAgentId = null, int? maxStepsPerRun = null)
     {
+        if (maxStepsPerRun is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxStepsPerRun));
+        }
+
         _defaultTargetAgentId = defaultTargetAgentId;
+        _maxStepsPerRun = maxStepsPerRun;
     }
 
     public bool CanExecute(string toolId) =>
@@ -68,6 +75,17 @@ public sealed class BuiltinWorkSetPlanToolExecutor : IToolExecutor
             return Failure(invocation, errorCode ?? "invalid_plan", message ?? "Invalid plan.");
         }
 
+        if (_maxStepsPerRun is int maxSteps && plan.Steps.Length > maxSteps)
+        {
+            return Failure(
+                invocation,
+                "too_many_steps",
+                $"Plan has {plan.Steps.Length} steps which exceeds MaxStepsPerRun={maxSteps}. "
+                + "One plan step is one agent dispatch. Put each deliverable's create/verify gates in that step's goal. "
+                + "Ten documents are about ten to twelve steps, not document-count times gate-count. "
+                + "Call mcli_work_set_plan again with the collapsed plan.");
+        }
+
         var planJson = JsonSerializer.Serialize(plan, RuntimeJsonContext.Default.WorkPlanDraft);
         var output = ToolJson.Write(writer =>
         {
@@ -84,7 +102,7 @@ public sealed class BuiltinWorkSetPlanToolExecutor : IToolExecutor
 
             writer.WriteString(
                 "message",
-                "Plan accepted. Runtime will persist it and wait for explicit user confirmation before dispatch.");
+                "Plan accepted. One step is one agent dispatch; create/verify gates stay inside the step goal. Runtime will persist it and wait for explicit user confirmation before dispatch.");
             writer.WriteBoolean("requiresConfirmation", true);
             writer.WriteEndObject();
         });

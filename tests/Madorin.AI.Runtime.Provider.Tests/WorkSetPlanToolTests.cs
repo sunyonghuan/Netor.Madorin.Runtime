@@ -71,8 +71,62 @@ public sealed class WorkSetPlanToolTests
             output.RootElement.GetProperty("plan").GetRawText(),
             RuntimeJsonContext.Default.WorkPlanDraft);
         Assert.IsNotNull(plan);
-        Assert.AreEqual("m1-s1", plan.Steps[0].StepId);
+        Assert.AreEqual("m1", plan.Steps[0].StepId);
         StringAssert.Contains(plan.Steps[0].Goal, "Notes file exists");
+    }
+
+    [TestMethod]
+    public async Task SetPlan_SameAgentGates_FoldIntoOneDispatchStep()
+    {
+        var gates = string.Join(
+            ",",
+            Enumerable.Range(1, 10).Select(index =>
+                "{\"title\":\"Gate " + index + "\",\"acceptance_criteria\":\"Gate " + index + " passed\",\"targetAgentId\":\"worker\"}"));
+        var result = await ExecuteAsync(
+            """
+            {
+              "goal": "Create ten documents",
+              "main_steps": [
+                { "title": "Document 01", "sub_steps": [
+            """ + gates + "] } ] }");
+
+        Assert.IsTrue(result.Success, result.Error);
+        using var output = JsonDocument.Parse(result.OutputJson!);
+        Assert.AreEqual(1, output.RootElement.GetProperty("stepCount").GetInt32());
+        var plan = JsonSerializer.Deserialize(
+            output.RootElement.GetProperty("plan").GetRawText(),
+            RuntimeJsonContext.Default.WorkPlanDraft);
+        Assert.IsNotNull(plan);
+        Assert.AreEqual("m1", plan.Steps[0].StepId);
+        StringAssert.Contains(plan.Steps[0].Goal, "Gate 1");
+        StringAssert.Contains(plan.Steps[0].Goal, "Gate 10");
+    }
+
+    [TestMethod]
+    public async Task SetPlan_OverMaxSteps_AsksForCollapsedPlan()
+    {
+        var result = await new BuiltinWorkSetPlanToolExecutor(maxStepsPerRun: 2).ExecuteAsync(
+            new ToolInvocation(
+                "call-1",
+                BuiltinToolRegistry.WorkSetPlanToolId,
+                "gm",
+                null,
+                """
+                {
+                  "planVersion": "1",
+                  "goal": "Too fine",
+                  "steps": [
+                    { "stepId": "s1", "goal": "A", "targetAgentId": "worker" },
+                    { "stepId": "s2", "goal": "B", "targetAgentId": "worker" },
+                    { "stepId": "s3", "goal": "C", "targetAgentId": "worker" }
+                  ]
+                }
+                """,
+                "run-1",
+                "session-1"));
+
+        AssertFailure(result, "too_many_steps");
+        AssertFailure(result, "MaxStepsPerRun=2");
     }
 
     [TestMethod]

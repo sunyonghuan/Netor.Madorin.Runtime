@@ -376,20 +376,31 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             var parsedPlan = _capturedSetPlanDraft ?? TryParsePlan(managerText.ToString());
             _capturedSetPlanDraft = null;
             WorkPlanDraft? validatedPlan = null;
+            string? validationError = null;
             if (parsedPlan is not null)
             {
                 try
                 {
                     validatedPlan = WorkPlanValidator.ValidateOrThrow(parsedPlan, options);
                 }
-                catch (ArgumentException)
+                catch (ArgumentException ex)
                 {
                     validatedPlan = null;
+                    validationError = ex.Message;
                 }
             }
 
             if (validatedPlan is null)
             {
+                await AppendPlanningDialogueAsync(
+                    sessionId,
+                    managerInvocation.InvocationId,
+                    options.GeneralManager.AgentId,
+                    planningGoal,
+                    managerText.ToString(),
+                    validationError,
+                    ct).ConfigureAwait(false);
+
                 var resumeStatus = waitingForPlanConfirmation
                     ? WorkSessionStatus.WaitingForPlanConfirmation
                     : priorSessionStatus ?? WorkSessionStatus.Planning;
@@ -1467,6 +1478,143 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         return sb.Length == 0 ? "Complete the assigned work." : sb.ToString();
     }
 
+    private async Task AppendPlanningDialogueAsync(
+        string sessionId,
+        string invocationId,
+        string agentId,
+        string userText,
+        string assistantText,
+        string? validationError,
+        CancellationToken ct)
+    {
+        if (!string.IsNullOrWhiteSpace(userText))
+        {
+            await AppendPlainDialogueAsync(sessionId, invocationId, "user", "user", userText, ct)
+                .ConfigureAwait(false);
+        }
+
+        if (!string.IsNullOrWhiteSpace(assistantText))
+        {
+            await AppendPlainDialogueAsync(sessionId, invocationId, agentId, "assistant", assistantText, ct)
+                .ConfigureAwait(false);
+        }
+
+        if (!string.IsNullOrWhiteSpace(validationError))
+        {
+            await AppendPlainDialogueAsync(
+                sessionId,
+                invocationId,
+                agentId,
+                "assistant",
+                "Plan was not published: " + validationError
+                + " Collapse create/verify gates into each deliverable's step goal and call mcli_work_set_plan again.",
+                ct).ConfigureAwait(false);
+        }
+    }
+
+    private async Task AppendPlainDialogueAsync(
+        string sessionId,
+        string invocationId,
+        string agentId,
+        string role,
+        string text,
+        CancellationToken ct)
+    {
+        var content = JsonSerializer.SerializeToElement(
+            new ContentBlock[] { new TextContentBlock(text) },
+            RuntimeJsonContext.Default.ContentBlockArray);
+        await _store.AppendMessageAsync(
+            sessionId,
+            Mode.ToString(),
+            new ConversationMessageDraft(
+                invocationId,
+                agentId,
+                role,
+                content,
+                DateTimeOffset.UtcNow),
+            ct).ConfigureAwait(false);
+    }
+
+    private async Task<string> ReadPlanningTranscriptTailAsync(string sessionId, CancellationToken ct)
+    {
+        var records = await _store.ReadAllAsync(sessionId, ct).ConfigureAwait(false);
+        if (records.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var lines = new List<string>();
+        for (var index = records.Count - 1; index >= 0 && lines.Count < 8; index--)
+        {
+            var record = records[index];
+            if (IsCanonicalPlanBody(record))
+            {
+                continue;
+            }
+
+            var text = ExtractDialogueText(record.Content);
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                continue;
+            }
+
+            if (text.Length > 800)
+            {
+                text = text[..800] + "...";
+            }
+
+            lines.Add($"[{record.Role}] {text}");
+        }
+
+        lines.Reverse();
+        return string.Join('\n', lines);
+    }
+
+    private static bool IsCanonicalPlanBody(ConversationRecordV1 record)
+    {
+        if (record.SummaryMetadata is not { ValueKind: JsonValueKind.Object } metadata
+            || !metadata.TryGetProperty("kind", out var kind)
+            || kind.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        var value = kind.GetString();
+        return value is "work.plan" or "work.step";
+    }
+
+    private static string ExtractDialogueText(JsonElement content)
+    {
+        try
+        {
+            var blocks = content.Deserialize(RuntimeJsonContext.Default.ContentBlockArray);
+            if (blocks is null || blocks.Length == 0)
+            {
+                return string.Empty;
+            }
+
+            var builder = new StringBuilder();
+            foreach (var block in blocks)
+            {
+                if (block is TextContentBlock text && !string.IsNullOrWhiteSpace(text.Text))
+                {
+                    if (builder.Length > 0)
+                    {
+                        builder.AppendLine();
+                    }
+
+                    builder.Append(text.Text.Trim());
+                }
+            }
+
+            return builder.ToString();
+        }
+        catch (JsonException)
+        {
+            return string.Empty;
+        }
+    }
+
     private async Task<(string PlanMessageId, IReadOnlyDictionary<string, string> StepMessageIds)>
         AppendPlanRevisionAsync(
             string sessionId,
@@ -2523,7 +2671,8 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                         availableTools,
                         publishedPlanVersion,
                         priorResume,
-                        pendingUserInputs))])
+                        pendingUserInputs,
+                        await ReadPlanningTranscriptTailAsync(sessionId, ct).ConfigureAwait(false)))])
             ];
         }
         else if (workPlan is not null
@@ -2669,11 +2818,24 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         ToolDescriptor[]? tools,
         string? publishedPlanVersion = null,
         WorkResumeState? priorResume = null,
-        IReadOnlyList<string>? pendingUserInputs = null)
+        IReadOnlyList<string>? pendingUserInputs = null,
+        string? recentTranscript = null)
     {
         var builder = new StringBuilder();
         builder.AppendLine("Create a structured WorkPlanDraft for this goal:");
         builder.AppendLine(goal);
+        var maxSteps = options.EffectiveWorkflowPolicy.MaxStepsPerRun;
+        builder.AppendLine("Step granularity:");
+        builder.AppendLine("- One steps[] entry, or one main_steps[] entry, is one dispatch to one agent.");
+        builder.AppendLine("- Create/verify gates belong in that step's goal or sub_steps. They are not extra plan steps.");
+        builder.AppendLine("- Do not multiply deliverable count by internal gates. Ten documents with ten gates each is about ten to twelve plan steps (one per document, plus optional prepare and close).");
+        builder.Append(CultureInfo.InvariantCulture, $"- A request for at least K steps means at least K dispatch steps, not K gates inside every deliverable. Stay at or under MaxStepsPerRun ({maxSteps}).");
+        builder.AppendLine();
+        if (!string.IsNullOrWhiteSpace(recentTranscript))
+        {
+            builder.AppendLine("Recent session transcript. Continue from it. Do not ask the user to restate the goal:");
+            builder.AppendLine(recentTranscript);
+        }
         if (pendingUserInputs is { Count: > 0 })
         {
             builder.AppendLine("Pending user inputs (FIFO, already accepted this turn):");
@@ -2804,6 +2966,12 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             return false;
         }
 
+        var trimmed = text.Trim().TrimEnd('。', '.', '!', '！');
+        if (ShortPlanConfirmations.Contains(trimmed))
+        {
+            return true;
+        }
+
         // 避免「可执行计划」误命中「执行计划」；只用明确批准执行的短语。
         return ContainsAny(text,
             "确认执行", "批准执行", "同意执行", "开始执行", "可以执行", "确认计划",
@@ -2811,6 +2979,21 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             "confirm and execute", "approve and execute", "execute the plan",
             "confirm the plan", "approve the plan", "lgtm", "ship it");
     }
+
+    private static readonly HashSet<string> ShortPlanConfirmations = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "开始",
+        "开始吧",
+        "执行",
+        "执行吧",
+        "同意",
+        "确认",
+        "批准",
+        "ok",
+        "yes",
+        "go",
+        "lgtm"
+    };
 
     private static bool IsPlanRevisionRequest(string text)
     {

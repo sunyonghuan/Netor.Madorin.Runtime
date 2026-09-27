@@ -176,11 +176,46 @@ public sealed class BuiltinWorkTemplateToolTests
             """);
         Assert.IsTrue(setPlan.Success, setPlan.Error);
         using var output = JsonDocument.Parse(setPlan.OutputJson!);
+        Assert.AreEqual(1, output.RootElement.GetProperty("stepCount").GetInt32());
+        var step = output.RootElement.GetProperty("plan").GetProperty("steps")[0];
+        Assert.AreEqual("m1", step.GetProperty("stepId").GetString());
+        var goal = step.GetProperty("goal").GetString();
+        StringAssert.Contains(goal, "Read sales");
+        StringAssert.Contains(goal, "Read refunds");
+    }
+
+    [TestMethod]
+    public async Task SetPlan_MainSteps_DifferentAgents_StaySeparateDispatches()
+    {
+        var executor = new BuiltinWorkTemplateToolExecutor(
+            _userRoot,
+            _systemRoot,
+            defaultTargetAgentId: "worker");
+        var setPlan = await ExecuteAsync(
+            executor,
+            BuiltinToolRegistry.WorkSetPlanToolId,
+            """
+            {
+              "goal":"Monthly report",
+              "main_steps":[
+                {
+                  "title":"Collect",
+                  "sub_steps":[
+                    {"title":"Read sales","acceptance_criteria":"totals present","targetAgentId":"worker"},
+                    {"title":"Audit","acceptance_criteria":"signed","targetAgentId":"reviewer"}
+                  ]
+                }
+              ]
+            }
+            """);
+        Assert.IsTrue(setPlan.Success, setPlan.Error);
+        using var output = JsonDocument.Parse(setPlan.OutputJson!);
         Assert.AreEqual(2, output.RootElement.GetProperty("stepCount").GetInt32());
         var steps = output.RootElement.GetProperty("plan").GetProperty("steps");
         Assert.AreEqual("m1-s1", steps[0].GetProperty("stepId").GetString());
         Assert.AreEqual("m1-s2", steps[1].GetProperty("stepId").GetString());
-        Assert.AreEqual("m1-s1", steps[1].GetProperty("dependsOn")[0].GetString());
+        Assert.AreEqual("worker", steps[0].GetProperty("targetAgentId").GetString());
+        Assert.AreEqual("reviewer", steps[1].GetProperty("targetAgentId").GetString());
     }
 
     [TestMethod]

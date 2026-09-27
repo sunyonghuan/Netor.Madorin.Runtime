@@ -211,7 +211,7 @@ Work 模式的计划和步骤通过以下数据结构表达：
    - **缺口**：尚未提供 Server JSON-RPC `run.pause/interrupt/resume` 或 Client SDK 专用方法；宿主可用同会话 `run.existing_session` 的 `InputOverride` 作为下一轮目标文本，或进程内调用上述入队 API。完整控制面见 `docs/备档/工作流暂停与恢复/`。
 9. **Work 工具路径（与编排器路径并存）**：
    - `mcli_work_list_plan_templates` / `load_plan_from_template` / `read_template_file`：内置扫盘，只供材料。
-   - `mcli_work_set_plan`：校验并返回规范化 `WorkPlanDraft`（支持原生 `planVersion/goal/steps` 或 `main_steps/sub_steps`）。编排器在总经理工具环成功后优先采用该 `plan` 落盘并发 `work.plan.updated`；仍保留裸 JSON 文本计划作为兼容回退。禁止参数含 `{{placeholders}}`。
+   - `mcli_work_set_plan`：校验并返回规范化 `WorkPlanDraft`（支持原生 `planVersion/goal/steps` 或 `main_steps/sub_steps`）。一个 `main_steps` 项是一次派发；同一执行人的 `sub_steps` 折进该步骤的 goal，不按「交付物数 × 门禁数」拆成运行时步骤。执行人不同时才按 sub_step 拆开。步骤数超过 `MaxStepsPerRun` 时工具返回 `too_many_steps`，不发布计划。编排器在总经理工具环成功后优先采用该 `plan` 落盘并发 `work.plan.updated`；仍保留裸 JSON 文本计划作为兼容回退。禁止参数含 `{{placeholders}}`。规划轮会把用户原文和总经理回复写入会话记录，下一轮规划提示带上这段记录。单独的「开始」在计划已发布并等待确认时视为执行确认。
    - 计划确认门仍由 `RequirePlanConfirmation` / `WaitingForPlanConfirmation` 控制；`set_plan` 本身不代替用户确认。
    - `mcli_work_dispatch_step`：要求会话已有已确认计划；按 `stepIndex`/`subStepIndex` 解析目标步骤；经 `WorkStepDispatchBridge` **同步**拉起 `targetAgentId` 子 Agent（编排器内 `ExecuteInvocationAsync`），返回 `{executed,stepId,outputText,...}`。未确认或无计划时拒绝。无绑定桥时仅返回校验通过（`executed=false`）。
    - 目录：`SupportedModes=["work"]`；`project-lead` 仅可见 `dispatch_step` + `read_template_file` + 通用工具。
