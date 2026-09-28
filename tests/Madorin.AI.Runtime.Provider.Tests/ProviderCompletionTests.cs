@@ -308,28 +308,191 @@ public sealed class ProviderCompletionTests
 
     [TestMethod]
     [Timeout(10_000, CooperativeCancellation = true)]
-    public async Task AnthropicReasoningSignature_IsPreservedAsProviderExtension()
+    public async Task AnthropicReasoningSignature_ReplaysToProviderWithoutStreamingTheSignature()
     {
+        const string marker = "anthropic-signature-marker";
         await using var server = await FakeProviderServer.StartAsync(
             _ => ProviderProtocolScripts.Reasoning(ProviderAdapterKind.Anthropic),
             _testContext.CancellationToken);
         using var fixture = ProviderAdapterTestFactory.Create(
             ProviderAdapterKind.Anthropic,
             server.BaseAddress);
+        var request = ProviderAdapterTestFactory.CreateRequest() with
+        {
+            ProviderId = "anthropic-signature-replay"
+        };
 
         var events = await ProviderAdapterTestFactory.CollectAsync(
             fixture.Adapter,
-            ProviderAdapterTestFactory.CreateRequest(),
+            request,
             _testContext.CancellationToken);
 
-        var extensions = events
+        Assert.AreEqual(
+            "think",
+            string.Concat(events.OfType<ReasoningDeltaProviderEvent>().Select(static item => item.Delta)));
+        Assert.IsEmpty(events
             .OfType<ReasoningDeltaProviderEvent>()
-            .SelectMany(static reasoning => reasoning.ProviderExtensions ?? [])
-            .ToArray();
-        var signature = Assert.ContainsSingle(extensions);
-        Assert.AreEqual("provider.anthropic", signature.Namespace);
-        Assert.AreEqual(ProviderExtensionPolicy.ReasoningSignatureName, signature.Name);
-        Assert.AreEqual("anthropic-signature-marker", signature.Value.GetString());
+            .SelectMany(static item => item.ProviderExtensions ?? []));
+        Assert.DoesNotContain(marker, server.Requests[0].Body, StringComparison.Ordinal);
+        Assert.ContainsSingle(events.OfType<InvocationCompletedProviderEvent>());
+
+        var followUp = request with
+        {
+            Messages =
+            [
+                new RuntimeProviderMessage(
+                    RuntimeProviderRoles.Assistant,
+                    [new ReasoningContentBlock("think")]),
+                new RuntimeProviderMessage(
+                    RuntimeProviderRoles.User,
+                    [new TextContentBlock("continue")])
+            ]
+        };
+        var followEvents = await ProviderAdapterTestFactory.CollectAsync(
+            fixture.Adapter,
+            followUp,
+            _testContext.CancellationToken);
+
+        Assert.ContainsSingle(followEvents.OfType<InvocationCompletedProviderEvent>());
+        Assert.Contains(marker, server.Requests[1].Body, StringComparison.Ordinal);
+    }
+
+    [TestMethod]
+    [Timeout(10_000, CooperativeCancellation = true)]
+    public async Task AnthropicReasoningSignature_AboveExtensionLimitStillCompletesAndReplays()
+    {
+        var signature = new string('a', ProviderExtensionData.MaximumValueBytes + 64);
+        await using var server = await FakeProviderServer.StartAsync(
+            _ => ProviderProtocolScripts.AnthropicReasoningWithSignature("large-think", signature),
+            _testContext.CancellationToken);
+        using var fixture = ProviderAdapterTestFactory.Create(
+            ProviderAdapterKind.Anthropic,
+            server.BaseAddress);
+        var request = ProviderAdapterTestFactory.CreateRequest() with
+        {
+            ProviderId = "anthropic-large-signature"
+        };
+
+        var events = await ProviderAdapterTestFactory.CollectAsync(
+            fixture.Adapter,
+            request,
+            _testContext.CancellationToken);
+
+        Assert.IsEmpty(events.OfType<InvocationFailedProviderEvent>());
+        Assert.ContainsSingle(events.OfType<InvocationCompletedProviderEvent>());
+        Assert.DoesNotContain(signature, server.Requests[0].Body, StringComparison.Ordinal);
+
+        var followUp = request with
+        {
+            Messages =
+            [
+                new RuntimeProviderMessage(
+                    RuntimeProviderRoles.Assistant,
+                    [new ReasoningContentBlock("large-think")]),
+                new RuntimeProviderMessage(
+                    RuntimeProviderRoles.User,
+                    [new TextContentBlock("continue")])
+            ]
+        };
+        await ProviderAdapterTestFactory.CollectAsync(
+            fixture.Adapter,
+            followUp,
+            _testContext.CancellationToken);
+
+        Assert.Contains(signature, server.Requests[1].Body, StringComparison.Ordinal);
+    }
+
+    [TestMethod]
+    [Timeout(10_000, CooperativeCancellation = true)]
+    public async Task AnthropicSplitReasoning_ReplaysSignatureForConcatenatedMeetingBlock()
+    {
+        const string signature = "sig-nature";
+        await using var server = await FakeProviderServer.StartAsync(
+            _ => ProviderProtocolScripts.AnthropicSplitReasoning("thi", "nk", "sig-", "nature"),
+            _testContext.CancellationToken);
+        using var fixture = ProviderAdapterTestFactory.Create(
+            ProviderAdapterKind.Anthropic,
+            server.BaseAddress);
+        var request = ProviderAdapterTestFactory.CreateRequest() with
+        {
+            ProviderId = "anthropic-meeting-split"
+        };
+
+        var events = await ProviderAdapterTestFactory.CollectAsync(
+            fixture.Adapter,
+            request,
+            _testContext.CancellationToken);
+
+        Assert.AreEqual(
+            "think",
+            string.Concat(events.OfType<ReasoningDeltaProviderEvent>().Select(static item => item.Delta)));
+        Assert.IsEmpty(events.OfType<InvocationFailedProviderEvent>());
+
+        var followUp = request with
+        {
+            Messages =
+            [
+                new RuntimeProviderMessage(
+                    RuntimeProviderRoles.Assistant,
+                    [new ReasoningContentBlock("think")]),
+                new RuntimeProviderMessage(
+                    RuntimeProviderRoles.User,
+                    [new TextContentBlock("continue")])
+            ]
+        };
+        await ProviderAdapterTestFactory.CollectAsync(
+            fixture.Adapter,
+            followUp,
+            _testContext.CancellationToken);
+
+        Assert.Contains(signature, server.Requests[1].Body, StringComparison.Ordinal);
+    }
+
+    [TestMethod]
+    [Timeout(10_000, CooperativeCancellation = true)]
+    public async Task OpenAIEncryptedReasoning_ReplaysWithoutStreamingTheSignature()
+    {
+        const string marker = "openai-encrypted-marker";
+        await using var server = await FakeProviderServer.StartAsync(
+            _ => ProviderProtocolScripts.OpenAIEncryptedReasoning(marker),
+            _testContext.CancellationToken);
+        using var fixture = ProviderAdapterTestFactory.Create(
+            ProviderAdapterKind.OpenAI,
+            server.BaseAddress);
+        var request = ProviderAdapterTestFactory.CreateRequest() with
+        {
+            ProviderId = "openai-signature-replay"
+        };
+
+        var events = await ProviderAdapterTestFactory.CollectAsync(
+            fixture.Adapter,
+            request,
+            _testContext.CancellationToken);
+
+        Assert.AreEqual(
+            "think",
+            string.Concat(events.OfType<ReasoningDeltaProviderEvent>().Select(static item => item.Delta)));
+        Assert.IsEmpty(events.OfType<InvocationFailedProviderEvent>());
+        Assert.DoesNotContain(marker, server.Requests[0].Body, StringComparison.Ordinal);
+
+        var followUp = request with
+        {
+            Messages =
+            [
+                new RuntimeProviderMessage(
+                    RuntimeProviderRoles.Assistant,
+                    [new ReasoningContentBlock("think")]),
+                new RuntimeProviderMessage(
+                    RuntimeProviderRoles.User,
+                    [new TextContentBlock("continue")])
+            ]
+        };
+        await ProviderAdapterTestFactory.CollectAsync(
+            fixture.Adapter,
+            followUp,
+            _testContext.CancellationToken);
+
+        Assert.Contains(marker, server.Requests[1].Body, StringComparison.Ordinal);
     }
 
     private static OpenAICompatibleProviderAdapter CreateCompatibleProbeAdapter(

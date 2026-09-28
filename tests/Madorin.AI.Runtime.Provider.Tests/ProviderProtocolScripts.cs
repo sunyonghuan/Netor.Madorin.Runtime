@@ -101,6 +101,76 @@ internal static class ProviderProtocolScripts
         return FakeProviderResponse.EventStream(new FakeProviderChunk(payload));
     }
 
+    public static FakeProviderResponse OpenAIEncryptedReasoning(string encryptedContent)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(encryptedContent);
+        var payload =
+            "event: response.reasoning_summary_text.delta\n" +
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"sequence_number\":1,\"item_id\":\"reasoning-1\",\"output_index\":0,\"summary_index\":0,\"delta\":\"think\"}\n\n" +
+            "event: response.output_item.done\n" +
+            "data: {\"type\":\"response.output_item.done\",\"sequence_number\":2,\"output_index\":0,\"item\":{\"id\":\"reasoning-1\",\"type\":\"reasoning\",\"encrypted_content\":\"" +
+            encryptedContent +
+            "\",\"summary\":[]}}\n\n" +
+            "event: response.completed\n" +
+            "data: {\"type\":\"response.completed\",\"sequence_number\":3,\"response\":{\"id\":\"resp-reasoning\",\"object\":\"response\",\"created_at\":1,\"status\":\"completed\",\"error\":null,\"incomplete_details\":null,\"instructions\":null,\"max_output_tokens\":128,\"model\":\"test-model\",\"output\":[],\"parallel_tool_calls\":true,\"previous_response_id\":null,\"reasoning\":{\"effort\":\"medium\",\"summary\":\"auto\"},\"store\":false,\"temperature\":null,\"text\":{\"format\":{\"type\":\"text\"}},\"tool_choice\":\"auto\",\"tools\":[],\"top_p\":1.0,\"truncation\":\"disabled\",\"usage\":{\"input_tokens\":5,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens\":1,\"output_tokens_details\":{\"reasoning_tokens\":1},\"total_tokens\":6},\"metadata\":{}}}\n\n" +
+            "data: [DONE]\n\n";
+        return FakeProviderResponse.EventStream(new FakeProviderChunk(payload));
+    }
+
+    public static FakeProviderResponse AnthropicSplitReasoning(
+        string firstThinking,
+        string secondThinking,
+        string firstSignature,
+        string secondSignature)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(firstThinking);
+        ArgumentException.ThrowIfNullOrEmpty(secondThinking);
+        ArgumentException.ThrowIfNullOrEmpty(firstSignature);
+        ArgumentException.ThrowIfNullOrEmpty(secondSignature);
+        var payload =
+            "event: message_start\n" +
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-reasoning\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"test-model\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n" +
+            "event: content_block_start\n" +
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n" +
+            "event: content_block_delta\n" +
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"" + firstThinking + "\"}}\n\n" +
+            "event: content_block_delta\n" +
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"" + secondThinking + "\"}}\n\n" +
+            "event: content_block_delta\n" +
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"" + firstSignature + "\"}}\n\n" +
+            "event: content_block_delta\n" +
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"" + secondSignature + "\"}}\n\n" +
+            "event: content_block_stop\n" +
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
+            "event: message_delta\n" +
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}\n\n" +
+            "event: message_stop\n" +
+            "data: {\"type\":\"message_stop\"}\n\n";
+        return FakeProviderResponse.EventStream(new FakeProviderChunk(payload));
+    }
+
+    public static FakeProviderResponse AnthropicReasoningWithSignature(string thinking, string signature)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(thinking);
+        ArgumentException.ThrowIfNullOrEmpty(signature);
+        var payload =
+            "event: message_start\n" +
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-reasoning\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"test-model\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n" +
+            "event: content_block_start\n" +
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n" +
+            "event: content_block_delta\n" +
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"" + thinking + "\"}}\n\n" +
+            "event: content_block_delta\n" +
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"" + signature + "\"}}\n\n" +
+            "event: content_block_stop\n" +
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
+            "event: message_delta\n" +
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}\n\n" +
+            "event: message_stop\n" +
+            "data: {\"type\":\"message_stop\"}\n\n";
+        return FakeProviderResponse.EventStream(new FakeProviderChunk(payload));
+    }
+
     private const string CompatibleText =
         "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hel\"},\"finish_reason\":null}]}\n\n" +
         "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"},\"finish_reason\":null}]}\n\n" +
@@ -163,7 +233,9 @@ internal static class ProviderProtocolScripts
         "event: content_block_delta\n" +
         "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"think\"}}\n\n" +
         "event: content_block_delta\n" +
-        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"anthropic-signature-marker\"}}\n\n" +
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"anthropic-\"}}\n\n" +
+        "event: content_block_delta\n" +
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"signature-marker\"}}\n\n" +
         "event: content_block_stop\n" +
         "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
         "event: message_delta\n" +

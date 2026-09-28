@@ -411,7 +411,7 @@ internal sealed class MeetingInvocationExecutor(
             ct).ConfigureAwait(false);
     }
 
-    private static void AccumulateContent(
+    internal static void AccumulateContent(
         List<ContentBlock> content,
         RuntimeProviderEvent providerEvent)
     {
@@ -429,9 +429,23 @@ internal sealed class MeetingInvocationExecutor(
 
                 break;
             case ReasoningDeltaProviderEvent reasoning:
-                content.Add(new ReasoningContentBlock(
-                    reasoning.Delta,
-                    reasoning.ProviderExtensions));
+                if (content.LastOrDefault() is ReasoningContentBlock previousReasoning)
+                {
+                    content[^1] = previousReasoning with
+                    {
+                        Content = previousReasoning.Content + reasoning.Delta,
+                        ProviderExtensions = MergeProviderExtensions(
+                            previousReasoning.ProviderExtensions,
+                            reasoning.ProviderExtensions)
+                    };
+                }
+                else
+                {
+                    content.Add(new ReasoningContentBlock(
+                        reasoning.Delta,
+                        reasoning.ProviderExtensions));
+                }
+
                 break;
             case ToolCallCompleteProviderEvent toolCall:
                 using (var arguments = JsonDocument.Parse(toolCall.ArgumentsJson))
@@ -445,6 +459,26 @@ internal sealed class MeetingInvocationExecutor(
 
                 break;
         }
+    }
+
+    private static ProviderExtensionData[]? MergeProviderExtensions(
+        ProviderExtensionData[]? existing,
+        ProviderExtensionData[]? additions)
+    {
+        if (additions is null or { Length: 0 })
+        {
+            return existing;
+        }
+
+        if (existing is null or { Length: 0 })
+        {
+            ProviderExtensionData.ValidateCollection(additions);
+            return additions;
+        }
+
+        ProviderExtensionData[] merged = [.. existing, .. additions];
+        ProviderExtensionData.ValidateCollection(merged);
+        return merged;
     }
 
     private static ToolResultContentBlock CreateToolResultContent(

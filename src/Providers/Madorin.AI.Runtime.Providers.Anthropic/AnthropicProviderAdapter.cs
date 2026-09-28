@@ -20,6 +20,8 @@ public sealed class AnthropicProviderAdapter :
     IRuntimeProviderCredentialUpdater,
     IDisposable
 {
+    private static readonly ReasoningSignatureCache Signatures = new();
+
     private readonly Func<string, IChatClient> _chatClientFactory;
     private readonly ConcurrentDictionary<string, IChatClient> _chatClients =
         new(StringComparer.Ordinal);
@@ -197,6 +199,10 @@ public sealed class AnthropicProviderAdapter :
             yield break;
         }
 
+        Signatures.Touch(request.ProviderId, request.Messages);
+        Signatures.Sweep();
+        var draft = new ReasoningSignatureDraft(appendFragments: true);
+
         foreach (var adjustment in GetProjectionAdjustments(request))
         {
             yield return adjustment;
@@ -206,6 +212,7 @@ public sealed class AnthropicProviderAdapter :
         try
         {
             var messages = await ConvertMessagesAsync(
+                request.ProviderId,
                 request.Messages,
                 request.Tools,
                 effectiveCt).ConfigureAwait(false);
@@ -259,7 +266,7 @@ public sealed class AnthropicProviderAdapter :
                 finishReason = currentFinishReason.ToString();
             }
 
-            foreach (var providerEvent in MapUpdate(request, update))
+            foreach (var providerEvent in MapUpdate(request, update, draft))
             {
                 if (providerEvent is UsageUpdatedProviderEvent usage)
                 {
@@ -284,6 +291,9 @@ public sealed class AnthropicProviderAdapter :
             yield return new InvocationFailedProviderEvent(request.InvocationId, failure);
             yield break;
         }
+
+        draft.Commit(Signatures, request.ProviderId);
+        Signatures.Sweep();
 
         yield return latestUsage
             ?? new UsageUpdatedProviderEvent(
@@ -357,6 +367,7 @@ public sealed class AnthropicProviderAdapter :
     }
 
     private async ValueTask<ChatMessage[]> ConvertMessagesAsync(
+        string providerId,
         RuntimeProviderMessage[] source,
         ToolDescriptor[]? tools,
         CancellationToken ct)
@@ -377,7 +388,7 @@ public sealed class AnthropicProviderAdapter :
                     case ReasoningContentBlock reasoning:
                         content.Add(new TextReasoningContent(reasoning.Content)
                         {
-                            ProtectedData = ProviderExtensionPolicy.GetReasoningSignature(reasoning, "anthropic")
+                            ProtectedData = Signatures.TryGet(providerId, reasoning.Content)
                         });
                         break;
                     case ToolCallContentBlock toolCall:
@@ -484,38 +495,29 @@ public sealed class AnthropicProviderAdapter :
 
     private static IEnumerable<RuntimeProviderEvent> MapUpdate(
         RuntimeProviderRequest request,
-        MafProviderResponseUpdate update)
+        MafProviderResponseUpdate update,
+        ReasoningSignatureDraft draft)
     {
         foreach (var content in update.Contents)
         {
             switch (content)
             {
-                case TextReasoningContent reasoning
-                    when !string.IsNullOrEmpty(reasoning.Text)
-                         || !string.IsNullOrEmpty(reasoning.ProtectedData):
-                    ProviderExtensionData[]? extensions = null;
-                    if (!string.IsNullOrEmpty(reasoning.ProtectedData))
+                case TextReasoningContent reasoning:
+                    var reasoningText = draft.Add(reasoning.Text, reasoning.ProtectedData);
+                    if (reasoningText is not null)
                     {
-                        extensions =
-                        [
-                            ProviderExtensionData.CreateString(
-                                ProviderExtensionPolicy.GetNamespace("anthropic"),
-                                ProviderExtensionPolicy.ReasoningSignatureName,
-                                reasoning.ProtectedData)
-                        ];
+                        yield return new ReasoningDeltaProviderEvent(request.InvocationId, reasoningText);
                     }
 
-                    yield return new ReasoningDeltaProviderEvent(
-                        request.InvocationId,
-                        reasoning.Text,
-                        extensions);
                     break;
 
                 case TextContent text when !string.IsNullOrEmpty(text.Text):
+                    draft.EndBlock();
                     yield return new TextDeltaProviderEvent(request.InvocationId, text.Text);
                     break;
 
                 case FunctionCallContent functionCall:
+                    draft.EndBlock();
                     var callId = functionCall.CallId ?? string.Empty;
                     var name = functionCall.Name ?? string.Empty;
                     var toolId = ResolveToolId(request.Tools, name);

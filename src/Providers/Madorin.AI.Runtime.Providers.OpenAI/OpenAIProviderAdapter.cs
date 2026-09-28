@@ -22,6 +22,8 @@ public sealed class OpenAIProviderAdapter :
     IRuntimeProviderCredentialUpdater,
     IDisposable
 {
+    private static readonly ReasoningSignatureCache Signatures = new();
+
     private readonly Func<string, IChatClient> _chatClientFactory;
     private readonly ConcurrentDictionary<string, IChatClient> _chatClients =
         new(StringComparer.Ordinal);
@@ -228,6 +230,10 @@ public sealed class OpenAIProviderAdapter :
             yield break;
         }
 
+        Signatures.Touch(request.ProviderId, request.Messages);
+        Signatures.Sweep();
+        var draft = new ReasoningSignatureDraft(appendFragments: false);
+
         foreach (var adjustment in GetProjectionAdjustments(request))
         {
             yield return adjustment;
@@ -237,6 +243,7 @@ public sealed class OpenAIProviderAdapter :
         try
         {
             var messages = await ConvertMessagesAsync(
+                request.ProviderId,
                 request.Messages,
                 request.Tools,
                 effectiveCt).ConfigureAwait(false);
@@ -290,7 +297,7 @@ public sealed class OpenAIProviderAdapter :
                 finishReason = currentFinishReason.ToString();
             }
 
-            foreach (var providerEvent in MapUpdate(request, update))
+            foreach (var providerEvent in MapUpdate(request, update, draft))
             {
                 hasUsage |= providerEvent is UsageUpdatedProviderEvent;
                 yield return providerEvent;
@@ -310,6 +317,9 @@ public sealed class OpenAIProviderAdapter :
             yield return new InvocationFailedProviderEvent(request.InvocationId, failure);
             yield break;
         }
+
+        draft.Commit(Signatures, request.ProviderId);
+        Signatures.Sweep();
 
         if (!hasUsage)
         {
@@ -386,6 +396,7 @@ public sealed class OpenAIProviderAdapter :
     }
 
     private async ValueTask<ChatMessage[]> ConvertMessagesAsync(
+        string providerId,
         RuntimeProviderMessage[] source,
         ToolDescriptor[]? tools,
         CancellationToken ct)
@@ -406,7 +417,7 @@ public sealed class OpenAIProviderAdapter :
                     case ReasoningContentBlock reasoning:
                         content.Add(new TextReasoningContent(reasoning.Content)
                         {
-                            ProtectedData = ProviderExtensionPolicy.GetReasoningSignature(reasoning, "openai")
+                            ProtectedData = Signatures.TryGet(providerId, reasoning.Content)
                         });
                         break;
                     case ToolCallContentBlock toolCall:
@@ -513,38 +524,29 @@ public sealed class OpenAIProviderAdapter :
 
     private static IEnumerable<RuntimeProviderEvent> MapUpdate(
         RuntimeProviderRequest request,
-        MafProviderResponseUpdate update)
+        MafProviderResponseUpdate update,
+        ReasoningSignatureDraft draft)
     {
         foreach (var content in update.Contents)
         {
             switch (content)
             {
-                case TextReasoningContent reasoning
-                    when !string.IsNullOrEmpty(reasoning.Text)
-                         || !string.IsNullOrEmpty(reasoning.ProtectedData):
-                    ProviderExtensionData[]? extensions = null;
-                    if (!string.IsNullOrEmpty(reasoning.ProtectedData))
+                case TextReasoningContent reasoning:
+                    var reasoningText = draft.Add(reasoning.Text, reasoning.ProtectedData);
+                    if (reasoningText is not null)
                     {
-                        extensions =
-                        [
-                            ProviderExtensionData.CreateString(
-                                ProviderExtensionPolicy.GetNamespace("openai"),
-                                ProviderExtensionPolicy.ReasoningSignatureName,
-                                reasoning.ProtectedData)
-                        ];
+                        yield return new ReasoningDeltaProviderEvent(request.InvocationId, reasoningText);
                     }
 
-                    yield return new ReasoningDeltaProviderEvent(
-                        request.InvocationId,
-                        reasoning.Text,
-                        extensions);
                     break;
 
                 case TextContent text when !string.IsNullOrEmpty(text.Text):
+                    draft.EndBlock();
                     yield return new TextDeltaProviderEvent(request.InvocationId, text.Text);
                     break;
 
                 case FunctionCallContent functionCall:
+                    draft.EndBlock();
                     var argumentsJson = SerializeArguments(functionCall.Arguments);
                     var callId = functionCall.CallId ?? string.Empty;
                     var name = functionCall.Name ?? string.Empty;
