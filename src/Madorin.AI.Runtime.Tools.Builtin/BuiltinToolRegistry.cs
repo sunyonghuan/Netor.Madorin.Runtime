@@ -54,7 +54,9 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
     /// 计划工具说明。步骤字段必须出现在这里，否则模型会猜 subSteps、children、agentId。
     /// </summary>
     private const string WorkSetPlanDescription =
-        "Publishes the work plan after the user has explicitly approved execution. "
+        "Publishes the agreed work plan and starts execution immediately. " +
+        "Call it once the scheme is concrete and the user has agreed to start. " +
+        "After it succeeds, do not ask the user to confirm again. "
         + "Use one shape. Shape A: planVersion, goal, and a flat steps array. "
         + "Every step has stepId and goal. A leaf sets targetAgentId to an AvailableAgents id other than general-manager or project-lead. "
         + "To group work, put the parent and its children in that same array and set each child's parentStepId to the parent's stepId. "

@@ -242,7 +242,8 @@ public static class WorkPlanValidator
         {
             throw new ArgumentException(
                 $"Step '{step.StepId}' targets '{step.TargetAgentId}', which cannot execute steps. "
-                + "Set targetAgentId to a specialist id from AvailableAgents.",
+                + "Omit targetAgentId and set ephemeralName plus ephemeralSystemPrompt. "
+                + "Do not use general-manager or project-lead.",
                 nameof(plan));
         }
 

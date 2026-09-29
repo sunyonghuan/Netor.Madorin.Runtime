@@ -478,6 +478,28 @@ public sealed class WorkModeOrchestratorTests
     }
 
     [TestMethod]
+    public async Task ConfirmControl_EntersExecutionWithoutAnotherManagerTurn()
+    {
+        var result = await RunMultiTurnAsync(
+            [
+                new WorkTurnScript("run-1", "先把登录页的范围谈清楚。", "做一个登录页"),
+                new WorkTurnScript("run-2", "请再确认一次，先不要执行。", "__work_user_confirm__")
+            ]);
+
+        Assert.AreEqual(RunStatus.Completed, result.RunStatus);
+        Assert.AreEqual(WorkSessionStatus.Completed, result.WorkSessionStatus);
+        Assert.HasCount(1, result.PlanRevisions);
+        Assert.HasCount(1, result.WorkSteps);
+        Assert.AreEqual("做一个登录页", result.WorkSteps[0].Goal);
+        Assert.AreEqual(WorkStepLifecycleStatus.Completed, result.WorkSteps[0].Status);
+        Assert.HasCount(1, result.InvokedAgentIds.Where(static id => id == "manager").ToArray());
+        Assert.IsTrue(result.InvokedAgentIds.Any(static id =>
+            id.StartsWith("ephemeral:", StringComparison.Ordinal)));
+        Assert.IsTrue(result.EventBatches[1].Any(static item =>
+            item.MessageType == MessageTypes.WorkPlanUpdated));
+    }
+
+    [TestMethod]
     public async Task InvalidStructuredPlan_DoesNotFallbackToExecutableStep()
     {
         const string invalidPlanJson =

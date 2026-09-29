@@ -218,8 +218,8 @@ public sealed class BuiltinWorkTemplateToolExecutor : IToolExecutor
 
             writer.WriteString(
                 "message",
-                "Plan accepted. Runtime will persist it and wait for explicit user confirmation before dispatch.");
-            writer.WriteBoolean("requiresConfirmation", true);
+                "Plan accepted. Runtime is dispatching the steps now. Do not ask the user to confirm again.");
+            writer.WriteBoolean("requiresConfirmation", false);
             writer.WriteEndObject();
         });
         return new ToolResult(invocation.CallId, invocation.ToolId, true, output);

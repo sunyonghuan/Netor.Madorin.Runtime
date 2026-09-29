@@ -282,6 +282,35 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
 
         WorkPlanDraft plan;
         string? parentInvocationId = null;
+        // 确认执行是按钮，不是再问一轮总经理。再问就会按旧提示词继续征求确认。
+        if (IsControlToken(goal, WorkUserConfirm))
+        {
+            var taskGoal = await ReadLastDiscussedGoalAsync(sessionId, ct).ConfigureAwait(false);
+            plan = WorkPlanValidator.NormalizePlanRevision(
+                FallbackExecutionPlan(
+                    string.IsNullOrWhiteSpace(taskGoal) ? "完成已经谈定的任务。" : taskGoal),
+                publishedPlanVersion);
+            plan = WorkPlanValidator.ValidateOrThrow(plan, options);
+            parentInvocationId = "confirm:" + runId;
+            await AppendPlainDialogueAsync(
+                sessionId,
+                parentInvocationId,
+                "user",
+                "user",
+                "已确认开始执行。",
+                ct).ConfigureAwait(false);
+            yield return await PublishWorkPlanAsync(
+                sessionId,
+                runId,
+                runtimeInstanceId,
+                sequence,
+                parentInvocationId,
+                options,
+                policy,
+                plan,
+                ct).ConfigureAwait(false);
+        }
+        else
         {
             _capturedSetPlanDraft = null;
             var managerInvocation = await CreateInvocationRequestAsync(
@@ -382,19 +411,10 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 }
             }
 
-            // 按钮是控制信号，不是口语。重新沟通本轮不发布。确认后必须进入执行。
-            var userConfirmed = string.Equals(planningGoal.Trim(), WorkUserConfirm, StringComparison.Ordinal);
-            var userRediscus = string.Equals(planningGoal.Trim(), WorkUserRedisuss, StringComparison.Ordinal);
-            if (userRediscus)
+            // 重新沟通是按钮信号，本轮不发布。确认执行在进入模型之前已经派发。
+            if (IsControlToken(goal, WorkUserRedisuss))
             {
                 validatedPlan = null;
-                validationError = null;
-            }
-            else if (userConfirmed && validatedPlan is null)
-            {
-                var taskGoal = await ReadLastDiscussedGoalAsync(sessionId, ct).ConfigureAwait(false);
-                validatedPlan = FallbackExecutionPlan(
-                    string.IsNullOrWhiteSpace(taskGoal) ? "完成已经谈定的任务。" : taskGoal);
                 validationError = null;
             }
 
@@ -431,42 +451,17 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
 
             plan = WorkPlanValidator.NormalizePlanRevision(validatedPlan, publishedPlanVersion);
             plan = WorkPlanValidator.ValidateOrThrow(plan, options);
-            var canonicalMessages = await AppendPlanRevisionAsync(
-                sessionId,
-                managerInvocation.InvocationId,
-                options.GeneralManager.AgentId,
-                plan,
-                ct).ConfigureAwait(false);
-            await _workRepo.SavePlanRevisionAsync(
+            parentInvocationId = managerInvocation.InvocationId;
+            yield return await PublishWorkPlanAsync(
                 sessionId,
                 runId,
-                options.GeneralManager.AgentId,
-                policy,
-                options.EffectiveContextPolicy,
-                plan,
-                canonicalMessages.PlanMessageId,
-                canonicalMessages.StepMessageIds,
-                ct).ConfigureAwait(false);
-
-            var workPlanEvent = MapToWorkPlanUpdatedEvent(plan);
-            var eventJson = JsonSerializer.Serialize(
-                workPlanEvent,
-                RuntimeJsonContext.Default.WorkPlanUpdatedEvent);
-            var gsn = await _outbox.AppendAsync(
-                runId,
-                sequence.Current,
-                MessageTypes.WorkPlanUpdated,
-                eventJson,
-                ct).ConfigureAwait(false);
-
-            yield return CreateWorkPlanUpdatedEnvelope(
                 runtimeInstanceId,
-                gsn,
-                runId,
-                sequence.Take(),
-                workPlanEvent);
-
-            // 模型交出合法计划后直接执行。同意与否由它在本轮判断。
+                sequence,
+                managerInvocation.InvocationId,
+                options,
+                policy,
+                plan,
+                ct).ConfigureAwait(false);
         }
 
         await _workRepo.UpdateSessionStatusAsync(
@@ -1802,6 +1797,67 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         {
             return string.Empty;
         }
+    }
+
+    /// <summary>落库并广播已接受的计划。确认按钮和模型交出的合法计划走同一条。</summary>
+    private async Task<RuntimeEventEnvelope> PublishWorkPlanAsync(
+        string sessionId,
+        string runId,
+        string runtimeInstanceId,
+        RunSequenceAllocator sequence,
+        string invocationId,
+        WorkModeOptions options,
+        WorkflowPolicy policy,
+        WorkPlanDraft plan,
+        CancellationToken ct)
+    {
+        var canonicalMessages = await AppendPlanRevisionAsync(
+            sessionId,
+            invocationId,
+            options.GeneralManager.AgentId,
+            plan,
+            ct).ConfigureAwait(false);
+        await _workRepo.SavePlanRevisionAsync(
+            sessionId,
+            runId,
+            options.GeneralManager.AgentId,
+            policy,
+            options.EffectiveContextPolicy,
+            plan,
+            canonicalMessages.PlanMessageId,
+            canonicalMessages.StepMessageIds,
+            ct).ConfigureAwait(false);
+
+        var workPlanEvent = MapToWorkPlanUpdatedEvent(plan);
+        var eventJson = JsonSerializer.Serialize(
+            workPlanEvent,
+            RuntimeJsonContext.Default.WorkPlanUpdatedEvent);
+        var gsn = await _outbox.AppendAsync(
+            runId,
+            sequence.Current,
+            MessageTypes.WorkPlanUpdated,
+            eventJson,
+            ct).ConfigureAwait(false);
+        return CreateWorkPlanUpdatedEnvelope(
+            runtimeInstanceId,
+            gsn,
+            runId,
+            sequence.Take(),
+            workPlanEvent);
+    }
+
+    /// <summary>按钮信号可能带后续插话，只认第一行。</summary>
+    private static bool IsControlToken(string goal, string token)
+    {
+        var trimmed = goal.Trim();
+        if (string.Equals(trimmed, token, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        var lineBreak = trimmed.IndexOf('\n');
+        var firstLine = lineBreak < 0 ? trimmed : trimmed[..lineBreak].Trim();
+        return string.Equals(firstLine, token, StringComparison.Ordinal);
     }
 
     private async Task<(string PlanMessageId, IReadOnlyDictionary<string, string> StepMessageIds)>
