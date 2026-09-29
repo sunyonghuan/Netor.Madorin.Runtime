@@ -30,6 +30,8 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
     private const string StepProjectionVersion = "work-step-v2";
     private const string WorkSetPlanToolId = "mcli_work_set_plan";
     private const string PendingContinuationGoal = "__work_continue_pending__";
+    private const string WorkUserConfirm = "__work_user_confirm__";
+    private const string WorkUserRedisuss = "__work_user_redisuss__";
 
     private readonly Func<string, IRuntimeProviderAdapter> _providerFactory;
     private WorkPlanDraft? _capturedSetPlanDraft;
@@ -378,6 +380,22 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                     validatedPlan = null;
                     validationError = ex.Message;
                 }
+            }
+
+            // 按钮是控制信号，不是口语。重新沟通本轮不发布。确认后必须进入执行。
+            var userConfirmed = string.Equals(planningGoal.Trim(), WorkUserConfirm, StringComparison.Ordinal);
+            var userRediscus = string.Equals(planningGoal.Trim(), WorkUserRedisuss, StringComparison.Ordinal);
+            if (userRediscus)
+            {
+                validatedPlan = null;
+                validationError = null;
+            }
+            else if (userConfirmed && validatedPlan is null)
+            {
+                var taskGoal = await ReadLastDiscussedGoalAsync(sessionId, ct).ConfigureAwait(false);
+                validatedPlan = FallbackExecutionPlan(
+                    string.IsNullOrWhiteSpace(taskGoal) ? "完成已经谈定的任务。" : taskGoal);
+                validationError = null;
             }
 
             // 调用了 set_plan 且计划合法才发布。没调用就是讨论，不靠口令判断。
@@ -1578,9 +1596,16 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             messages.Add(new RuntimeProviderMessage(role, [new TextContentBlock(text)]));
         }
 
-        var currentAlreadyStored = !string.IsNullOrWhiteSpace(currentUserText)
-            && IsLastUserText(messages, currentUserText);
+        var shownUserText = ShownPlanningUserText(currentUserText);
+        var currentAlreadyStored = !string.IsNullOrWhiteSpace(shownUserText)
+            && IsLastUserText(messages, shownUserText);
         var status = BuildPlanningStatus(options, publishedPlanVersion, priorResume);
+        if (string.Equals(currentUserText.Trim(), WorkUserConfirm, StringComparison.Ordinal))
+        {
+            status = string.IsNullOrWhiteSpace(status)
+                ? "decision: confirm"
+                : status + "\ndecision: confirm";
+        }
         if (!string.IsNullOrWhiteSpace(status))
         {
             messages.Add(new RuntimeProviderMessage(
@@ -1588,18 +1613,18 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 [new TextContentBlock(status)]));
         }
 
-        if (!string.IsNullOrWhiteSpace(currentUserText) && !currentAlreadyStored)
+        if (!string.IsNullOrWhiteSpace(shownUserText) && !currentAlreadyStored)
         {
             messages.Add(new RuntimeProviderMessage(
                 RuntimeProviderRoles.User,
-                [new TextContentBlock(currentUserText)]));
+                [new TextContentBlock(shownUserText)]));
         }
 
         if (messages.Count == 0)
         {
             messages.Add(new RuntimeProviderMessage(
                 RuntimeProviderRoles.User,
-                [new TextContentBlock(string.IsNullOrWhiteSpace(currentUserText) ? string.Empty : currentUserText)]));
+                [new TextContentBlock(string.IsNullOrWhiteSpace(shownUserText) ? string.Empty : shownUserText)]));
         }
 
         return messages.ToArray();
@@ -1667,6 +1692,55 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         }
 
         return builder.ToString().TrimEnd();
+    }
+
+    private static string ShownPlanningUserText(string currentUserText)
+        => currentUserText.Trim() switch
+        {
+            WorkUserConfirm => "已确认开始执行。",
+            WorkUserRedisuss => "继续沟通方案，先不执行。",
+            _ => currentUserText,
+        };
+
+    private async Task<string> ReadLastDiscussedGoalAsync(string sessionId, CancellationToken ct)
+    {
+        var records = await _store.ReadAllAsync(sessionId, ct).ConfigureAwait(false);
+        for (var index = records.Count - 1; index >= 0; index--)
+        {
+            var record = records[index];
+            if (!string.Equals(record.Role, "user", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var text = ExtractDialogueText(record.Content).Trim();
+            if (string.IsNullOrWhiteSpace(text)
+                || text is WorkUserConfirm or WorkUserRedisuss or PendingContinuationGoal)
+            {
+                continue;
+            }
+
+            return text;
+        }
+
+        return string.Empty;
+    }
+
+    private static WorkPlanDraft FallbackExecutionPlan(string goal)
+    {
+        const string stepId = "step-1";
+        return new WorkPlanDraft(
+            "1",
+            goal,
+            [
+                new WorkPlanStepDraft(
+                    stepId,
+                    goal,
+                    "ephemeral:" + stepId,
+                    Title: "执行",
+                    EphemeralName: "执行专员",
+                    EphemeralSystemPrompt: "按已经谈定的方案完成本步，并给出可验收的结果。"),
+            ]);
     }
 
     private static bool IsLastUserText(List<RuntimeProviderMessage> messages, string text)
