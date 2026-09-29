@@ -1526,7 +1526,11 @@ public sealed partial class BuiltinFsToolExecutor
                 }
                 default:
                     throw new ArgumentException(
-                        $"Edit operation '{type}' is not supported.");
+                        $"Edit operation type '{type}' is not supported. "
+                        + "type must be replace, delete, insertBefore, or insertAfter. "
+                        + "replace and delete require startLine and endLine. "
+                        + "replace, insertBefore, and insertAfter require content. "
+                        + "insertBefore and insertAfter require line.");
             }
         }
 

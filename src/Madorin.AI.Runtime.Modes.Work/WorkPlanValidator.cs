@@ -269,12 +269,29 @@ public static class WorkPlanValidator
             return;
         }
 
-        if (string.IsNullOrWhiteSpace(step.TargetAgentId)
-            || !agentIds.Contains(step.TargetAgentId)
-            || blockedExecutors.Contains(step.TargetAgentId))
+        if (string.IsNullOrWhiteSpace(step.TargetAgentId))
         {
             throw new ArgumentException(
-                $"Step '{step.StepId}' targets unknown agent '{step.TargetAgentId}'.",
+                $"Step '{step.StepId}' is a leaf and targetAgentId is empty. "
+                + "Set targetAgentId to a specialist id from AvailableAgents. "
+                + "A parent omits targetAgentId only when another step sets parentStepId to this stepId. "
+                + "general-manager and project-lead cannot execute steps.",
+                nameof(plan));
+        }
+
+        if (blockedExecutors.Contains(step.TargetAgentId))
+        {
+            throw new ArgumentException(
+                $"Step '{step.StepId}' targets '{step.TargetAgentId}', which cannot execute steps. "
+                + "Set targetAgentId to a specialist id from AvailableAgents.",
+                nameof(plan));
+        }
+
+        if (!agentIds.Contains(step.TargetAgentId))
+        {
+            throw new ArgumentException(
+                $"Step '{step.StepId}' targets unknown agent '{step.TargetAgentId}'. "
+                + "targetAgentId must equal an AvailableAgents id.",
                 nameof(plan));
         }
     }

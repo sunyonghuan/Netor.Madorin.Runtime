@@ -50,6 +50,25 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
     public const string WorkLoadPlanFromGroupchatToolId = "mcli_work_load_plan_from_groupchat";
     public const string WorkGetRecentCompletedTaskPlanToolId = "mcli_work_get_recent_completed_task_plan";
 
+    /// <summary>
+    /// 计划工具说明。步骤字段必须出现在这里，否则模型会猜 subSteps、children、agentId。
+    /// </summary>
+    private const string WorkSetPlanDescription =
+        "Publishes the work plan after the user has explicitly approved execution. "
+        + "Use one shape. Shape A: planVersion, goal, and a flat steps array. "
+        + "Every step has stepId and goal. A leaf sets targetAgentId to an AvailableAgents id other than general-manager or project-lead. "
+        + "To group work, put the parent and its children in that same array and set each child's parentStepId to the parent's stepId. "
+        + "Parent steps are not dispatched and omit targetAgentId. "
+        + "Do not nest subSteps, children, or steps inside a step. "
+        + "Shape B: goal and main_steps[].title plus main_steps[].sub_steps[]. "
+        + "Each sub_step has title, acceptance_criteria, and targetAgentId. "
+        + "The only agent field is targetAgentId. "
+        + "When no roster agent fits, omit targetAgentId and set ephemeralName plus ephemeralSystemPrompt. "
+        + "Set investigate true when later steps must wait for this step's result.";
+
+    private const string WorkSetPlanInputSchema =
+        """{"type":"object","additionalProperties":true,"properties":{"planVersion":{"type":"string","description":"Plan revision. Use 1 the first time."},"previousPlanVersion":{"type":"string"},"goal":{"type":"string","description":"Outcome of the whole plan."},"summary":{"type":"string"},"steps":{"type":"array","description":"Flat list. Grouping is child.parentStepId = parent.stepId in this same array. Do not nest subSteps, children, or steps inside a step.","items":{"type":"object","additionalProperties":true,"required":["stepId","goal"],"properties":{"stepId":{"type":"string"},"goal":{"type":"string","description":"Deliverable and how to verify it."},"title":{"type":"string"},"targetAgentId":{"type":"string","description":"Required on a leaf. Must be an AvailableAgents id. general-manager and project-lead cannot execute steps. Omit on a parent that another step points at with parentStepId. The property name is targetAgentId."},"parentStepId":{"type":"string","description":"On a child, the parent stepId. This is the only way a step is recognized as a parent."},"depth":{"type":"integer"},"dependsOn":{"type":"array","items":{"type":"string"}},"ephemeralName":{"type":"string"},"ephemeralSystemPrompt":{"type":"string","description":"Together with ephemeralName, replaces targetAgentId when no roster agent fits."},"investigate":{"type":"boolean","description":"True when later steps must wait for this step's result."}}}},"main_steps":{"type":"array","description":"Alternate shape. Use this instead of steps. Each item requires sub_steps, spelled exactly sub_steps.","items":{"type":"object","additionalProperties":true,"required":["title","sub_steps"],"properties":{"title":{"type":"string"},"targetAgentId":{"type":"string","description":"Default agent id for sub_steps that omit targetAgentId."},"sub_steps":{"type":"array","items":{"type":"object","additionalProperties":true,"required":["title","acceptance_criteria"],"properties":{"title":{"type":"string"},"acceptance_criteria":{"type":"string"},"targetAgentId":{"type":"string","description":"Required unless ephemeralSystemPrompt is set. Property name is targetAgentId."},"ephemeralName":{"type":"string"},"ephemeralSystemPrompt":{"type":"string"},"investigate":{"type":"boolean"}}}}}}},"plan":{"type":"object","description":"Optional wrapper. Use the same planVersion, goal, and steps fields as the top level, including each step's stepId, goal, targetAgentId, and parentStepId.","properties":{"planVersion":{"type":"string"},"goal":{"type":"string"},"steps":{"type":"array","description":"Same item shape as the top-level steps array: stepId, goal, title, targetAgentId, parentStepId, depth, dependsOn, ephemeralName, ephemeralSystemPrompt, investigate.","items":{"type":"object","additionalProperties":true,"required":["stepId","goal"],"properties":{"stepId":{"type":"string"},"goal":{"type":"string"},"title":{"type":"string"},"targetAgentId":{"type":"string"},"parentStepId":{"type":"string"},"depth":{"type":"integer"},"dependsOn":{"type":"array","items":{"type":"string"}},"ephemeralName":{"type":"string"},"ephemeralSystemPrompt":{"type":"string"},"investigate":{"type":"boolean"}}}}}}}}""";
+
     private static readonly IReadOnlyList<string> WorkOnlyModes = Array.AsReadOnly(["work"]);
 
     private static readonly IReadOnlyList<ToolDescriptor> AdvertisedTools = Array.AsReadOnly<ToolDescriptor>(
@@ -145,8 +164,8 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
             FileEditToolId,
             "mcli",
             "Edit file",
-            "Applies line edits to a text file.",
-            """{"type":"object","properties":{"path":{"type":"string"},"encoding":{"type":"string","enum":["utf-8","utf-16le","utf-16be","gb2312","gbk","gb18030","ascii","latin1"]},"expectedHash":{"type":"string"},"operations":{"type":"array","minItems":1,"maxItems":100,"items":{"type":"object"}}},"required":["path","encoding","expectedHash","operations"],"additionalProperties":false}""",
+            "Applies 1 to 100 line edits. Read the file first and pass its sha256 as expectedHash. Each operations item has type: replace, delete, insertBefore, or insertAfter. replace and delete require startLine and endLine (1-based, inclusive). replace also requires content. insertBefore and insertAfter require line and content.",
+            """{"type":"object","properties":{"path":{"type":"string"},"encoding":{"type":"string","enum":["utf-8","utf-16le","utf-16be","gb2312","gbk","gb18030","ascii","latin1"]},"expectedHash":{"type":"string","description":"SHA-256 hex from mcli_fs_read or mcli_fs_inspect."},"operations":{"type":"array","minItems":1,"maxItems":100,"items":{"type":"object","additionalProperties":false,"required":["type"],"properties":{"type":{"type":"string","enum":["replace","delete","insertBefore","insertAfter"]},"startLine":{"type":"integer","minimum":1,"description":"Required for replace and delete. Inclusive, 1-based."},"endLine":{"type":"integer","minimum":1,"description":"Required for replace and delete. Inclusive, 1-based."},"line":{"type":"integer","minimum":1,"description":"Required for insertBefore and insertAfter. 1-based."},"content":{"type":"string","description":"Required for replace, insertBefore, and insertAfter."}}}}},"required":["path","encoding","expectedHash","operations"],"additionalProperties":false}""",
             """{"type":"object","properties":{"edited":{"type":"boolean"},"byteLength":{"type":"integer"},"sha256":{"type":"string"}},"required":["edited","byteLength","sha256"],"additionalProperties":false}""",
             Capabilities: ["filesystem.read", "filesystem.write"],
             Risk: ToolRiskLevel.Write,
@@ -348,8 +367,8 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
             WorkSetPlanToolId,
             "mcli",
             "Set work plan",
-            "Publishes steps after the user has explicitly approved execution. Use steps[]. A step is either targetAgentId from the roster, or ephemeralName plus ephemeralSystemPrompt. Parent steps group children and are not dispatched. Set investigate true when later steps must wait for this step's result.",
-            """{"type":"object","properties":{"planVersion":{"type":"string"},"goal":{"type":"string"},"steps":{"type":"array"},"main_steps":{"type":"array"},"previousPlanVersion":{"type":"string"},"summary":{"type":"string"},"plan":{"type":"object"}},"additionalProperties":true}""",
+            WorkSetPlanDescription,
+            WorkSetPlanInputSchema,
             """{"type":"object","properties":{"ok":{"type":"boolean"},"error":{"type":"string"},"message":{"type":"string"},"planVersion":{"type":"string"},"goal":{"type":"string"},"stepCount":{"type":"integer"},"plan":{"type":"object"},"requiresConfirmation":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}""",
             RiskLevel: "medium",
             RequiresApproval: false,
@@ -464,7 +483,7 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
     private static readonly IReadOnlyList<ToolDescriptor> Tools = Array.AsReadOnly(
         [.. AdvertisedTools, .. BuiltinToolAliasCatalog.Tools]);
 
-    public string CatalogVersion => "3.4.0";
+    public string CatalogVersion => "3.5.1";
 
     public IReadOnlyList<ToolDescriptor> GetTools() => Tools;
 

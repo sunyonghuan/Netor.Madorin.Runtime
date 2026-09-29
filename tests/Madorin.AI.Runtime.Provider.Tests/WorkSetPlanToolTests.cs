@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Contracts.Serialization;
 using Madorin.AI.Runtime.Tools.Abstractions;
 using Madorin.AI.Runtime.Tools.Builtin;
@@ -168,6 +169,142 @@ public sealed class WorkSetPlanToolTests
 
         AssertFailure(placeholder, "invalid_plan");
         AssertFailure(missingAcceptance, "acceptance_criteria");
+    }
+
+    [TestMethod]
+    public void Registry_SetPlan_SchemaNamesTheStepContract()
+    {
+        var tool = new BuiltinToolRegistry().GetTools()
+            .Single(static item => item.ToolId == BuiltinToolRegistry.WorkSetPlanToolId);
+
+        using var schema = JsonDocument.Parse(tool.InputSchemaJson);
+        var properties = schema.RootElement.GetProperty("properties");
+        var stepProperties = properties.GetProperty("steps").GetProperty("items").GetProperty("properties");
+        Assert.IsTrue(stepProperties.TryGetProperty("stepId", out _));
+        Assert.IsTrue(stepProperties.TryGetProperty("targetAgentId", out _));
+        Assert.IsTrue(stepProperties.TryGetProperty("parentStepId", out _));
+        var subStepProperties = properties
+            .GetProperty("main_steps")
+            .GetProperty("items")
+            .GetProperty("properties")
+            .GetProperty("sub_steps")
+            .GetProperty("items")
+            .GetProperty("properties");
+        Assert.IsTrue(subStepProperties.TryGetProperty("acceptance_criteria", out _));
+        Assert.IsTrue(subStepProperties.TryGetProperty("targetAgentId", out _));
+        StringAssert.Contains(tool.Description, "parentStepId");
+        StringAssert.Contains(tool.Description, "sub_steps");
+    }
+
+    [TestMethod]
+    public async Task SetPlan_NestedSubSteps_FlattensWithParentStepId()
+    {
+        var result = await ExecuteAsync(
+            """
+            {
+              "planVersion": "1",
+              "goal": "Delete the samples",
+              "steps": [
+                {
+                  "stepId": "1",
+                  "title": "删除",
+                  "goal": "删除测试文档",
+                  "subSteps": [
+                    {
+                      "title": "删除docx",
+                      "goal": "删除文档02到10",
+                      "targetAgentId": "engineer"
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+        Assert.IsTrue(result.Success, result.Error);
+        var plan = ReadPlan(result);
+        Assert.HasCount(2, plan.Steps);
+        Assert.AreEqual("1", plan.Steps[0].StepId);
+        Assert.IsTrue(string.IsNullOrEmpty(plan.Steps[0].TargetAgentId));
+        Assert.AreEqual("1-s1", plan.Steps[1].StepId);
+        Assert.AreEqual("1", plan.Steps[1].ParentStepId);
+        Assert.AreEqual("engineer", plan.Steps[1].TargetAgentId);
+    }
+
+    [TestMethod]
+    public async Task SetPlan_AgentIdAlias_BecomesTargetAgentId()
+    {
+        var result = await ExecuteAsync(
+            """
+            {
+              "planVersion": "1",
+              "goal": "Ship the notes",
+              "steps": [
+                { "stepId": "s1", "goal": "Write notes", "agentId": "worker" }
+              ]
+            }
+            """);
+
+        Assert.IsTrue(result.Success, result.Error);
+        var plan = ReadPlan(result);
+        Assert.AreEqual("worker", plan.Steps[0].TargetAgentId);
+    }
+
+    [TestMethod]
+    public async Task SetPlan_MainStepsCamelCaseAliases_AreAccepted()
+    {
+        var result = await ExecuteAsync(
+            """
+            {
+              "goal": "Prepare release",
+              "main_steps": [
+                {
+                  "title": "Draft",
+                  "subSteps": [
+                    {
+                      "title": "Write notes",
+                      "acceptanceCriteria": "Notes file exists",
+                      "agentId": "worker"
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+        Assert.IsTrue(result.Success, result.Error);
+        var plan = ReadPlan(result);
+        var leaf = plan.Steps.Single(step => step.ParentStepId == "m1");
+        Assert.AreEqual("worker", leaf.TargetAgentId);
+        StringAssert.Contains(leaf.Goal, "Notes file exists");
+    }
+
+    [TestMethod]
+    public async Task SetPlan_LeafWithoutAgent_NamesTheRequiredField()
+    {
+        var result = await ExecuteAsync(
+            """
+            {
+              "planVersion": "1",
+              "goal": "Ship the notes",
+              "steps": [
+                { "stepId": "s1", "goal": "Write notes" }
+              ]
+            }
+            """);
+
+        AssertFailure(result, "targetAgentId is empty");
+        AssertFailure(result, "parentStepId");
+    }
+
+    private static WorkPlanDraft ReadPlan(ToolResult result)
+    {
+        using var output = JsonDocument.Parse(result.OutputJson!);
+        var plan = JsonSerializer.Deserialize(
+            output.RootElement.GetProperty("plan").GetRawText(),
+            RuntimeJsonContext.Default.WorkPlanDraft);
+        Assert.IsNotNull(plan);
+        return plan;
     }
 
     private static async Task<ToolResult> ExecuteAsync(string arguments)

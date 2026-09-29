@@ -3160,7 +3160,8 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
 
         var availableAgents = string.Join(", ", agentById.Keys);
         throw new InvalidOperationException(
-            $"Step '{readyStep.StepId}' targets unknown agent '{readyStep.TargetAgentId}'. Available agents: [{availableAgents}]");
+            $"Step '{readyStep.StepId}' targets unknown agent '{readyStep.TargetAgentId}'. "
+            + $"targetAgentId must be one of AvailableAgents: [{availableAgents}].");
     }
 
     private static bool IsExplicitPlanConfirmation(string text)
