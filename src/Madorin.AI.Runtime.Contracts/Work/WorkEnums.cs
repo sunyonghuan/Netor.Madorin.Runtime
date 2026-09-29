@@ -29,6 +29,8 @@ public enum WorkSessionStatus
     WaitingForPlanConfirmation,
     /// <summary>调查步骤已完成，等待补齐后续步骤。</summary>
     AwaitingExpansion,
+    /// <summary>用户已同意执行，计划尚未通过校验。</summary>
+    ExecutionApproved,
     Completed,
     Failed,
     Cancelled,

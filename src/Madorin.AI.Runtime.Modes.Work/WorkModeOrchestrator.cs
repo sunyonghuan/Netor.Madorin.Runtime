@@ -264,12 +264,6 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             && pendingTexts.Length > 0
             ? string.Join("\n\n", pendingTexts)
             : CombineGoalWithPendingInputs(goal, pendingTexts);
-        var userConfirmsPlan = IsExplicitPlanConfirmation(planningGoal)
-            || pendingTexts.Any(IsExplicitPlanConfirmation);
-        var userRequestsRevision = IsPlanRevisionRequest(planningGoal)
-            || pendingTexts.Any(IsPlanRevisionRequest)
-            || ContainsPlanJson(planningGoal)
-            || pendingTexts.Any(ContainsPlanJson);
         await _workRepo.BeginPlanningTurnAsync(
             sessionId,
             runId,
@@ -286,30 +280,6 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
 
         WorkPlanDraft plan;
         string? parentInvocationId = null;
-        var skipManagerPlanning = policy.RequirePlanConfirmation
-            && waitingForPlanConfirmation
-            && userConfirmsPlan
-            && !userRequestsRevision
-            && pendingTexts.Length == 0;
-
-        if (skipManagerPlanning)
-        {
-            plan = await _workRepo.GetCurrentPlanDraftAsync(sessionId, ct).ConfigureAwait(false)
-                ?? throw new InvalidOperationException(
-                    $"Session '{sessionId}' is waiting for plan confirmation but has no published plan.");
-            await _workRepo.UpdateSessionStatusAsync(
-                sessionId,
-                WorkSessionStatus.Executing,
-                ct).ConfigureAwait(false);
-            yield return await CreateStatusEnvelopeAsync(
-                runtimeInstanceId,
-                runId,
-                sequence.Take(),
-                RunStatus.Running,
-                ct,
-                workPhase: "executing").ConfigureAwait(false);
-        }
-        else
         {
             _capturedSetPlanDraft = null;
             var managerInvocation = await CreateInvocationRequestAsync(
@@ -410,41 +380,24 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 }
             }
 
-            // 用户还没明确同意执行时，模型提前写出的计划不算执行步骤，不发布、不进时间线。
-            // 调查步骤之后补计划，沿用已完成步骤且没有改目标，则不必再次同意。
-            var continueExpansion = priorSessionStatus == WorkSessionStatus.AwaitingExpansion
-                && !userRequestsRevision
-                && validatedPlan is not null
-                && ReusesCompletedSteps(validatedPlan, priorResume);
-            var suppressUnapprovedPlan = policy.RequirePlanConfirmation
-                && !userConfirmsPlan
-                && !continueExpansion
-                && validatedPlan is not null;
-            if (validatedPlan is null || suppressUnapprovedPlan)
+            // 调用了 set_plan 且计划合法才发布。没调用就是讨论，不靠口令判断。
+            if (validatedPlan is null)
             {
                 await AppendPlanningDialogueAsync(
                     sessionId,
                     managerInvocation.InvocationId,
                     options.GeneralManager.AgentId,
                     managerText.ToString(),
-                    suppressUnapprovedPlan ? null : validationError,
+                    validationError,
                     ct).ConfigureAwait(false);
-                if (userConfirmsPlan && validatedPlan is null)
-                {
-                    await AppendPlainDialogueAsync(
-                        sessionId,
-                        managerInvocation.InvocationId,
-                        options.GeneralManager.AgentId,
-                        "assistant",
-                        "已收到执行同意，但这轮没有形成可执行步骤。",
-                        ct).ConfigureAwait(false);
-                }
 
                 var resumeStatus = priorSessionStatus == WorkSessionStatus.AwaitingExpansion
                     ? WorkSessionStatus.AwaitingExpansion
                     : waitingForPlanConfirmation
                         ? WorkSessionStatus.WaitingForPlanConfirmation
-                        : priorSessionStatus ?? WorkSessionStatus.Planning;
+                        : priorSessionStatus == WorkSessionStatus.ExecutionApproved
+                            ? WorkSessionStatus.Planning
+                            : priorSessionStatus ?? WorkSessionStatus.Planning;
                 await _workRepo.UpdateSessionStatusAsync(sessionId, resumeStatus, ct)
                     .ConfigureAwait(false);
                 await CompleteRunAsync(runId, ct).ConfigureAwait(false);
@@ -460,24 +413,6 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
 
             plan = WorkPlanValidator.NormalizePlanRevision(validatedPlan, publishedPlanVersion);
             plan = WorkPlanValidator.ValidateOrThrow(plan, options);
-            if (ShouldKeepPublishedPlan(publishedPlanVersion, priorResume, userRequestsRevision))
-            {
-                await _workRepo.UpdateSessionStatusAsync(
-                    sessionId,
-                    policy.RequirePlanConfirmation
-                        ? WorkSessionStatus.WaitingForPlanConfirmation
-                        : priorSessionStatus ?? WorkSessionStatus.Planning,
-                    ct).ConfigureAwait(false);
-                await CompleteRunAsync(runId, ct).ConfigureAwait(false);
-                var kept = await CreateCompletedEnvelopeAsync(
-                    runId, sessionId, runtimeInstanceId, sequence.Current, ct).ConfigureAwait(false);
-                if (kept is not null)
-                {
-                    yield return kept;
-                }
-
-                yield break;
-            }
             var canonicalMessages = await AppendPlanRevisionAsync(
                 sessionId,
                 managerInvocation.InvocationId,
@@ -513,7 +448,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 sequence.Take(),
                 workPlanEvent);
 
-            // 能走到这里的新计划，用户已经明确同意执行。发布后直接进入执行，不再二次确认。
+            // 模型交出合法计划后直接执行。同意与否由它在本轮判断。
         }
 
         await _workRepo.UpdateSessionStatusAsync(
@@ -1577,25 +1512,6 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 + " Correct the plan with mcli_work_set_plan. Do not explain this failure to the user.",
                 ct).ConfigureAwait(false);
         }
-    }
-
-    /// <summary>
-    /// 已发布计划尚无完成结果，且用户没有要求修订时，保持原计划。
-    /// </summary>
-    private static bool ShouldKeepPublishedPlan(
-        string? publishedPlanVersion,
-        WorkResumeState? priorResume,
-        bool userRequestsRevision)
-    {
-        if (userRequestsRevision || string.IsNullOrWhiteSpace(publishedPlanVersion))
-        {
-            return false;
-        }
-
-        var steps = priorResume?.Steps;
-        return steps is { Length: > 0 }
-            && steps.All(static step => step.Status is WorkStepLifecycleStatus.Pending
-                or WorkStepLifecycleStatus.Interrupted);
     }
 
     private async Task AppendPlainDialogueAsync(
@@ -3069,21 +2985,6 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 : null);
     }
 
-    private static bool ReusesCompletedSteps(WorkPlanDraft plan, WorkResumeState? prior)
-    {
-        var completed = prior?.Steps?
-            .Where(static step => step.Status == WorkStepLifecycleStatus.Completed)
-            .Select(static step => step.StepId)
-            .ToHashSet(StringComparer.Ordinal);
-        if (completed is null || completed.Count == 0)
-        {
-            return false;
-        }
-
-        var ids = plan.Steps.Select(static step => step.StepId).ToHashSet(StringComparer.Ordinal);
-        return completed.All(ids.Contains);
-    }
-
     private static List<WorkStepSnapshot> TrimAtInvestigateStep(
         IReadOnlyList<WorkStepSnapshot> ready,
         WorkPlanDraft plan)
@@ -3164,30 +3065,6 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             + $"targetAgentId must be one of AvailableAgents: [{availableAgents}].");
     }
 
-    private static bool IsExplicitPlanConfirmation(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            return false;
-        }
-
-        var trimmed = text.Trim().TrimEnd('。', '.', '!', '！');
-        return trimmed is "确认执行" or "开始执行" or "批准执行" or "按计划执行";
-    }
-
-    private static bool IsPlanRevisionRequest(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            return false;
-        }
-
-        return ContainsAny(text,
-            "修改计划", "修订计划", "改一下计划", "更新计划", "调整步骤", "增加步骤", "删除步骤",
-            "revise the plan", "revise plan", "change the plan", "update the plan",
-            "add a step", "remove a step", "modify the plan");
-    }
-
     private static string CombineGoalWithPendingInputs(
         string goal,
         IReadOnlyList<string> pendingTexts)
@@ -3214,30 +3091,6 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         }
 
         return builder.ToString();
-    }
-
-    private static bool ContainsPlanJson(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            return false;
-        }
-
-        return text.Contains("\"planVersion\"", StringComparison.Ordinal)
-            || text.Contains("\"steps\"", StringComparison.Ordinal);
-    }
-
-    private static bool ContainsAny(string text, params string[] needles)
-    {
-        foreach (var needle in needles)
-        {
-            if (text.Contains(needle, StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private ToolDescriptor[]? ResolveAvailableTools(

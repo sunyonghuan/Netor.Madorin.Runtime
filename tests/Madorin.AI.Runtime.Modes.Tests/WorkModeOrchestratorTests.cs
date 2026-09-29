@@ -527,12 +527,8 @@ public sealed class WorkModeOrchestratorTests
     [TestMethod]
     public async Task RequirePlanConfirmation_DiscussionPlan_IsNotPublished()
     {
-        const string planJson =
-            "{\"planVersion\":\"1\",\"goal\":\"Ship\",\"steps\":["
-            + "{\"stepId\":\"step-a\",\"goal\":\"Prepare notes\",\"targetAgentId\":\"worker\"}]}";
-
         var result = await RunMultiTurnAsync(
-            [new WorkTurnScript("run-1", planJson, "请先制定计划，先不要执行。")],
+            [new WorkTurnScript("run-1", "我们先把范围谈清楚。", "请先制定计划，先不要执行。")],
             requirePlanConfirmation: true);
 
         Assert.AreEqual(RunStatus.Completed, result.RunStatus);
@@ -553,8 +549,8 @@ public sealed class WorkModeOrchestratorTests
 
         var result = await RunMultiTurnAsync(
             [
-                new WorkTurnScript("run-1", planJson, "请先制定计划，先不要执行。"),
-                new WorkTurnScript("run-2", planJson, "确认执行")
+                new WorkTurnScript("run-1", "我们先把范围谈清楚。", "准奏"),
+                new WorkTurnScript("run-2", planJson, "准奏")
             ],
             requirePlanConfirmation: true);
 
@@ -588,13 +584,9 @@ public sealed class WorkModeOrchestratorTests
     [TestMethod]
     public async Task RequirePlanConfirmation_FurtherDiscussion_StillDoesNotPublish()
     {
-        const string planJson =
-            "{\"planVersion\":\"1\",\"goal\":\"Ship\",\"steps\":["
-            + "{\"stepId\":\"step-a\",\"goal\":\"Prepare notes\",\"targetAgentId\":\"worker\"}]}";
-
         var result = await RunMultiTurnAsync(
             [
-                new WorkTurnScript("run-1", planJson, "请先制定计划，先不要执行。"),
+                new WorkTurnScript("run-1", "我们先把范围谈清楚。", "请先制定计划，先不要执行。"),
                 new WorkTurnScript("run-2", "还想再讨论一下范围，先不要执行。", "还想再讨论一下范围，先不要执行。")
             ],
             requirePlanConfirmation: true);
@@ -730,13 +722,13 @@ public sealed class WorkModeOrchestratorTests
             ],
             requirePlanConfirmation: true);
 
-        Assert.AreEqual(WorkSessionStatus.Planning, result.WorkSessionStatus);
-        Assert.IsEmpty(result.PlanRevisions);
-        Assert.IsFalse(result.InvokedAgentIds.Contains("worker"));
+        Assert.AreEqual(WorkSessionStatus.Completed, result.WorkSessionStatus);
+        Assert.HasCount(2, result.PlanRevisions);
+        Assert.IsTrue(result.InvokedAgentIds.Contains("worker"));
     }
 
     [TestMethod]
-    public async Task Plan_StepThatCitesPriorStepWithoutDependsOn_IsRejected()
+    public async Task Plan_StepThatCitesPriorStepWithoutDependsOn_AddsDependency()
     {
         const string planJson =
             "{\"planVersion\":\"1\",\"goal\":\"Ship\",\"steps\":["
@@ -746,9 +738,9 @@ public sealed class WorkModeOrchestratorTests
             [new WorkTurnScript("run-1", planJson, "请先制定计划，先不要执行。")]);
 
         Assert.AreEqual(RunStatus.Completed, result.RunStatus);
-        Assert.IsEmpty(result.PlanRevisions);
-        Assert.IsFalse(result.InvokedAgentIds.Contains("worker"));
-        Assert.IsTrue(result.CanonicalHistory.Any(static record =>
+        Assert.HasCount(1, result.PlanRevisions);
+        Assert.IsTrue(result.InvokedAgentIds.Contains("worker"));
+        Assert.IsFalse(result.CanonicalHistory.Any(static record =>
             record.Role == "tool"
             && record.Content.GetRawText().Contains("does not depend on it", StringComparison.Ordinal)));
     }
