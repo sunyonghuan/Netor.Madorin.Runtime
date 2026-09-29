@@ -186,10 +186,142 @@ public sealed class ProcessConsentChainTests
         Assert.IsFalse(File.Exists(target));
     }
 
+    [TestMethod]
+    public async Task FileDelete_RunGrant_SecondFileIsInsideWorkspaceWriteRoot()
+    {
+        var first = Path.Combine(_workspace, "a.txt");
+        var second = Path.Combine(_workspace, "b.txt");
+        await File.WriteAllTextAsync(first, "a", TestContext.CancellationToken);
+        await File.WriteAllTextAsync(second, "b", TestContext.CancellationToken);
+        await using var harness = await ProcessConsentHarness.CreateAsync(
+            _workspace,
+            TestContext.CancellationToken);
+        var handler = new HostStyleEmptyExecutableGrantHandler(bindToCall: false);
+        var coordinator = new ToolConsentCoordinator(
+            harness.Gateway,
+            harness.Authorization,
+            harness.Catalog,
+            handler,
+            new BuiltinToolConsentScopeResolver(),
+            _workspace,
+            harness.Store);
+
+        var firstResult = await DeleteAsync(harness, coordinator, "call-delete-a", "a.txt");
+        var secondResult = await harness.Gateway.ExecuteAsync(
+            CreateDeleteInvocation("call-delete-b", "run-delete-shared", "b.txt"),
+            permission: null,
+            harness.Catalog,
+            TestContext.CancellationToken);
+
+        Assert.AreEqual(1, handler.PermissionCount);
+        Assert.AreEqual(
+            ToolGatewayResultKind.Success,
+            firstResult.Kind,
+            firstResult.Error?.Message ?? firstResult.Result?.Error);
+        Assert.AreEqual(
+            ToolGatewayResultKind.Success,
+            secondResult.Kind,
+            secondResult.Error?.Message ?? secondResult.Result?.Error);
+        Assert.IsFalse(File.Exists(first));
+        Assert.IsFalse(File.Exists(second));
+    }
+
+    [TestMethod]
+    public async Task AuthorizeAsync_StaleSingleFileDeleteGrant_DoesNotCoverAnotherFile()
+    {
+        var stalePath = Path.GetFullPath(Path.Combine(_workspace, "stale.txt"));
+        await File.WriteAllTextAsync(stalePath, "s", TestContext.CancellationToken);
+        await File.WriteAllTextAsync(
+            Path.Combine(_workspace, "other.txt"),
+            "o",
+            TestContext.CancellationToken);
+        await using var harness = await ProcessConsentHarness.CreateAsync(
+            _workspace,
+            TestContext.CancellationToken);
+        const string grantId = "stale-delete";
+        await harness.Authorization.SaveGrantAsync(
+            new ToolGrant(
+                grantId,
+                "run-stale",
+                Path.GetFullPath(_workspace),
+                AllowedReadRoots: [],
+                AllowedWriteRoots: [stalePath],
+                AllowOverwrite: false,
+                AllowMove: false,
+                AllowDelete: true,
+                AllowedExecutables: [],
+                AllowPowerShell: false,
+                new NetworkPolicy(DenyAll: true, AllowedHosts: []),
+                DateTimeOffset.UtcNow.AddHours(1),
+                AllowDelegation: false,
+                DelegatedAgentIds: [],
+                AllowedToolIds: [BuiltinToolRegistry.FileDeleteToolId],
+                AllowedCallIds: null,
+                MaximumRisk: ToolRiskLevel.Destructive,
+                AgentId: "agent-expert",
+                RootGrantId: grantId),
+            ct: TestContext.CancellationToken);
+        Assert.IsTrue(harness.Catalog.TryGetTool(
+            BuiltinToolRegistry.FileDeleteToolId,
+            out var descriptor));
+        Assert.IsNotNull(descriptor);
+
+        var other = await harness.Authorization.AuthorizeAsync(
+            CreateDeleteInvocation("call-other", "run-stale", "other.txt"),
+            descriptor,
+            ct: TestContext.CancellationToken);
+        var stale = await harness.Authorization.AuthorizeAsync(
+            CreateDeleteInvocation("call-stale", "run-stale", "stale.txt"),
+            descriptor,
+            ct: TestContext.CancellationToken);
+
+        Assert.AreNotEqual(ToolAuthorizationDecision.Granted, other.Decision);
+        Assert.AreEqual(ToolAuthorizationDecision.Granted, stale.Decision);
+    }
+
+    private async Task<ToolGatewayResult> DeleteAsync(
+        ProcessConsentHarness harness,
+        ToolConsentCoordinator coordinator,
+        string callId,
+        string relativePath)
+    {
+        var invocation = CreateDeleteInvocation(callId, "run-delete-shared", relativePath);
+        var pending = await harness.Gateway.ExecuteAsync(
+            invocation,
+            permission: null,
+            harness.Catalog,
+            TestContext.CancellationToken);
+        Assert.AreEqual(ToolGatewayResultKind.NeedsPermission, pending.Kind, pending.Error?.Message);
+        return await coordinator.ResolveAndExecuteAsync(
+            invocation,
+            pending,
+            TestContext.CancellationToken);
+    }
+
+    private static ToolInvocation CreateDeleteInvocation(
+        string callId,
+        string runId,
+        string relativePath) =>
+        new(
+            callId,
+            BuiltinToolRegistry.FileDeleteToolId,
+            "agent-expert",
+            ParentAgentId: null,
+            $$"""{"path":"{{relativePath}}"}""",
+            runId,
+            "session-delete",
+            "invocation-delete");
+
     /// <summary>仿 HostToolGrantFactory：Granted 但 AllowedExecutables 恒为空。</summary>
     private sealed class HostStyleEmptyExecutableGrantHandler : IToolConsentHandler
     {
+        private readonly bool _bindToCall;
         private int _permissionCount;
+
+        public HostStyleEmptyExecutableGrantHandler(bool bindToCall = true)
+        {
+            _bindToCall = bindToCall;
+        }
 
         public int PermissionCount => Volatile.Read(ref _permissionCount);
 
@@ -216,7 +348,7 @@ public sealed class ProcessConsentChainTests
                 AllowDelegation: false,
                 DelegatedAgentIds: [],
                 AllowedToolIds: [context.Invocation.ToolId],
-                AllowedCallIds: [context.Invocation.CallId],
+                AllowedCallIds: _bindToCall ? [context.Invocation.CallId] : null,
                 MaximumRisk: context.Descriptor.Risk,
                 AllowedEnvironmentVariables: [],
                 AgentId: context.Invocation.AgentId,
@@ -279,7 +411,8 @@ public sealed class ProcessConsentChainTests
             var outbox = new SqliteEventOutbox(connection);
             var authorization = new ToolAuthorizationService(
                 store,
-                RuntimeToolPolicy.CreateRestricted(workspace));
+                RuntimeToolPolicy.CreateRestricted(workspace),
+                scopeResolver: new BuiltinToolConsentScopeResolver());
             var validator = new JsonSchemaToolValidator();
             var catalogStore = new ToolCatalogStore(new BuiltinToolRegistry(), validator);
             var gateway = new ToolGateway(

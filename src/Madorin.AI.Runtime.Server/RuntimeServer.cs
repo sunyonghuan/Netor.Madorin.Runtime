@@ -556,7 +556,8 @@ public sealed class RuntimeServer : IAsyncDisposable
                 var authorizationService = new ToolAuthorizationService(
                     toolStateStore,
                     RuntimeToolPolicy.CreateRestricted(WorkspaceRoot),
-                    _timeProvider);
+                    _timeProvider,
+                    new BuiltinToolConsentScopeResolver());
                 using var authenticated = new AuthenticatedFrameChannel(
                     transport,
                     session.SessionKey,
@@ -804,7 +805,8 @@ public sealed class RuntimeServer : IAsyncDisposable
             new ToolAuthorizationService(
                 toolStateStore,
                 RuntimeToolPolicy.CreateRestricted(WorkspaceRoot),
-                _timeProvider),
+                _timeProvider,
+                new BuiltinToolConsentScopeResolver()),
             executors,
             toolStateStore,
             outbox,

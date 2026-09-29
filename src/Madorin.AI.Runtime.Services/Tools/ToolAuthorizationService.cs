@@ -9,10 +9,12 @@ namespace Madorin.AI.Runtime.Services.Tools;
 public sealed class ToolAuthorizationService(
     IToolStateStore stateStore,
     RuntimeToolPolicy runtimePolicy,
-    TimeProvider? timeProvider = null) : IToolAuthorizationService
+    TimeProvider? timeProvider = null,
+    IToolConsentScopeResolver? scopeResolver = null) : IToolAuthorizationService
 {
     private readonly RuntimeToolPolicy _runtimePolicy = runtimePolicy
         ?? throw new ArgumentNullException(nameof(runtimePolicy));
+    private readonly IToolConsentScopeResolver? _scopeResolver = scopeResolver;
     private readonly IToolStateStore _stateStore = stateStore
         ?? throw new ArgumentNullException(nameof(stateStore));
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
@@ -34,11 +36,17 @@ public sealed class ToolAuthorizationService(
         var policy = BindRun(_runtimePolicy.DefaultPermission, invocation.RunId);
         if (suppliedPermission is not null)
         {
-            return AuthorizeContexts(
+            var supplied = AuthorizeContexts(
                 invocation,
                 descriptor,
                 CreateExplicitGrantContexts(invocation.RunId, [suppliedPermission]),
                 now);
+            if (supplied.Decision is not ToolAuthorizationDecision.Granted
+                || supplied.EffectivePermission is null
+                || CoversRequestedScope(invocation, descriptor, supplied.EffectivePermission))
+            {
+                return supplied;
+            }
         }
 
         if (invocation.ParentAgentId is null)
@@ -66,7 +74,9 @@ public sealed class ToolAuthorizationService(
                 invocation.RunId,
                 grantChain.Select(ToPermissionContext));
             var result = AuthorizeContexts(invocation, descriptor, contexts, now);
-            if (result.Decision is ToolAuthorizationDecision.Granted)
+            if (result.Decision is ToolAuthorizationDecision.Granted
+                && result.EffectivePermission is { } effective
+                && CoversRequestedScope(invocation, descriptor, effective))
             {
                 return result;
             }
@@ -392,6 +402,36 @@ public sealed class ToolAuthorizationService(
         ToolRiskLevel.Network => ["network.access"],
         _ => []
     };
+
+    /// <summary>
+    /// 写根非空只说明「有过一次写入授权」。路径不在这些根里时不能当成已授权，
+    /// 否则单文件 Grant 会让后续删除/写入直接执行并报 outside the allowed write roots。
+    /// 解析失败时保持原行为，避免未知工具被误拒。
+    /// </summary>
+    private bool CoversRequestedScope(
+        ToolInvocation invocation,
+        ToolDescriptor descriptor,
+        ToolPermissionContext permission)
+    {
+        if (_scopeResolver is null)
+        {
+            return true;
+        }
+
+        var resolution = _scopeResolver.Resolve(
+            invocation,
+            descriptor,
+            permission.WorkspaceRoot);
+        if (!resolution.IsSuccess || resolution.Scope is not { } scope)
+        {
+            return true;
+        }
+
+        return ToolGrantCalculator.CoversRoots(permission.AllowedReadRoots, scope.AllowedReadRoots)
+            && ToolGrantCalculator.CoversRoots(
+                permission.AllowedWriteRoots,
+                scope.AllowedWriteRoots);
+    }
 
     private static bool IsCandidate(ToolGrantState grant, ToolInvocation invocation)
     {

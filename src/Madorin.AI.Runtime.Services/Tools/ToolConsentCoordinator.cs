@@ -688,6 +688,12 @@ public sealed class ToolConsentCoordinator
         var allowedWriteRoots = scope.AllowedWriteRoots.Length > 0
             ? scope.AllowedWriteRoots
             : hostGrant.AllowedWriteRoots;
+        ExpandRunFilesystemRoots(
+            descriptor.ToolId,
+            pinToCall,
+            hostGrant.WorkspaceRoot,
+            ref allowedReadRoots,
+            ref allowedWriteRoots);
         var networkPolicy = scope.NetworkPolicy.DenyAll
             ? hostGrant.NetworkPolicy
             : scope.NetworkPolicy;
@@ -696,7 +702,9 @@ public sealed class ToolConsentCoordinator
         {
             AllowedReadRoots = allowedReadRoots,
             AllowedWriteRoots = allowedWriteRoots,
-            AllowOverwrite = hostGrant.AllowOverwrite || scope.AllowOverwrite,
+            AllowOverwrite = hostGrant.AllowOverwrite
+                || scope.AllowOverwrite
+                || (!pinToCall && IsRunFileWrite(descriptor.ToolId)),
             AllowMove = hostGrant.AllowMove || scope.AllowMove,
             AllowDelete = hostGrant.AllowDelete || scope.AllowDelete,
             AllowedExecutables = allowedExecutables,
@@ -743,13 +751,23 @@ public sealed class ToolConsentCoordinator
             scriptKeys = [SkillScriptAuthorization.CreateKey(skillName, scriptHash, interpreter)];
         }
 
+        var allowedReadRoots = scope.AllowedReadRoots.Length > 0
+            ? scope.AllowedReadRoots
+            : new[] { workspaceRoot };
+        var allowedWriteRoots = scope.AllowedWriteRoots;
+        ExpandRunFilesystemRoots(
+            descriptor.ToolId,
+            pinToCall,
+            workspaceRoot,
+            ref allowedReadRoots,
+            ref allowedWriteRoots);
         return new ToolGrant(
             grantId,
             invocation.RunId,
             workspaceRoot,
-            scope.AllowedReadRoots.Length > 0 ? scope.AllowedReadRoots : [workspaceRoot],
-            scope.AllowedWriteRoots,
-            scope.AllowOverwrite,
+            allowedReadRoots,
+            allowedWriteRoots,
+            scope.AllowOverwrite || (!pinToCall && IsRunFileWrite(descriptor.ToolId)),
             scope.AllowMove,
             scope.AllowDelete,
             scope.AllowedExecutables,
@@ -770,6 +788,41 @@ public sealed class ToolConsentCoordinator
             AllowedSkillScriptKeys: scriptKeys,
             SkillCatalogVersion: skillCatalogVersion);
     }
+
+    /// <summary>
+    /// 不钉 CallId 的文件系统 Grant 表示整次运行。读写根必须是工作区，
+    /// 不能留在第一次调用的那个文件上。
+    /// </summary>
+    private static void ExpandRunFilesystemRoots(
+        string toolId,
+        bool pinToCall,
+        string workspaceRoot,
+        ref string[] allowedReadRoots,
+        ref string[] allowedWriteRoots)
+    {
+        if (pinToCall || !ExpandsToWorkspace(toolId))
+        {
+            return;
+        }
+
+        var root = Path.GetFullPath(workspaceRoot);
+        if (allowedReadRoots.Length > 0)
+        {
+            allowedReadRoots = [root];
+        }
+
+        if (allowedWriteRoots.Length > 0)
+        {
+            allowedWriteRoots = [root];
+        }
+    }
+
+    private static bool ExpandsToWorkspace(string toolId) =>
+        toolId.StartsWith("mcli_fs_", StringComparison.Ordinal)
+        || string.Equals(toolId, "mcli_process", StringComparison.Ordinal);
+
+    private static bool IsRunFileWrite(string toolId) =>
+        string.Equals(toolId, "mcli_fs_write", StringComparison.Ordinal);
 
     private static string ComputeHash(string value) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)))

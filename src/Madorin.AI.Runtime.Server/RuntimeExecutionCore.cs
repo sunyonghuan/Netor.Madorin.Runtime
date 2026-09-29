@@ -124,10 +124,12 @@ internal sealed class RuntimeExecutionCore(
         await using var toolConnection = await OpenDatabaseConnectionAsync(ct)
             .ConfigureAwait(false);
         using var toolStateStore = new SqliteToolIntentRepository(toolConnection);
+        var scopeResolver = new BuiltinToolConsentScopeResolver();
         var authorizationService = new ToolAuthorizationService(
             toolStateStore,
             RuntimeToolPolicy.CreateRestricted(_workspaceRoot),
-            TimeProvider.System);
+            TimeProvider.System,
+            scopeResolver);
         var reverseExecutor = controlPeer is null
             ? null
             : new ReverseRpcToolExecutor(controlPeer, _resultBlobStore);
@@ -344,14 +346,14 @@ internal sealed class RuntimeExecutionCore(
             : toolCatalogStore.CaptureSnapshot()
                 .WithInternalTools(SkillRuntimeTools.GatewayDescriptors);
 
-        // Host reverse-RPC 与 Standalone 共用 scope 解析：人审只回答是否同意，
-        // AllowedExecutables/路径等由 Runtime 按本次 arguments 收窄（避免 Host Grant 空白名单）。
+        // 人审只回答是否同意。可执行文件用本次 scope 补全；
+        // 运行期文件系统根在定稿时扩回工作区，避免收成单个文件。
         var toolConsentCoordinator = new ToolConsentCoordinator(
             toolGateway,
             authorizationService,
             gatewayCatalogSnapshot,
             consentHandler,
-            new BuiltinToolConsentScopeResolver(),
+            scopeResolver,
             _workspaceRoot,
             toolStateStore,
             liveCatalogProvider);

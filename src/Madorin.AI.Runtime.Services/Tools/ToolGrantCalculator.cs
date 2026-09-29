@@ -71,6 +71,24 @@ public static class ToolGrantCalculator
         return result;
     }
 
+    /// <summary>每个请求路径都落在某个已授权根之内。空请求视为已覆盖。</summary>
+    public static bool CoversRoots(
+        IReadOnlyList<string> allowedRoots,
+        IReadOnlyList<string> requestedRoots)
+    {
+        ArgumentNullException.ThrowIfNull(allowedRoots);
+        ArgumentNullException.ThrowIfNull(requestedRoots);
+        foreach (var requested in requestedRoots)
+        {
+            if (!allowedRoots.Any(root => IsWithin(root, requested)))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     public static bool IsSubset(
         ToolPermissionContext candidate,
         ToolPermissionContext parent)
