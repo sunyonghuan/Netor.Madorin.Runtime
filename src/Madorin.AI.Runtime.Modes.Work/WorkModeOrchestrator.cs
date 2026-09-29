@@ -649,6 +649,8 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
 
             // 同波就绪步骤可并行：Provider/工具环并行，准备与落盘仍串行。
             // Sqlite 各仓储共用 SqliteConnectionSync 连接级闸门，允许挂载 Tool Gateway。
+            ready = TrimAtInvestigateStep(ready, plan);
+            var stopAfterWave = ready.Any(step => IsInvestigateStep(plan, step));
             var executeConcurrently = ready.Count > 1
                 && policy.MaxConcurrentSteps > 1
                 && policy.FailurePolicy is WorkStepFailurePolicy.Stop
@@ -682,6 +684,12 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                     {
                         completedCount++;
                     }
+                }
+
+                if (stopAfterWave)
+                {
+                    stoppedForExpansion = true;
+                    break;
                 }
 
                 if (completedCount > policy.HardMaxStepsPerRun)
@@ -3075,6 +3083,28 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         var ids = plan.Steps.Select(static step => step.StepId).ToHashSet(StringComparer.Ordinal);
         return completed.All(ids.Contains);
     }
+
+    private static List<WorkStepSnapshot> TrimAtInvestigateStep(
+        IReadOnlyList<WorkStepSnapshot> ready,
+        WorkPlanDraft plan)
+    {
+        var trimmed = new List<WorkStepSnapshot>(ready.Count);
+        foreach (var step in ready)
+        {
+            trimmed.Add(step);
+            if (IsInvestigateStep(plan, step))
+            {
+                break;
+            }
+        }
+
+        return trimmed;
+    }
+
+    private static bool IsInvestigateStep(WorkPlanDraft plan, WorkStepSnapshot step)
+        => plan.Steps.FirstOrDefault(item =>
+            string.Equals(item.StepId, step.StepId, StringComparison.Ordinal))
+            is { Investigate: true };
 
     private static bool IsParentStep(IReadOnlyList<WorkStepSnapshot> steps, WorkStepSnapshot step)
         => steps.Any(other => string.Equals(other.ParentStepId, step.StepId, StringComparison.Ordinal));

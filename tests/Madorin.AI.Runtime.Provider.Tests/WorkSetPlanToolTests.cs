@@ -97,6 +97,35 @@ public sealed class WorkSetPlanToolTests
     }
 
     [TestMethod]
+    public async Task SetPlan_NextPhase_DependsOnPreviousPhase()
+    {
+        var result = await ExecuteAsync("""
+            {
+              "goal": "Two phases",
+              "main_steps": [
+                { "title": "One", "sub_steps": [
+                  { "title": "A", "acceptance_criteria": "A done", "targetAgentId": "worker" }
+                ]},
+                { "title": "Two", "sub_steps": [
+                  { "title": "B", "acceptance_criteria": "B done", "targetAgentId": "worker" }
+                ]}
+              ]
+            }
+            """);
+
+        Assert.IsTrue(result.Success, result.Error);
+        using var output = JsonDocument.Parse(result.OutputJson!);
+        var plan = JsonSerializer.Deserialize(
+            output.RootElement.GetProperty("plan").GetRawText(),
+            RuntimeJsonContext.Default.WorkPlanDraft);
+        Assert.IsNotNull(plan);
+        var second = plan.Steps.Single(step => step.StepId == "m2-s1");
+        Assert.IsNotNull(second.DependsOn);
+        Assert.HasCount(1, second.DependsOn);
+        Assert.AreEqual("m1-s1", second.DependsOn[0]);
+    }
+
+    [TestMethod]
     public async Task SetPlan_OverMaxSteps_AsksForCollapsedPlan()
     {
         var result = await new BuiltinWorkSetPlanToolExecutor(maxStepsPerRun: 2).ExecuteAsync(

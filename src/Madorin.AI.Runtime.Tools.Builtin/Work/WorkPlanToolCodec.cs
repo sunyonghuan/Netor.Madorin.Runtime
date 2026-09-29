@@ -305,7 +305,11 @@ internal static class WorkPlanToolCodec
             }
 
             var stepId = string.Create(CultureInfo.InvariantCulture, $"m{mainOrdinal}-s{subOrdinal}");
-            var dependsOn = previousChildId is null ? Array.Empty<string>() : new[] { previousChildId };
+            var dependsOn = previousChildId is not null
+                ? new[] { previousChildId }
+                : previousStepId is null
+                    ? Array.Empty<string>()
+                    : new[] { previousStepId };
             steps.Add(new WorkPlanStepDraft(
                 stepId,
                 string.Create(CultureInfo.InvariantCulture, $"{subTitle}. Acceptance: {acceptance}"),
