@@ -29,6 +29,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
     private const string PlanProjectionVersion = "work-plan-v1";
     private const string StepProjectionVersion = "work-step-v2";
     private const string WorkSetPlanToolId = "mcli_work_set_plan";
+    private const string PendingContinuationGoal = "__work_continue_pending__";
 
     private readonly Func<string, IRuntimeProviderAdapter> _providerFactory;
     private WorkPlanDraft? _capturedSetPlanDraft;
@@ -259,7 +260,10 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         var pendingTexts = consumedPendingInputs
             .Select(static item => item.ContentText)
             .ToArray();
-        var planningGoal = CombineGoalWithPendingInputs(goal, pendingTexts);
+        var planningGoal = string.Equals(goal.Trim(), PendingContinuationGoal, StringComparison.Ordinal)
+            && pendingTexts.Length > 0
+            ? string.Join("\n\n", pendingTexts)
+            : CombineGoalWithPendingInputs(goal, pendingTexts);
         var userConfirmsPlan = IsExplicitPlanConfirmation(planningGoal)
             || pendingTexts.Any(IsExplicitPlanConfirmation);
         var userRequestsRevision = IsPlanRevisionRequest(planningGoal)
@@ -406,19 +410,41 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 }
             }
 
-            if (validatedPlan is null)
+            // 用户还没明确同意执行时，模型提前写出的计划不算执行步骤，不发布、不进时间线。
+            // 调查步骤之后补计划，沿用已完成步骤且没有改目标，则不必再次同意。
+            var continueExpansion = priorSessionStatus == WorkSessionStatus.AwaitingExpansion
+                && !userRequestsRevision
+                && validatedPlan is not null
+                && ReusesCompletedSteps(validatedPlan, priorResume);
+            var suppressUnapprovedPlan = policy.RequirePlanConfirmation
+                && !userConfirmsPlan
+                && !continueExpansion
+                && validatedPlan is not null;
+            if (validatedPlan is null || suppressUnapprovedPlan)
             {
                 await AppendPlanningDialogueAsync(
                     sessionId,
                     managerInvocation.InvocationId,
                     options.GeneralManager.AgentId,
                     managerText.ToString(),
-                    validationError,
+                    suppressUnapprovedPlan ? null : validationError,
                     ct).ConfigureAwait(false);
+                if (userConfirmsPlan && validatedPlan is null)
+                {
+                    await AppendPlainDialogueAsync(
+                        sessionId,
+                        managerInvocation.InvocationId,
+                        options.GeneralManager.AgentId,
+                        "assistant",
+                        "已收到执行同意，但这轮没有形成可执行步骤。",
+                        ct).ConfigureAwait(false);
+                }
 
-                var resumeStatus = waitingForPlanConfirmation
-                    ? WorkSessionStatus.WaitingForPlanConfirmation
-                    : priorSessionStatus ?? WorkSessionStatus.Planning;
+                var resumeStatus = priorSessionStatus == WorkSessionStatus.AwaitingExpansion
+                    ? WorkSessionStatus.AwaitingExpansion
+                    : waitingForPlanConfirmation
+                        ? WorkSessionStatus.WaitingForPlanConfirmation
+                        : priorSessionStatus ?? WorkSessionStatus.Planning;
                 await _workRepo.UpdateSessionStatusAsync(sessionId, resumeStatus, ct)
                     .ConfigureAwait(false);
                 await CompleteRunAsync(runId, ct).ConfigureAwait(false);
@@ -487,30 +513,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 sequence.Take(),
                 workPlanEvent);
 
-            // 本轮新发布的计划一律等待下一轮明确确认，不因本轮输入像确认而立刻执行。
-            if (policy.RequirePlanConfirmation)
-            {
-                await _workRepo.UpdateSessionStatusAsync(
-                    sessionId,
-                    WorkSessionStatus.WaitingForPlanConfirmation,
-                    ct).ConfigureAwait(false);
-                yield return await CreateStatusEnvelopeAsync(
-                    runtimeInstanceId,
-                    runId,
-                    sequence.Take(),
-                    RunStatus.Running,
-                    ct,
-                    workPhase: "waiting-for-plan-confirmation").ConfigureAwait(false);
-                await CompleteRunAsync(runId, ct).ConfigureAwait(false);
-                var waitingCompleted = await CreateCompletedEnvelopeAsync(
-                    runId, sessionId, runtimeInstanceId, sequence.Current, ct).ConfigureAwait(false);
-                if (waitingCompleted is not null)
-                {
-                    yield return waitingCompleted;
-                }
-
-                yield break;
-            }
+            // 能走到这里的新计划，用户已经明确同意执行。发布后直接进入执行，不再二次确认。
         }
 
         await _workRepo.UpdateSessionStatusAsync(
@@ -522,6 +525,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         var completedCount = 0;
         var approvedLoopRisks = new HashSet<string>(StringComparer.Ordinal);
         var stoppedForPendingInput = false;
+        var stoppedForExpansion = false;
 
         while (true)
         {
@@ -547,9 +551,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
 
             var steps = await _workRepo.ListStepsAsync(sessionId, plan.PlanVersion, ct)
                 .ConfigureAwait(false);
-            if (steps.All(static s => s.Status is WorkStepLifecycleStatus.Completed
-                    or WorkStepLifecycleStatus.Skipped
-                    or WorkStepLifecycleStatus.Failed))
+            if (steps.All(step => IsStepSettled(steps, step)))
             {
                 break;
             }
@@ -606,12 +608,11 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 // Refresh after skips so terminal-state checks see updated statuses.
                 steps = await _workRepo.ListStepsAsync(sessionId, plan.PlanVersion, ct)
                     .ConfigureAwait(false);
-                if (steps.All(static s => s.Status is WorkStepLifecycleStatus.Completed
-                        or WorkStepLifecycleStatus.Skipped
-                        or WorkStepLifecycleStatus.Failed))
+                if (steps.All(step => IsStepSettled(steps, step)))
                 {
+                    var workSteps = steps.Where(step => !IsParentStep(steps, step)).ToArray();
                     if (policy.FailurePolicy is WorkStepFailurePolicy.Continue
-                        || steps.All(static s => s.Status is WorkStepLifecycleStatus.Completed
+                        || workSteps.All(static s => s.Status is WorkStepLifecycleStatus.Completed
                             or WorkStepLifecycleStatus.Skipped))
                     {
                         break;
@@ -693,12 +694,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
 
             foreach (var readyStep in ready)
             {
-                if (!agentById.TryGetValue(readyStep.TargetAgentId, out var agent))
-                {
-                    var availableAgents = string.Join(", ", agentById.Keys);
-                    throw new InvalidOperationException(
-                        $"Step '{readyStep.StepId}' targets unknown agent '{readyStep.TargetAgentId}'. Available agents: [{availableAgents}]");
-                }
+                var agent = ResolveStepAgent(plan, readyStep, agentById, options);
 
                 var stepInputHash = string.Equals(
                         readyStep.StepId,
@@ -1024,6 +1020,18 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                     resultJson,
                     ct).ConfigureAwait(false);
                 completedCount++;
+                if (plan.Steps.FirstOrDefault(step =>
+                        string.Equals(step.StepId, readyStep.StepId, StringComparison.Ordinal))
+                    is { Investigate: true })
+                {
+                    stoppedForExpansion = true;
+                    break;
+                }
+            }
+
+            if (stoppedForExpansion)
+            {
+                break;
             }
 
             if (completedCount > policy.HardMaxStepsPerRun)
@@ -1032,7 +1040,19 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             }
         }
 
-        if (!stoppedForPendingInput)
+        if (stoppedForExpansion)
+        {
+            await _workRepo.UpdateSessionStatusAsync(
+                sessionId, WorkSessionStatus.AwaitingExpansion, ct).ConfigureAwait(false);
+            yield return await CreateStatusEnvelopeAsync(
+                runtimeInstanceId,
+                runId,
+                sequence.Take(),
+                RunStatus.Running,
+                ct,
+                workPhase: "awaiting-expansion").ConfigureAwait(false);
+        }
+        else if (!stoppedForPendingInput)
         {
             await _workRepo.UpdateSessionStatusAsync(
                 sessionId, WorkSessionStatus.Completed, ct).ConfigureAwait(false);
@@ -1073,11 +1093,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         var prepared = new List<PreparedConcurrentStep>(ready.Count);
         foreach (var readyStep in ready.OrderBy(static s => s.StepId, StringComparer.Ordinal))
         {
-            if (!agentById.TryGetValue(readyStep.TargetAgentId, out var agent))
-            {
-                throw new InvalidOperationException(
-                    $"Step '{readyStep.StepId}' targets unknown agent '{readyStep.TargetAgentId}'.");
-            }
+            var agent = ResolveStepAgent(plan, readyStep, agentById, options);
 
             var stepInputHash = string.Equals(
                     readyStep.StepId,
@@ -1597,18 +1613,22 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             ct).ConfigureAwait(false);
     }
 
-    private async Task<string> ReadPlanningTranscriptTailAsync(string sessionId, CancellationToken ct)
+    /// <summary>
+    /// 规划轮只带已存对话，每条一次。本轮用户话若尚未落库，补在末尾。
+    /// 步骤状态和专员名单不写入历史，避免下一轮再抄一遍。
+    /// </summary>
+    private async Task<RuntimeProviderMessage[]> BuildPlanningMessagesAsync(
+        string sessionId,
+        string currentUserText,
+        WorkModeOptions options,
+        string? publishedPlanVersion,
+        WorkResumeState? priorResume,
+        CancellationToken ct)
     {
         var records = await _store.ReadAllAsync(sessionId, ct).ConfigureAwait(false);
-        if (records.Count == 0)
+        var messages = new List<RuntimeProviderMessage>();
+        foreach (var record in records)
         {
-            return string.Empty;
-        }
-
-        var lines = new List<string>();
-        for (var index = records.Count - 1; index >= 0 && lines.Count < 8; index--)
-        {
-            var record = records[index];
             if (IsCanonicalPlanBody(record))
             {
                 continue;
@@ -1620,16 +1640,125 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 continue;
             }
 
-            if (text.Length > 800)
+            var role = record.Role.ToLowerInvariant() switch
             {
-                text = text[..800] + "...";
+                "assistant" => RuntimeProviderRoles.Assistant,
+                "user" => RuntimeProviderRoles.User,
+                _ => null,
+            };
+            if (role is null)
+            {
+                continue;
             }
 
-            lines.Add($"[{record.Role}] {text}");
+            messages.Add(new RuntimeProviderMessage(role, [new TextContentBlock(text)]));
         }
 
-        lines.Reverse();
-        return string.Join('\n', lines);
+        var currentAlreadyStored = !string.IsNullOrWhiteSpace(currentUserText)
+            && IsLastUserText(messages, currentUserText);
+        var status = BuildPlanningStatus(options, publishedPlanVersion, priorResume);
+        if (!string.IsNullOrWhiteSpace(status))
+        {
+            messages.Add(new RuntimeProviderMessage(
+                RuntimeProviderRoles.User,
+                [new TextContentBlock(status)]));
+        }
+
+        if (!string.IsNullOrWhiteSpace(currentUserText) && !currentAlreadyStored)
+        {
+            messages.Add(new RuntimeProviderMessage(
+                RuntimeProviderRoles.User,
+                [new TextContentBlock(currentUserText)]));
+        }
+
+        if (messages.Count == 0)
+        {
+            messages.Add(new RuntimeProviderMessage(
+                RuntimeProviderRoles.User,
+                [new TextContentBlock(string.IsNullOrWhiteSpace(currentUserText) ? string.Empty : currentUserText)]));
+        }
+
+        return messages.ToArray();
+    }
+
+    /// <summary>本轮事实：专员标识、步骤上限、已发布计划。不含行为规则。</summary>
+    private static string? BuildPlanningStatus(
+        WorkModeOptions options,
+        string? publishedPlanVersion,
+        WorkResumeState? priorResume)
+    {
+        var steps = priorResume?.Steps;
+        var hasPlan = !string.IsNullOrWhiteSpace(publishedPlanVersion) || steps is { Length: > 0 };
+        if (!hasPlan && options.AvailableAgents.Length == 0)
+        {
+            return null;
+        }
+
+        var builder = new StringBuilder();
+        if (options.AvailableAgents.Length > 0)
+        {
+            builder.AppendLine("agents:");
+            foreach (var agent in options.AvailableAgents)
+            {
+                if (string.IsNullOrWhiteSpace(agent.AgentId)
+                    || string.Equals(agent.AgentId, "general-manager", StringComparison.Ordinal)
+                    || string.Equals(agent.AgentId, "project-lead", StringComparison.Ordinal)
+                    || string.Equals(agent.AgentId, options.GeneralManager.AgentId, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                builder.Append("- id: ").AppendLine(agent.AgentId);
+                if (!string.IsNullOrWhiteSpace(agent.DisplayName))
+                {
+                    builder.Append("  name: ").AppendLine(agent.DisplayName);
+                }
+
+                if (!string.IsNullOrWhiteSpace(agent.Description))
+                {
+                    builder.Append("  summary: ").AppendLine(agent.Description);
+                }
+            }
+        }
+
+        builder.Append(CultureInfo.InvariantCulture, $"maxSteps: {options.EffectiveWorkflowPolicy.MaxStepsPerRun}");
+        builder.AppendLine();
+        if (!string.IsNullOrWhiteSpace(publishedPlanVersion))
+        {
+            builder.Append("planVersion: ").AppendLine(publishedPlanVersion);
+        }
+
+        if (steps is { Length: > 0 })
+        {
+            builder.AppendLine("steps:");
+            foreach (var step in steps)
+            {
+                builder.Append("- ")
+                    .Append(step.StepId)
+                    .Append(": ")
+                    .Append(step.Status)
+                    .Append(" / ")
+                    .AppendLine(step.Goal);
+            }
+        }
+
+        return builder.ToString().TrimEnd();
+    }
+
+    private static bool IsLastUserText(List<RuntimeProviderMessage> messages, string text)
+    {
+        for (var index = messages.Count - 1; index >= 0; index--)
+        {
+            if (!string.Equals(messages[index].Role, RuntimeProviderRoles.User, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var existing = messages[index].Content.OfType<TextContentBlock>().FirstOrDefault()?.Text;
+            return string.Equals(existing?.Trim(), text.Trim(), StringComparison.Ordinal);
+        }
+
+        return false;
     }
 
     private static bool IsCanonicalPlanBody(ConversationRecordV1 record)
@@ -2776,35 +2905,24 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         var availableTools = ResolveAvailableTools(agent, providerId, workOptionsForTools);
 
         // Append available agents list for GM if in Work mode with delegatable agents
-        var systemInstructions = context.Instructions;
-        if (workOptionsForTools is not null
-            && agent.AgentId == workOptionsForTools.GeneralManager.AgentId
-            && workOptionsForTools.AvailableAgents.Any(a => !string.Equals(a.AgentId, agent.AgentId, StringComparison.Ordinal)))
-        {
-            systemInstructions = AppendAvailableAgentsList(systemInstructions, workOptionsForTools.AvailableAgents);
-        }
-
         var systemMessage = new RuntimeProviderMessage(
             RuntimeProviderRoles.System,
-            [new TextContentBlock(systemInstructions)]);
+            [new TextContentBlock(context.Instructions)]);
         RuntimeProviderMessage[] projectedMessages;
         ContextProjectionSnapshot? projectionSnapshot = null;
         if (string.Equals(projectionVersion, PlanProjectionVersion, StringComparison.Ordinal)
             && request.Selection.ModeOptions is WorkModeOptions workOptions)
         {
-            projectedMessages =
-            [
-                new RuntimeProviderMessage(
-                    RuntimeProviderRoles.User,
-                    [new TextContentBlock(BuildManagerPlanningInput(
+            projectedMessages = await BuildPlanningMessagesAsync(
+                    sessionId,
+                    CombineGoalWithPendingInputs(
                         ExtractGoalText(request.InitialInput),
-                        workOptions,
-                        availableTools,
-                        publishedPlanVersion,
-                        priorResume,
-                        pendingUserInputs,
-                        await ReadPlanningTranscriptTailAsync(sessionId, ct).ConfigureAwait(false)))])
-            ];
+                        pendingUserInputs ?? []),
+                    workOptions,
+                    publishedPlanVersion,
+                    priorResume,
+                    ct)
+                .ConfigureAwait(false);
         }
         else if (workPlan is not null
             && currentStepState is not null
@@ -2900,7 +3018,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             Title: stepDraft?.Title ?? stepDraft?.Goal,
             ParentStepId: stepDraft?.ParentStepId,
             Depth: stepDraft?.Depth ?? 0,
-            DisplayName: agent.AgentId,
+            DisplayName: string.IsNullOrWhiteSpace(agent.DisplayName) ? agent.AgentId : agent.DisplayName,
             Role: null,
             ParticipantId: null,
             RoundIndex: null,
@@ -2943,160 +3061,76 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 : null);
     }
 
-    private static string BuildManagerPlanningInput(
-        string goal,
-        WorkModeOptions options,
-        ToolDescriptor[]? tools,
-        string? publishedPlanVersion = null,
-        WorkResumeState? priorResume = null,
-        IReadOnlyList<string>? pendingUserInputs = null,
-        string? recentTranscript = null)
+    private static bool ReusesCompletedSteps(WorkPlanDraft plan, WorkResumeState? prior)
     {
-        var builder = new StringBuilder();
-        builder.AppendLine("Create a structured WorkPlanDraft for this goal:");
-        builder.AppendLine(goal);
-        var maxSteps = options.EffectiveWorkflowPolicy.MaxStepsPerRun;
-        builder.AppendLine("Step granularity:");
-        builder.AppendLine("- One steps[] entry, or one main_steps[] entry, is one dispatch to one agent.");
-        builder.AppendLine("- Create/verify gates belong in that step's goal or sub_steps. They are not extra plan steps.");
-        builder.AppendLine("- Do not multiply deliverable count by internal gates. Ten documents with ten gates each is about ten to twelve plan steps (one per document, plus optional prepare and close).");
-        builder.Append(CultureInfo.InvariantCulture, $"- A request for at least K steps means at least K dispatch steps, not K gates inside every deliverable. Stay at or under MaxStepsPerRun ({maxSteps}).");
-        builder.AppendLine();
-        if (!string.IsNullOrWhiteSpace(recentTranscript))
+        var completed = prior?.Steps?
+            .Where(static step => step.Status == WorkStepLifecycleStatus.Completed)
+            .Select(static step => step.StepId)
+            .ToHashSet(StringComparer.Ordinal);
+        if (completed is null || completed.Count == 0)
         {
-            builder.AppendLine("Recent session transcript. Continue from it. Do not ask the user to restate the goal:");
-            builder.AppendLine(recentTranscript);
-        }
-        if (pendingUserInputs is { Count: > 0 })
-        {
-            builder.AppendLine("Pending user inputs (FIFO, already accepted this turn):");
-            for (var index = 0; index < pendingUserInputs.Count; index++)
-            {
-                builder.Append(CultureInfo.InvariantCulture, $"[{index + 1}] ")
-                    .AppendLine(pendingUserInputs[index]);
-            }
-
-            builder.AppendLine(
-                "Absorb every pending user input before deciding discussion, confirmation, or a revised plan.");
+            return false;
         }
 
-        builder.AppendLine("Available agents and declared capabilities:");
-        foreach (var agent in options.AvailableAgents)
+        var ids = plan.Steps.Select(static step => step.StepId).ToHashSet(StringComparer.Ordinal);
+        return completed.All(ids.Contains);
+    }
+
+    private static bool IsParentStep(IReadOnlyList<WorkStepSnapshot> steps, WorkStepSnapshot step)
+        => steps.Any(other => string.Equals(other.ParentStepId, step.StepId, StringComparison.Ordinal));
+
+    private static bool IsStepSettled(IReadOnlyList<WorkStepSnapshot> steps, WorkStepSnapshot step)
+    {
+        if (step.Status is WorkStepLifecycleStatus.Completed
+            or WorkStepLifecycleStatus.Skipped
+            or WorkStepLifecycleStatus.Failed)
         {
-            builder.Append("- ").Append(agent.AgentId);
-            if (agent.AllowedToolIds is { Length: > 0 })
-            {
-                builder.Append("; tools=").AppendJoin(',', agent.AllowedToolIds);
-            }
-
-            if (agent.SkillIds is { Length: > 0 })
-            {
-                builder.Append("; skills=").AppendJoin(',', agent.SkillIds);
-            }
-
-            builder.AppendLine();
+            return true;
         }
 
-        builder.AppendLine("Runtime tool catalog visible to the general manager:");
-        if (tools is null || tools.Length == 0)
+        if (!IsParentStep(steps, step))
         {
-            builder.AppendLine("- none");
-        }
-        else
-        {
-            foreach (var tool in tools)
-            {
-                builder.Append("- ").Append(tool.ToolId).Append(':').AppendLine(tool.DisplayName);
-            }
+            return false;
         }
 
-        builder.Append("WorkflowPolicy: ").AppendLine(
-            JsonSerializer.Serialize(
-                options.EffectiveWorkflowPolicy,
-                RuntimeJsonContext.Default.WorkflowPolicy));
+        var children = steps.Where(other =>
+            string.Equals(other.ParentStepId, step.StepId, StringComparison.Ordinal)).ToArray();
+        return children.Length > 0
+            && children.All(child => child.Status is WorkStepLifecycleStatus.Completed
+                or WorkStepLifecycleStatus.Skipped
+                or WorkStepLifecycleStatus.Failed);
+    }
 
-        if (priorResume?.Status is WorkSessionStatus.WaitingForPlanConfirmation)
+    private static AgentRef ResolveStepAgent(
+        WorkPlanDraft plan,
+        WorkStepSnapshot readyStep,
+        IReadOnlyDictionary<string, AgentRef> agentById,
+        WorkModeOptions options)
+    {
+        var draft = plan.Steps.FirstOrDefault(step =>
+            string.Equals(step.StepId, readyStep.StepId, StringComparison.Ordinal));
+        if (!string.IsNullOrWhiteSpace(draft?.EphemeralSystemPrompt))
         {
-            builder.AppendLine(
-                "A plan is waiting for user confirmation. Do not invent a new plan unless the user asked to revise it.");
-            builder.AppendLine(
-                "If the user only discusses without approving execution, reply in plain text with no JSON object.");
+            var manager = options.GeneralManager;
+            return new AgentRef(
+                string.IsNullOrWhiteSpace(draft.TargetAgentId)
+                    ? "ephemeral:" + readyStep.StepId
+                    : draft.TargetAgentId,
+                "ephemeral",
+                draft.EphemeralSystemPrompt,
+                manager.ProviderId,
+                manager.ModelId,
+                DisplayName: draft.EphemeralName);
         }
 
-        if (tools is { Length: > 0 }
-            && tools.Any(static tool => string.Equals(tool.ToolId, WorkSetPlanToolId, StringComparison.Ordinal)))
+        if (agentById.TryGetValue(readyStep.TargetAgentId, out var agent))
         {
-            builder.AppendLine(
-                "Preferred path: call mcli_work_set_plan with a WorkPlanDraft (planVersion/goal/steps) or main_steps/sub_steps when proposing an executable plan.");
-            builder.AppendLine(
-                "Do not expand {{placeholders}}. Template tools only supply materials; set_plan is required to publish.");
+            return agent;
         }
 
-        if (string.IsNullOrWhiteSpace(publishedPlanVersion))
-        {
-            builder.AppendLine(
-                "Alternatively return only a WorkPlanDraft JSON object when proposing an executable plan.");
-            builder.AppendLine(
-                "The first executable planVersion must be '1' with no previousPlanVersion.");
-            builder.AppendLine(
-                "If the user only wants discussion or has not approved a plan, reply in plain text with no JSON object and do not call set_plan.");
-        }
-        else
-        {
-            var nextVersion = publishedPlanVersion;
-            if (int.TryParse(
-                    publishedPlanVersion,
-                    NumberStyles.None,
-                    CultureInfo.InvariantCulture,
-                    out var currentVersion))
-            {
-                nextVersion = (currentVersion + 1).ToString(CultureInfo.InvariantCulture);
-            }
-
-            builder.AppendLine(
-                CultureInfo.InvariantCulture,
-                $"A plan is already published at planVersion '{publishedPlanVersion}'.");
-            var keepPublishedPlan = !IsPlanRevisionRequest(goal)
-                && !ContainsPlanJson(goal)
-                && priorResume?.Steps is { Length: > 0 } openSteps
-                && openSteps.All(static step => step.Status is WorkStepLifecycleStatus.Pending
-                    or WorkStepLifecycleStatus.Interrupted);
-            if (keepPublishedPlan)
-            {
-                builder.AppendLine(
-                    "This plan has no completed step result. Do not call mcli_work_set_plan and do not publish a new planVersion.");
-                builder.AppendLine(
-                    "Reply in plain text that the current plan is unchanged and still waiting for confirmation.");
-                builder.AppendLine(
-                    "Do not mention stepId, Interrupted, publish failures, or internal repairs.");
-            }
-            else
-            {
-                builder.AppendLine(
-                    CultureInfo.InvariantCulture,
-                    $"Any revised executable plan must use planVersion '{nextVersion}' and previousPlanVersion '{publishedPlanVersion}'.");
-                builder.AppendLine(
-                    "Preserve completed step outcomes via reusesStepId when the work should not be redone.");
-            }
-
-            builder.AppendLine(
-                "If the user only wants discussion and has not approved a revised plan, reply in plain text with no JSON object and do not call set_plan.");
-            if (priorResume?.Steps is { Length: > 0 } steps)
-            {
-                builder.AppendLine("Current step statuses:");
-                foreach (var step in steps)
-                {
-                    builder.Append("- ")
-                        .Append(step.StepId)
-                        .Append(": ")
-                        .Append(step.Status)
-                        .Append(" / ")
-                        .AppendLine(step.Goal);
-                }
-            }
-        }
-
-        return builder.ToString();
+        var availableAgents = string.Join(", ", agentById.Keys);
+        throw new InvalidOperationException(
+            $"Step '{readyStep.StepId}' targets unknown agent '{readyStep.TargetAgentId}'. Available agents: [{availableAgents}]");
     }
 
     private static bool IsExplicitPlanConfirmation(string text)
@@ -3106,43 +3140,9 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             return false;
         }
 
-        if (ContainsAny(text,
-                "不要执行", "别执行", "先不要", "未批准", "还未确认", "先讨论",
-                "不是执行批准", "不是批准", "禁止执行", "等待批准", "等待确认",
-                "do not execute", "don't execute", "dont execute", "not yet", "do not confirm",
-                "not an approval"))
-        {
-            return false;
-        }
-
         var trimmed = text.Trim().TrimEnd('。', '.', '!', '！');
-        if (ShortPlanConfirmations.Contains(trimmed))
-        {
-            return true;
-        }
-
-        // 避免「可执行计划」误命中「执行计划」；只用明确批准执行的短语。
-        return ContainsAny(text,
-            "确认执行", "批准执行", "同意执行", "开始执行", "可以执行", "确认计划",
-            "批准计划", "确认并执行", "按计划执行", "开始按计划执行",
-            "confirm and execute", "approve and execute", "execute the plan",
-            "confirm the plan", "approve the plan", "lgtm", "ship it");
+        return trimmed is "确认执行" or "开始执行" or "批准执行" or "按计划执行";
     }
-
-    private static readonly HashSet<string> ShortPlanConfirmations = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "开始",
-        "开始吧",
-        "执行",
-        "执行吧",
-        "同意",
-        "确认",
-        "批准",
-        "ok",
-        "yes",
-        "go",
-        "lgtm"
-    };
 
     private static bool IsPlanRevisionRequest(string text)
     {
@@ -3159,9 +3159,9 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
 
     private static string CombineGoalWithPendingInputs(
         string goal,
-        string[] pendingTexts)
+        IReadOnlyList<string> pendingTexts)
     {
-        if (pendingTexts.Length == 0)
+        if (pendingTexts.Count == 0)
         {
             return goal;
         }
@@ -3278,6 +3278,11 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             && string.Equals(agent.AgentId, workOptions.GeneralManager.AgentId, StringComparison.Ordinal))
         {
             return "general-manager";
+        }
+
+        if (agent.AgentId.StartsWith("ephemeral:", StringComparison.Ordinal))
+        {
+            return "specialist";
         }
 
         return agent.AgentId;
@@ -3433,38 +3438,6 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             snapshot.ParentInvocationId,
             snapshot.WorkStepId,
             snapshot.WorkPlanVersion);
-    }
-
-    /// <summary>
-    /// Appends available agents list to system instructions for GM agent delegation.
-    /// </summary>
-    private static string AppendAvailableAgentsList(string baseInstructions, AgentRef[] availableAgents)
-    {
-        if (availableAgents.Length <= 1)
-        {
-            return baseInstructions;
-        }
-
-        var agentListBuilder = new StringBuilder();
-        agentListBuilder.AppendLine();
-        agentListBuilder.AppendLine();
-        agentListBuilder.AppendLine("## Agent Delegation in Work Mode");
-        agentListBuilder.AppendLine();
-        agentListBuilder.AppendLine("When creating the WorkPlanDraft, assign each step to the most appropriate agent by setting the `targetAgentId` field in each WorkPlanStepDraft.");
-        agentListBuilder.AppendLine();
-        agentListBuilder.AppendLine("Available agents:");
-        agentListBuilder.AppendLine();
-
-        foreach (var agent in availableAgents)
-        {
-            agentListBuilder.AppendLine(CultureInfo.InvariantCulture, $"- **{agent.AgentId}**");
-        }
-
-        agentListBuilder.AppendLine();
-        agentListBuilder.AppendLine("When the user mentions \"@AgentName\" or \"let {Agent} do...\", assign that step's targetAgentId to the specified agent.");
-        agentListBuilder.AppendLine("The orchestrator will automatically invoke the correct agent for each step during execution.");
-
-        return baseInstructions + agentListBuilder.ToString();
     }
 
     /// <summary>

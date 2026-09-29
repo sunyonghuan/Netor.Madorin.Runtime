@@ -12,4 +12,6 @@ public sealed record AgentRef(
     /// Host-mode skill discovery strategy: <c>progressive</c> (default) or <c>direct</c>.
     /// Null / unknown values resolve to progressive. Independent mode ignores this field.
     /// </summary>
-    string? SkillDiscoveryMode = null);
+    string? SkillDiscoveryMode = null,
+    string? DisplayName = null,
+    string? Description = null);

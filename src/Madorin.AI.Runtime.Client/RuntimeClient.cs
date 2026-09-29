@@ -1135,6 +1135,21 @@ public sealed class RuntimeClient : IRuntimeClient
             cancellationToken).ConfigureAwait(false);
     }
 
+    public async ValueTask<WorkInputEnqueueResult> EnqueueWorkInputAsync(
+        WorkInputEnqueueRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.SessionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.RequestId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.Text);
+        return await SendControlRequestAsync(
+            MessageTypes.WorkInputEnqueue,
+            request,
+            RuntimeJsonContext.Default.WorkInputEnqueueResult,
+            cancellationToken).ConfigureAwait(false);
+    }
+
     public async ValueTask<MeetingInputEnqueueResult> EnqueueMeetingInputAsync(
         MeetingInputEnqueueRequest request,
         CancellationToken cancellationToken = default)

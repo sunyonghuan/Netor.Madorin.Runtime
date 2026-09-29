@@ -27,6 +27,8 @@ public enum WorkSessionStatus
     WaitingForCredentials,
     /// <summary>计划已发布，等待用户确认后才执行步骤。</summary>
     WaitingForPlanConfirmation,
+    /// <summary>调查步骤已完成，等待补齐后续步骤。</summary>
+    AwaitingExpansion,
     Completed,
     Failed,
     Cancelled,

@@ -55,6 +55,22 @@ public static class WorkPlanValidator
             agentIds.Add(agent.AgentId);
         }
 
+        var parentIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var step in plan.Steps)
+        {
+            if (!string.IsNullOrWhiteSpace(step?.ParentStepId))
+            {
+                parentIds.Add(step.ParentStepId);
+            }
+        }
+
+        var blockedExecutors = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "general-manager",
+            "project-lead",
+            options.GeneralManager.AgentId,
+        };
+
         var stepIds = new HashSet<string>(StringComparer.Ordinal);
         var deps = new Dictionary<string, string[]>(StringComparer.Ordinal);
 
@@ -77,12 +93,10 @@ public static class WorkPlanValidator
                 throw new ArgumentException($"Step '{step.StepId}' is missing a goal.", nameof(plan));
             }
 
-            if (string.IsNullOrWhiteSpace(step.TargetAgentId)
-                || !agentIds.Contains(step.TargetAgentId))
+            if (!parentIds.Contains(step.StepId))
             {
-                throw new ArgumentException(
-                    $"Step '{step.StepId}' targets unknown agent '{step.TargetAgentId}'.",
-                    nameof(plan));
+                EnsureLeafExecutor(plan, index, step, agentIds, blockedExecutors);
+                step = plan.Steps[index];
             }
 
             if (step.Depth < 0 || step.Depth > policy.MaxAgentDepth)
@@ -224,6 +238,47 @@ public static class WorkPlanValidator
     /// First publish is forced to version "1"; later publishes auto-increment
     /// and set <see cref="WorkPlanDraft.PreviousPlanVersion"/> when the model omits them.
     /// </summary>
+    private static void EnsureLeafExecutor(
+        WorkPlanDraft plan,
+        int index,
+        WorkPlanStepDraft step,
+        HashSet<string> agentIds,
+        HashSet<string> blockedExecutors)
+    {
+        var hasEphemeral = !string.IsNullOrWhiteSpace(step.EphemeralSystemPrompt)
+            || !string.IsNullOrWhiteSpace(step.EphemeralName);
+        var hasAgent = !string.IsNullOrWhiteSpace(step.TargetAgentId)
+            && !step.TargetAgentId.StartsWith("ephemeral:", StringComparison.Ordinal);
+        if (hasEphemeral && hasAgent)
+        {
+            throw new ArgumentException(
+                $"Step '{step.StepId}' cannot both name an agent and define a temporary specialist.",
+                nameof(plan));
+        }
+
+        if (hasEphemeral)
+        {
+            if (string.IsNullOrWhiteSpace(step.EphemeralName) || string.IsNullOrWhiteSpace(step.EphemeralSystemPrompt))
+            {
+                throw new ArgumentException(
+                    $"Step '{step.StepId}' temporary specialist needs ephemeralName and ephemeralSystemPrompt.",
+                    nameof(plan));
+            }
+
+            plan.Steps[index] = step with { TargetAgentId = "ephemeral:" + step.StepId.Trim() };
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(step.TargetAgentId)
+            || !agentIds.Contains(step.TargetAgentId)
+            || blockedExecutors.Contains(step.TargetAgentId))
+        {
+            throw new ArgumentException(
+                $"Step '{step.StepId}' targets unknown agent '{step.TargetAgentId}'.",
+                nameof(plan));
+        }
+    }
+
     public static WorkPlanDraft NormalizePlanRevision(
         WorkPlanDraft plan,
         string? latestPublishedPlanVersion)

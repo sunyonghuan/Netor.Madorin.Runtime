@@ -64,15 +64,8 @@ public sealed class WorkSetPlanToolTests
             }
             """);
 
-        Assert.IsTrue(result.Success);
-        using var output = JsonDocument.Parse(result.OutputJson!);
-        Assert.AreEqual(1, output.RootElement.GetProperty("stepCount").GetInt32());
-        var plan = JsonSerializer.Deserialize(
-            output.RootElement.GetProperty("plan").GetRawText(),
-            RuntimeJsonContext.Default.WorkPlanDraft);
-        Assert.IsNotNull(plan);
-        Assert.AreEqual("m1", plan.Steps[0].StepId);
-        StringAssert.Contains(plan.Steps[0].Goal, "Notes file exists");
+        Assert.IsFalse(result.Success);
+        AssertFailure(result, "targetAgentId");
     }
 
     [TestMethod]
@@ -92,14 +85,15 @@ public sealed class WorkSetPlanToolTests
 
         Assert.IsTrue(result.Success, result.Error);
         using var output = JsonDocument.Parse(result.OutputJson!);
-        Assert.AreEqual(1, output.RootElement.GetProperty("stepCount").GetInt32());
+        Assert.AreEqual(11, output.RootElement.GetProperty("stepCount").GetInt32());
         var plan = JsonSerializer.Deserialize(
             output.RootElement.GetProperty("plan").GetRawText(),
             RuntimeJsonContext.Default.WorkPlanDraft);
         Assert.IsNotNull(plan);
         Assert.AreEqual("m1", plan.Steps[0].StepId);
-        StringAssert.Contains(plan.Steps[0].Goal, "Gate 1");
-        StringAssert.Contains(plan.Steps[0].Goal, "Gate 10");
+        Assert.AreEqual("m1", plan.Steps[1].ParentStepId);
+        Assert.AreEqual("worker", plan.Steps[1].TargetAgentId);
+        Assert.AreEqual("m1-s10", plan.Steps[^1].StepId);
     }
 
     [TestMethod]

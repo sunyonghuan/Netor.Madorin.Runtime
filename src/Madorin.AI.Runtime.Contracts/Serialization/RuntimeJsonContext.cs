@@ -105,6 +105,8 @@ namespace Madorin.AI.Runtime.Contracts.Serialization;
 [JsonSerializable(typeof(MeetingHitlResponse))]
 [JsonSerializable(typeof(MeetingInputEnqueueRequest))]
 [JsonSerializable(typeof(MeetingInputEnqueueResult))]
+[JsonSerializable(typeof(WorkInputEnqueueRequest))]
+[JsonSerializable(typeof(WorkInputEnqueueResult))]
 [JsonSerializable(typeof(MeetingPauseRequest))]
 [JsonSerializable(typeof(MeetingPauseResult))]
 [JsonSerializable(typeof(MeetingResumeRequest))]

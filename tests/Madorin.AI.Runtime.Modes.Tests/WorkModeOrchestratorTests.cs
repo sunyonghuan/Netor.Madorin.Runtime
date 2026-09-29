@@ -21,6 +21,7 @@ public sealed class WorkModeOrchestratorTests
     private static readonly string[] ExpectedAgentIds = ["manager", "worker"];
     private static readonly string[] ExpectedManagerOnlyAgentIds = ["manager"];
     private static readonly string[] ExpectedManagerThenWorkerAgentIds = ["manager", "worker"];
+    private static readonly string[] ExpectedDiscussionThenExecutionAgentIds = ["manager", "manager", "worker"];
     private static readonly string[] ExpectedTwoManagerAgentIds = ["manager", "manager"];
     private static readonly string[] ExpectedRetryAgentIds = ["manager", "worker", "worker"];
     private static readonly string[] ExpectedCredentialRetryAgentIds = ["manager", "worker", "worker"];
@@ -30,6 +31,19 @@ public sealed class WorkModeOrchestratorTests
         "{\"planVersion\":\"1\",\"goal\":\"Ship\",\"steps\":["
         + "{\"stepId\":\"step-a\",\"goal\":\"Repeat target\",\"targetAgentId\":\"worker\"},"
         + "{\"stepId\":\"step-b\",\"goal\":\"Repeat target\",\"targetAgentId\":\"worker\",\"dependsOn\":[\"step-a\"]}]}";
+
+    private static int CountOccurrences(string text, string value)
+    {
+        var count = 0;
+        var index = 0;
+        while ((index = text.IndexOf(value, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += value.Length;
+        }
+
+        return count;
+    }
 
     private readonly TestContext _testContext;
 
@@ -50,16 +64,24 @@ public sealed class WorkModeOrchestratorTests
         CollectionAssert.AreEqual(ExpectedAgentIds, result.InvokedAgentIds);
         Assert.HasCount(2, result.CapturedRequests);
         Assert.HasCount(2, result.InvocationSnapshots);
-        var managerInput = ((TextContentBlock)result.CapturedRequests[0].Messages[1].Content[0]).Text;
+        var managerMessages = result.CapturedRequests[0].Messages;
+        var managerInput = string.Join(
+            "\n",
+            managerMessages.Skip(1).Select(static message =>
+                ((TextContentBlock)message.Content[0]).Text));
         StringAssert.Contains(managerInput, "Prepare the release notes.");
-        StringAssert.Contains(managerInput, "Available agents and declared capabilities:");
+        StringAssert.Contains(managerInput, "agents:");
         StringAssert.Contains(managerInput, "worker");
-        StringAssert.Contains(managerInput, "WorkflowPolicy:");
+        StringAssert.Contains(managerInput, "maxSteps:");
+        Assert.IsFalse(managerInput.Contains("Create a structured WorkPlanDraft", StringComparison.Ordinal));
+        Assert.IsFalse(managerInput.Contains("WorkflowPolicy:", StringComparison.Ordinal));
+        Assert.AreEqual(1, CountOccurrences(managerInput, "worker"));
         foreach (var providerRequest in result.CapturedRequests)
         {
             var instructions = ((TextContentBlock)providerRequest.Messages[0].Content[0]).Text;
             StringAssert.Contains(instructions, "Shared global rule.");
             StringAssert.Contains(instructions, "Shared project rule.");
+            Assert.IsFalse(instructions.Contains("Agent Delegation", StringComparison.Ordinal));
             Assert.IsLessThan(
                 instructions.IndexOf("Shared project rule.", StringComparison.Ordinal),
                 instructions.IndexOf("Shared global rule.", StringComparison.Ordinal));
@@ -503,7 +525,7 @@ public sealed class WorkModeOrchestratorTests
     }
 
     [TestMethod]
-    public async Task RequirePlanConfirmation_PublishesPlanAndWaitsWithoutExecuting()
+    public async Task RequirePlanConfirmation_DiscussionPlan_IsNotPublished()
     {
         const string planJson =
             "{\"planVersion\":\"1\",\"goal\":\"Ship\",\"steps\":["
@@ -514,17 +536,16 @@ public sealed class WorkModeOrchestratorTests
             requirePlanConfirmation: true);
 
         Assert.AreEqual(RunStatus.Completed, result.RunStatus);
-        Assert.AreEqual(WorkSessionStatus.WaitingForPlanConfirmation, result.WorkSessionStatus);
-        Assert.HasCount(1, result.PlanRevisions);
-        Assert.HasCount(1, result.WorkSteps);
-        Assert.AreEqual(WorkStepLifecycleStatus.Pending, result.WorkSteps[0].Status);
+        Assert.AreEqual(WorkSessionStatus.Planning, result.WorkSessionStatus);
+        Assert.IsEmpty(result.PlanRevisions);
+        Assert.IsEmpty(result.WorkSteps);
         CollectionAssert.AreEqual(ExpectedManagerOnlyAgentIds, result.InvokedAgentIds);
-        Assert.IsTrue(
+        Assert.IsFalse(
             result.EventBatches[0].Any(static item => item.MessageType == MessageTypes.WorkPlanUpdated));
     }
 
     [TestMethod]
-    public async Task RequirePlanConfirmation_ConfirmTurn_ExecutesPendingPlanWithoutManager()
+    public async Task RequirePlanConfirmation_ApprovalTurn_PublishesAndExecutes()
     {
         const string planJson =
             "{\"planVersion\":\"1\",\"goal\":\"Ship\",\"steps\":["
@@ -533,7 +554,7 @@ public sealed class WorkModeOrchestratorTests
         var result = await RunMultiTurnAsync(
             [
                 new WorkTurnScript("run-1", planJson, "请先制定计划，先不要执行。"),
-                new WorkTurnScript("run-2", null, "确认执行")
+                new WorkTurnScript("run-2", planJson, "确认执行")
             ],
             requirePlanConfirmation: true);
 
@@ -542,24 +563,20 @@ public sealed class WorkModeOrchestratorTests
         Assert.HasCount(1, result.PlanRevisions);
         Assert.HasCount(1, result.WorkSteps);
         Assert.AreEqual(WorkStepLifecycleStatus.Completed, result.WorkSteps[0].Status);
-        CollectionAssert.AreEqual(ExpectedManagerThenWorkerAgentIds, result.InvokedAgentIds);
-        Assert.IsFalse(
-            result.EventBatches[1].Any(static item => item.MessageType == MessageTypes.WorkPlanUpdated),
-            "Confirm turn should execute the pending plan without republishing.");
+        CollectionAssert.AreEqual(ExpectedDiscussionThenExecutionAgentIds, result.InvokedAgentIds);
+        Assert.IsTrue(
+            result.EventBatches[1].Any(static item => item.MessageType == MessageTypes.WorkPlanUpdated));
     }
 
     [TestMethod]
-    public async Task RequirePlanConfirmation_StartButton_ExecutesPendingPlanWithoutManager()
+    public async Task RequirePlanConfirmation_StartPhrase_PublishesAndExecutes()
     {
         const string planJson =
             "{\"planVersion\":\"1\",\"goal\":\"Ship\",\"steps\":["
             + "{\"stepId\":\"step-a\",\"goal\":\"Prepare notes\",\"targetAgentId\":\"worker\"}]}";
 
         var result = await RunMultiTurnAsync(
-            [
-                new WorkTurnScript("run-1", planJson, "请先制定计划，先不要执行。"),
-                new WorkTurnScript("run-2", null, "开始")
-            ],
+            [new WorkTurnScript("run-1", planJson, "开始执行")],
             requirePlanConfirmation: true);
 
         Assert.AreEqual(RunStatus.Completed, result.RunStatus);
@@ -569,7 +586,7 @@ public sealed class WorkModeOrchestratorTests
     }
 
     [TestMethod]
-    public async Task RequirePlanConfirmation_DiscussionWhileWaiting_KeepsWaitingStatus()
+    public async Task RequirePlanConfirmation_FurtherDiscussion_StillDoesNotPublish()
     {
         const string planJson =
             "{\"planVersion\":\"1\",\"goal\":\"Ship\",\"steps\":["
@@ -582,8 +599,9 @@ public sealed class WorkModeOrchestratorTests
             ],
             requirePlanConfirmation: true);
 
-        Assert.AreEqual(WorkSessionStatus.WaitingForPlanConfirmation, result.WorkSessionStatus);
-        Assert.AreEqual(WorkStepLifecycleStatus.Pending, result.WorkSteps[0].Status);
+        Assert.AreEqual(WorkSessionStatus.Planning, result.WorkSessionStatus);
+        Assert.IsEmpty(result.PlanRevisions);
+        Assert.IsEmpty(result.WorkSteps);
         CollectionAssert.AreEqual(ExpectedTwoManagerAgentIds, result.InvokedAgentIds);
     }
 
@@ -680,7 +698,7 @@ public sealed class WorkModeOrchestratorTests
     }
 
     [TestMethod]
-    public async Task RequirePlanConfirmation_PublishTurn_WaitsEvenWhenInputLooksLikeConfirm()
+    public async Task RequirePlanConfirmation_ApprovalAndPlan_ExecutesInThatTurn()
     {
         const string planJson =
             "{\"planVersion\":\"1\",\"goal\":\"Ship\",\"steps\":["
@@ -690,14 +708,14 @@ public sealed class WorkModeOrchestratorTests
             requirePlanConfirmation: true);
 
         Assert.AreEqual(RunStatus.Completed, result.RunStatus);
-        Assert.AreEqual(WorkSessionStatus.WaitingForPlanConfirmation, result.WorkSessionStatus);
+        Assert.AreEqual(WorkSessionStatus.Completed, result.WorkSessionStatus);
         Assert.HasCount(1, result.PlanRevisions);
-        Assert.IsFalse(result.InvokedAgentIds.Contains("worker"));
-        Assert.AreEqual(WorkStepLifecycleStatus.Pending, result.WorkSteps[0].Status);
+        Assert.AreEqual(WorkStepLifecycleStatus.Completed, result.WorkSteps[0].Status);
+        CollectionAssert.AreEqual(ExpectedManagerThenWorkerAgentIds, result.InvokedAgentIds);
     }
 
     [TestMethod]
-    public async Task WaitingPlan_DiscussionTurn_DoesNotRepublish()
+    public async Task UnapprovedRevision_DoesNotPublish()
     {
         const string planJson =
             "{\"planVersion\":\"1\",\"goal\":\"Ship\",\"steps\":["
@@ -712,9 +730,8 @@ public sealed class WorkModeOrchestratorTests
             ],
             requirePlanConfirmation: true);
 
-        Assert.AreEqual(WorkSessionStatus.WaitingForPlanConfirmation, result.WorkSessionStatus);
-        Assert.HasCount(1, result.PlanRevisions);
-        Assert.AreEqual("1", result.PlanRevisions[0].PlanVersion);
+        Assert.AreEqual(WorkSessionStatus.Planning, result.WorkSessionStatus);
+        Assert.IsEmpty(result.PlanRevisions);
         Assert.IsFalse(result.InvokedAgentIds.Contains("worker"));
     }
 
@@ -850,6 +867,23 @@ public sealed class WorkModeOrchestratorTests
             Assert.IsFalse(payload.TryGetProperty("title", out _), "title should NOT be at payload root");
             Assert.IsFalse(payload.TryGetProperty("displayName", out _), "displayName should NOT be at payload root");
         }
+    }
+
+    [TestMethod]
+    public async Task EphemeralSpecialist_UsesStepPrompt_NotSettings()
+    {
+        const string planJson =
+            "{\"planVersion\":\"1\",\"goal\":\"Ship\",\"steps\":["
+            + "{\"stepId\":\"step-a\",\"goal\":\"核对证书\",\"targetAgentId\":\"ephemeral:step-a\","
+            + "\"ephemeralName\":\"证书专员\",\"ephemeralSystemPrompt\":\"只负责核对证书域名。\"}]}";
+
+        var result = await RunAsync(repetitionCount: 1, managerOutput: planJson);
+
+        Assert.AreEqual(RunStatus.Completed, result.RunStatus);
+        var specialist = result.CapturedRequests.Single(request => request.AgentId == "ephemeral:step-a");
+        var system = ((TextContentBlock)specialist.Messages[0].Content[0]).Text;
+        StringAssert.Contains(system, "只负责核对证书域名。");
+        Assert.AreEqual("证书专员", result.InvocationSnapshots[specialist.InvocationId].DisplayName);
     }
 
     private async Task<WorkRunResult> RunAsync(

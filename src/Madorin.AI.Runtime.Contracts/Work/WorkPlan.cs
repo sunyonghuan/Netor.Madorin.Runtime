@@ -22,7 +22,10 @@ public sealed record WorkPlanStepDraft(
     JsonElement? Inputs = null,
     bool IsBackground = false,
     string? ReusesStepId = null,
-    string? ReplacesStepId = null);
+    string? ReplacesStepId = null,
+    string? EphemeralName = null,
+    string? EphemeralSystemPrompt = null,
+    bool Investigate = false);
 
 /// <summary>One immutable persisted revision of a work plan.</summary>
 public sealed record WorkPlanRevisionSnapshot(

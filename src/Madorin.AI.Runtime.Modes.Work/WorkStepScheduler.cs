@@ -15,6 +15,10 @@ public static class WorkStepScheduler
         policy.Validate();
 
         var byId = steps.ToDictionary(static s => s.StepId, StringComparer.Ordinal);
+        var parentIds = steps
+            .Select(static s => s.ParentStepId)
+            .Where(static id => !string.IsNullOrWhiteSpace(id))
+            .ToHashSet(StringComparer.Ordinal);
         var completed = steps
             .Where(static s => s.Status is WorkStepLifecycleStatus.Completed
                 or WorkStepLifecycleStatus.Skipped)
@@ -29,7 +33,8 @@ public static class WorkStepScheduler
 
         var ready = new List<WorkStepSnapshot>();
         foreach (var step in steps
-            .Where(static s => s.Status == WorkStepLifecycleStatus.Pending)
+            .Where(step => step.Status == WorkStepLifecycleStatus.Pending
+                && !parentIds.Contains(step.StepId))
             .OrderBy(static s => s.Depth)
             .ThenBy(static s => s.StepId, StringComparer.Ordinal))
         {

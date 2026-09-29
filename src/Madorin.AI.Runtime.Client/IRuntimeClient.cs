@@ -90,6 +90,10 @@ public interface IRuntimeClient : IAsyncDisposable
         CancellationToken cancellationToken = default);
 
     /// <summary>Enqueues mid-meeting user interrupt input for the next safe point.</summary>
+    public ValueTask<WorkInputEnqueueResult> EnqueueWorkInputAsync(
+        WorkInputEnqueueRequest request,
+        CancellationToken cancellationToken = default);
+
     public ValueTask<MeetingInputEnqueueResult> EnqueueMeetingInputAsync(
         MeetingInputEnqueueRequest request,
         CancellationToken cancellationToken = default);

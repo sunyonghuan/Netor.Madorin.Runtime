@@ -1419,6 +1419,41 @@ public sealed class RuntimeServer : IAsyncDisposable
                     RuntimeJsonContext.Default.MeetingInputEnqueueResult));
         }
 
+        if (string.Equals(request.Method, MessageTypes.WorkInputEnqueue, StringComparison.Ordinal))
+        {
+            var enqueue = request.Params is { } enqueueParams
+                ? JsonSerializer.Deserialize(
+                    enqueueParams,
+                    RuntimeJsonContext.Default.WorkInputEnqueueRequest)
+                : null;
+            if (enqueue is null
+                || string.IsNullOrWhiteSpace(enqueue.SessionId)
+                || string.IsNullOrWhiteSpace(enqueue.RequestId)
+                || string.IsNullOrWhiteSpace(enqueue.Text))
+            {
+                return Error(request.Id, -32602, "The work.input.enqueue parameters are invalid.");
+            }
+
+            var workRepository = new SqliteWorkRepository(repository.Connection);
+            var pending = await workRepository.EnqueuePendingUserInputAsync(
+                enqueue.SessionId,
+                enqueue.Text,
+                "user",
+                enqueue.RequestId,
+                ct).ConfigureAwait(false);
+            var enqueueResult = new WorkInputEnqueueResult(
+                enqueue.SessionId,
+                pending.InputId,
+                true,
+                "Pending");
+            return new JsonRpcResponse(
+                "2.0",
+                request.Id,
+                JsonSerializer.SerializeToElement(
+                    enqueueResult,
+                    RuntimeJsonContext.Default.WorkInputEnqueueResult));
+        }
+
         if (string.Equals(request.Method, MessageTypes.MeetingPause, StringComparison.Ordinal))
         {
             var pause = request.Params is { } pauseParams

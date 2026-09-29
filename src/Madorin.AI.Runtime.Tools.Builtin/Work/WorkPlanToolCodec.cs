@@ -243,7 +243,16 @@ internal static class WorkPlanToolCodec
     {
         errorCode = null;
         message = null;
-        var gates = new List<PlanGate>();
+        _ = fallbackAgent;
+        var parentId = string.Create(CultureInfo.InvariantCulture, $"m{mainOrdinal}");
+        steps.Add(new WorkPlanStepDraft(
+            parentId,
+            mainTitle,
+            string.Empty,
+            Depth: 0,
+            Title: mainTitle));
+
+        string? previousChildId = null;
         var subOrdinal = 0;
         foreach (var sub in subSteps.EnumerateArray())
         {
@@ -273,57 +282,63 @@ internal static class WorkPlanToolCodec
                 return false;
             }
 
+            var ephemeralName = ReadOptionalString(sub, "ephemeralName");
+            var ephemeralPrompt = ReadOptionalString(sub, "ephemeralSystemPrompt");
             var target = ReadOptionalString(sub, "targetAgentId")
                 ?? ReadOptionalString(sub, "target_agent_id")
-                ?? ReadOptionalString(main, "targetAgentId")
-                ?? fallbackAgent;
-            gates.Add(new PlanGate(subTitle, acceptance, target));
-        }
+                ?? ReadOptionalString(main, "targetAgentId");
+            var hasEphemeral = !string.IsNullOrWhiteSpace(ephemeralPrompt) || !string.IsNullOrWhiteSpace(ephemeralName);
+            var hasAgent = !string.IsNullOrWhiteSpace(target)
+                && !target.StartsWith("ephemeral:", StringComparison.Ordinal);
+            if (hasEphemeral && hasAgent)
+            {
+                errorCode = "invalid_plan";
+                message = $"sub_step '{subTitle}' cannot both name an agent and define a temporary specialist.";
+                return false;
+            }
 
-        var distinctAgents = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var gate in gates)
-        {
-            distinctAgents.Add(gate.TargetAgentId);
-        }
+            if (!hasEphemeral && !hasAgent)
+            {
+                errorCode = "invalid_plan";
+                message = $"sub_step '{subTitle}' needs targetAgentId or ephemeralSystemPrompt.";
+                return false;
+            }
 
-        // 同一主步骤、同一执行人：门禁留在 goal 里，只派发一次。
-        // 主步骤里换了执行人时才拆成多个派发步骤。
-        if (distinctAgents.Count == 1)
-        {
-            var stepId = string.Create(CultureInfo.InvariantCulture, $"m{mainOrdinal}");
-            var dependsOn = previousStepId is null ? Array.Empty<string>() : new[] { previousStepId };
+            var stepId = string.Create(CultureInfo.InvariantCulture, $"m{mainOrdinal}-s{subOrdinal}");
+            var dependsOn = previousChildId is null ? Array.Empty<string>() : new[] { previousChildId };
             steps.Add(new WorkPlanStepDraft(
                 stepId,
-                BuildFoldedGoal(mainTitle, gates),
-                gates[0].TargetAgentId,
+                string.Create(CultureInfo.InvariantCulture, $"{subTitle}. Acceptance: {acceptance}"),
+                hasEphemeral ? "ephemeral:" + stepId : target!,
                 DependsOn: dependsOn,
-                Depth: 0,
-                Title: mainTitle,
-                Inputs: BuildIndexInputs(mainOrdinal, 1, mainTitle, gates[0].Acceptance)));
-            previousStepId = stepId;
-            return true;
+                ParentStepId: parentId,
+                Depth: 1,
+                Title: subTitle,
+                Inputs: BuildIndexInputs(mainOrdinal, subOrdinal, mainTitle, acceptance),
+                EphemeralName: ephemeralName,
+                EphemeralSystemPrompt: ephemeralPrompt,
+                Investigate: ReadOptionalBool(sub, "investigate")));
+            previousChildId = stepId;
         }
 
-        for (var index = 0; index < gates.Count; index++)
-        {
-            var gate = gates[index];
-            var subOrdinalForId = index + 1;
-            var stepId = string.Create(
-                CultureInfo.InvariantCulture,
-                $"m{mainOrdinal}-s{subOrdinalForId}");
-            var dependsOn = previousStepId is null ? Array.Empty<string>() : new[] { previousStepId };
-            steps.Add(new WorkPlanStepDraft(
-                stepId,
-                string.Create(CultureInfo.InvariantCulture, $"{gate.Title}. Acceptance: {gate.Acceptance}"),
-                gate.TargetAgentId,
-                DependsOn: dependsOn,
-                Depth: 0,
-                Title: gate.Title,
-                Inputs: BuildIndexInputs(mainOrdinal, subOrdinalForId, mainTitle, gate.Acceptance)));
-            previousStepId = stepId;
-        }
-
+        previousStepId = previousChildId;
         return true;
+    }
+
+    private static bool ReadOptionalBool(JsonElement element, string name)
+    {
+        if (!element.TryGetProperty(name, out var value))
+        {
+            return false;
+        }
+
+        return value.ValueKind switch
+        {
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            JsonValueKind.String => string.Equals(value.GetString(), "true", StringComparison.OrdinalIgnoreCase),
+            _ => false,
+        };
     }
 
     private static string BuildFoldedGoal(string mainTitle, List<PlanGate> gates)
