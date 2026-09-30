@@ -902,11 +902,13 @@ public sealed class SqliteSessionRepository : ISessionRepository
 
     /// <summary>Returns a completed work-step result from step-level state only.</summary>
     public async Task<string?> GetCompletedWorkStepResultAsync(
+        string sessionId,
         string stepId,
         string planVersion,
         string stepInputHash,
         CancellationToken ct = default)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
         ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
         ArgumentException.ThrowIfNullOrWhiteSpace(planVersion);
         ArgumentException.ThrowIfNullOrWhiteSpace(stepInputHash);
@@ -914,11 +916,13 @@ public sealed class SqliteSessionRepository : ISessionRepository
         command.CommandText = """
             SELECT result_json
             FROM work_steps
-            WHERE step_id = $stepId
+            WHERE session_id = $sessionId
+              AND step_id = $stepId
               AND plan_version = $planVersion
               AND step_input_hash = $stepInputHash
               AND status = $completed;
             """;
+        command.Parameters.AddWithValue("$sessionId", sessionId);
         command.Parameters.AddWithValue("$stepId", stepId);
         command.Parameters.AddWithValue("$planVersion", planVersion);
         command.Parameters.AddWithValue("$stepInputHash", stepInputHash);
@@ -928,12 +932,14 @@ public sealed class SqliteSessionRepository : ISessionRepository
 
     /// <summary>Marks a work step Completed after outputs are persisted.</summary>
     public async Task CompleteWorkStepAsync(
+        string sessionId,
         string stepId,
         string planVersion,
         string stepInputHash,
         string resultJson,
         CancellationToken ct = default)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
         ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
         ArgumentException.ThrowIfNullOrWhiteSpace(planVersion);
         ArgumentException.ThrowIfNullOrWhiteSpace(stepInputHash);
@@ -949,11 +955,13 @@ public sealed class SqliteSessionRepository : ISessionRepository
                 result_json = $resultJson,
                 error_message = NULL,
                 completed_at = $completedAt
-            WHERE step_id = $stepId
+            WHERE session_id = $sessionId
+              AND step_id = $stepId
               AND plan_version = $planVersion
               AND step_input_hash = $stepInputHash
               AND status = $running;
             """;
+        stepCommand.Parameters.AddWithValue("$sessionId", sessionId);
         stepCommand.Parameters.AddWithValue("$completed", CompletedWorkStepStatus);
         stepCommand.Parameters.AddWithValue("$resultJson", resultJson);
         stepCommand.Parameters.AddWithValue("$completedAt", completedAt);

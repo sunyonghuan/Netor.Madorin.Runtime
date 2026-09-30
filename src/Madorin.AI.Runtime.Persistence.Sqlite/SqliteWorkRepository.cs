@@ -1335,6 +1335,37 @@ public sealed class SqliteWorkRepository : IWorkRecoveryStore
         return revisions;
     }
 
+    /// <summary>已提交的执行计划。和 work_steps 在同一次发布事务里写入。</summary>
+    public async Task<WorkPlanDraft?> GetLatestPublishedPlanAsync(
+        string sessionId,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        await using var command = _connection.CreateCommand();
+        command.CommandText = """
+            SELECT plan_json
+            FROM work_plan_revisions
+            WHERE session_id = $sessionId
+            ORDER BY created_at DESC, plan_version DESC
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$sessionId", sessionId);
+        var planJson = await command.ExecuteScalarAsync(ct).ConfigureAwait(false) as string;
+        if (string.IsNullOrWhiteSpace(planJson))
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize(planJson, RuntimeJsonContext.Default.WorkPlanDraft);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
     private async Task UpdateLatestStepAttemptStatusAsync(
         string stepId,
         string planVersion,

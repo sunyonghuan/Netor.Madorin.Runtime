@@ -37,6 +37,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
 
     private readonly Func<string, IRuntimeProviderAdapter> _providerFactory;
     private WorkPlanDraft? _capturedSetPlanDraft;
+    private bool _allowPlanPublish;
     private WorkStepDispatchBridge? _dispatchBridge;
     private DispatchRunContext? _dispatchContext;
     private readonly ConversationStore _store;
@@ -198,9 +199,11 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         var sequence = _dispatchContext?.Sequence
             ?? new RunSequenceAllocator(_startRunSequence);
         var goal = ExtractGoalText(request.InitialInput);
+        _allowPlanPublish = IsControlToken(goal, WorkUserConfirm);
         var fallbackStepId = $"{runId}:step-1";
         var legacyInputHash = ComputeLegacyStepInputHash(request.InitialInput);
         var completedEarly = await _sessionRepo.GetCompletedWorkStepResultAsync(
+            sessionId,
             fallbackStepId,
             "1",
             legacyInputHash,
@@ -282,64 +285,43 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 runId, sessionId, runtimeInstanceId, sequence.Take(), ct).ConfigureAwait(false);
         }
 
-        WorkPlanDraft plan;
+        WorkPlanDraft? plan = null;
         string? parentInvocationId = null;
-        // 确认执行是按钮，不是再问一轮总经理。再问就会按旧提示词继续征求确认。
-        if (IsControlToken(goal, WorkUserConfirm))
+        var continueExistingPlan = false;
+        // 只有确认按钮才允许发布。未完成的计划直接继续，不另写一份。
+        if (_allowPlanPublish)
         {
-            var existing = await ReadLatestWorkPlanDraftAsync(sessionId, ct).ConfigureAwait(false);
-            var existingSteps = existing is null
-                ? []
-                : await _workRepo.ListStepsAsync(sessionId, existing.PlanVersion, ct).ConfigureAwait(false);
-            if (existing is not null
-                && existingSteps.Count > 0
-                && existingSteps.All(step => IsStepSettled(existingSteps, step)))
-            {
-                await CompleteRunAsync(runId, ct).ConfigureAwait(false);
-                var alreadyDone = await CreateCompletedEnvelopeAsync(
-                    runId, sessionId, runtimeInstanceId, sequence.Current, ct).ConfigureAwait(false);
-                if (alreadyDone is not null)
-                {
-                    yield return alreadyDone;
-                }
-
-                yield break;
-            }
-
+            var (existing, existingSteps) = await LoadPublishedPlanAsync(sessionId, runId, ct)
+                .ConfigureAwait(false);
             if (existing is not null && existingSteps.Count > 0)
             {
-                plan = existing;
-                parentInvocationId = "confirm:" + runId;
-            }
-            else
-            {
-                var taskGoal = await ReadLastDiscussedGoalAsync(sessionId, ct).ConfigureAwait(false);
-                plan = WorkPlanValidator.NormalizePlanRevision(
-                    FallbackExecutionPlan(
-                        string.IsNullOrWhiteSpace(taskGoal) ? "完成已经谈定的任务。" : taskGoal),
-                    publishedPlanVersion);
-                plan = WorkPlanValidator.ValidateOrThrow(plan, options);
-                parentInvocationId = "confirm:" + runId;
-                await AppendPlainDialogueAsync(
-                    sessionId,
-                    parentInvocationId,
-                    "user",
-                    "user",
-                    ConfirmedExecutionText,
-                    ct).ConfigureAwait(false);
-                yield return await PublishWorkPlanAsync(
-                    sessionId,
-                    runId,
-                    runtimeInstanceId,
-                    sequence,
-                    parentInvocationId,
-                    options,
-                    policy,
-                    plan,
-                    ct).ConfigureAwait(false);
+                var hasUnsettled = existingSteps.Any(step => !IsStepSettled(existingSteps, step));
+                var hasFailed = existingSteps.Any(step =>
+                    step.Status == WorkStepLifecycleStatus.Failed);
+                var newDemand = await HasUserDemandAfterLatestPlanAsync(sessionId, ct)
+                    .ConfigureAwait(false);
+                if (hasUnsettled)
+                {
+                    plan = existing;
+                    parentInvocationId = "confirm:" + runId;
+                    continueExistingPlan = true;
+                }
+                else if (!hasFailed && !newDemand)
+                {
+                    await CompleteRunAsync(runId, ct).ConfigureAwait(false);
+                    var alreadyDone = await CreateCompletedEnvelopeAsync(
+                        runId, sessionId, runtimeInstanceId, sequence.Current, ct).ConfigureAwait(false);
+                    if (alreadyDone is not null)
+                    {
+                        yield return alreadyDone;
+                    }
+
+                    yield break;
+                }
             }
         }
-        else
+
+        if (!continueExistingPlan)
         {
             _capturedSetPlanDraft = null;
             var managerInvocation = await CreateInvocationRequestAsync(
@@ -440,14 +422,14 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 }
             }
 
-            // 重新沟通是按钮信号，本轮不发布。确认执行在进入模型之前已经派发。
-            if (IsControlToken(goal, WorkUserRedisuss))
+            // 讨论轮不发布。重新沟通不发布。只有确认轮里总经理写出的合法计划才发布。
+            if (!_allowPlanPublish || IsControlToken(goal, WorkUserRedisuss))
             {
                 validatedPlan = null;
                 validationError = null;
             }
 
-            // 调用了 set_plan 且计划合法才发布。没调用就是讨论，不靠口令判断。
+            // 确认轮调用了 set_plan 且计划合法才发布。没调用就是讨论。
             if (validatedPlan is null)
             {
                 await AppendPlanningDialogueAsync(
@@ -491,6 +473,11 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 policy,
                 plan,
                 ct).ConfigureAwait(false);
+        }
+
+        if (plan is null)
+        {
+            throw new InvalidOperationException("A confirmed work plan was not available to execute.");
         }
 
         await _workRepo.UpdateSessionStatusAsync(
@@ -694,7 +681,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                         : readyStep.StepInputHash);
 
                 var completedResult = await _sessionRepo.GetCompletedWorkStepResultAsync(
-                    readyStep.StepId, readyStep.PlanVersion, stepInputHash, ct)
+                    sessionId, readyStep.StepId, readyStep.PlanVersion, stepInputHash, ct)
                     .ConfigureAwait(false);
 
                 var childInvocation = await CreateInvocationRequestAsync(
@@ -732,7 +719,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                     if (!started)
                     {
                         completedResult = await _sessionRepo.GetCompletedWorkStepResultAsync(
-                            readyStep.StepId, readyStep.PlanVersion, stepInputHash, ct)
+                            sessionId, readyStep.StepId, readyStep.PlanVersion, stepInputHash, ct)
                             .ConfigureAwait(false);
                         if (completedResult is null)
                         {
@@ -999,6 +986,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                     new TextContentBlock(resultBuilder.ToString()),
                     RuntimeJsonContext.Default.TextContentBlock);
                 await _sessionRepo.CompleteWorkStepAsync(
+                    sessionId,
                     readyStep.StepId,
                     readyStep.PlanVersion,
                     stepInputHash,
@@ -1093,7 +1081,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                     : readyStep.StepInputHash);
 
             var completedResult = await _sessionRepo.GetCompletedWorkStepResultAsync(
-                readyStep.StepId, readyStep.PlanVersion, stepInputHash, ct)
+                sessionId, readyStep.StepId, readyStep.PlanVersion, stepInputHash, ct)
                 .ConfigureAwait(false);
 
             var childInvocation = await CreateInvocationRequestAsync(
@@ -1131,7 +1119,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 if (!started)
                 {
                     completedResult = await _sessionRepo.GetCompletedWorkStepResultAsync(
-                        readyStep.StepId, readyStep.PlanVersion, stepInputHash, ct)
+                        sessionId, readyStep.StepId, readyStep.PlanVersion, stepInputHash, ct)
                         .ConfigureAwait(false);
                     if (completedResult is null)
                     {
@@ -1358,6 +1346,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 new TextContentBlock(resultBuilder.ToString()),
                 RuntimeJsonContext.Default.TextContentBlock);
             await _sessionRepo.CompleteWorkStepAsync(
+                sessionId,
                 item.Step.StepId,
                 item.Step.PlanVersion,
                 item.StepInputHash,
@@ -1754,6 +1743,32 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         return string.Empty;
     }
 
+    /// <summary>
+    /// 执行计划以 work_plan_revisions.plan_json 为准。消息历史里的 work.plan 只在修订行缺失时补齐步骤表。
+    /// </summary>
+    private async Task<(WorkPlanDraft? Plan, IReadOnlyList<WorkStepSnapshot> Steps)> LoadPublishedPlanAsync(
+        string sessionId,
+        string runId,
+        CancellationToken ct)
+    {
+        var plan = await _workRepo.GetLatestPublishedPlanAsync(sessionId, ct).ConfigureAwait(false)
+            ?? await ReadLatestWorkPlanDraftAsync(sessionId, ct).ConfigureAwait(false);
+        if (plan is null || plan.Steps is not { Length: > 0 })
+        {
+            return (null, []);
+        }
+
+        var steps = await _workRepo.ListStepsAsync(sessionId, plan.PlanVersion, ct).ConfigureAwait(false);
+        if (steps.Count > 0)
+        {
+            return (plan, steps);
+        }
+
+        await _workRepo.SavePlanStepsAsync(sessionId, runId, plan, ct).ConfigureAwait(false);
+        steps = await _workRepo.ListStepsAsync(sessionId, plan.PlanVersion, ct).ConfigureAwait(false);
+        return (plan, steps);
+    }
+
     private async Task<WorkPlanDraft?> ReadLatestWorkPlanDraftAsync(string sessionId, CancellationToken ct)
     {
         var records = await _store.ReadAllAsync(sessionId, ct).ConfigureAwait(false);
@@ -1787,21 +1802,36 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         return null;
     }
 
-    private static WorkPlanDraft FallbackExecutionPlan(string goal)
+    private async Task<bool> HasUserDemandAfterLatestPlanAsync(string sessionId, CancellationToken ct)
     {
-        const string stepId = "step-1";
-        return new WorkPlanDraft(
-            "1",
-            goal,
-            [
-                new WorkPlanStepDraft(
-                    stepId,
-                    goal,
-                    "ephemeral:" + stepId,
-                    Title: "执行",
-                    EphemeralName: "执行专员",
-                    EphemeralSystemPrompt: "按已经谈定的方案完成本步，并给出可验收的结果。"),
-            ]);
+        var records = await _store.ReadAllAsync(sessionId, ct).ConfigureAwait(false);
+        var sawPlan = false;
+        var demand = false;
+        foreach (var record in records)
+        {
+            if (record.SummaryMetadata is { ValueKind: JsonValueKind.Object } metadata
+                && metadata.TryGetProperty("kind", out var kind)
+                && kind.ValueKind == JsonValueKind.String
+                && string.Equals(kind.GetString(), "work.plan", StringComparison.Ordinal))
+            {
+                sawPlan = true;
+                demand = false;
+                continue;
+            }
+
+            if (!sawPlan || !string.Equals(record.Role, "user", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var text = ExtractDialogueText(record.Content).Trim();
+            if (!string.IsNullOrWhiteSpace(text) && !IsPlanningControlText(text))
+            {
+                demand = true;
+            }
+        }
+
+        return demand;
     }
 
     private static bool IsLastUserText(List<RuntimeProviderMessage> messages, string text)
@@ -2755,6 +2785,19 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                     && gatewayResult.Result is { Success: true, OutputJson: { } setPlanOutput }
                     && string.Equals(toolCall.ToolId, WorkSetPlanToolId, StringComparison.Ordinal))
                 {
+                    if (!_allowPlanPublish)
+                    {
+                        toolResult = CreateDeniedToolResult(toolCall) with
+                        {
+                            Content =
+                            [
+                                new TextContentBlock(
+                                    "{\"ok\":false,\"error\":\"plan_not_published\",\"message\":\"讨论阶段不发布计划。等用户点击确认执行后，再调用 mcli_work_set_plan，按已经谈定的方案写出全部步骤。\"}")
+                            ]
+                        };
+                    }
+                    else
+                    {
                     TryCaptureSetPlanFromToolOutput(setPlanOutput);
                     if (_capturedSetPlanDraft is { } captured
                         && _dispatchContext?.Request.Selection.ModeOptions is WorkModeOptions workOptions)
@@ -2780,6 +2823,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                                 ]
                             };
                         }
+                    }
                     }
                 }
 
@@ -3823,6 +3867,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             new TextContentBlock(outputText),
             RuntimeJsonContext.Default.TextContentBlock);
         await _sessionRepo.CompleteWorkStepAsync(
+                context.SessionId,
                 currentStep.StepId,
                 currentStep.PlanVersion,
                 stepInputHash,

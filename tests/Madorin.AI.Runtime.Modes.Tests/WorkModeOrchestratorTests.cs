@@ -69,7 +69,7 @@ public sealed class WorkModeOrchestratorTests
             "\n",
             managerMessages.Skip(1).Select(static message =>
                 ((TextContentBlock)message.Content[0]).Text));
-        StringAssert.Contains(managerInput, "Prepare the release notes.");
+        StringAssert.Contains(managerInput, "已确认开始执行。");
         StringAssert.Contains(managerInput, "agents:");
         StringAssert.Contains(managerInput, "worker");
         StringAssert.Contains(managerInput, "maxSteps:");
@@ -478,23 +478,27 @@ public sealed class WorkModeOrchestratorTests
     }
 
     [TestMethod]
-    public async Task ConfirmControl_EntersExecutionWithoutAnotherManagerTurn()
+    public async Task ConfirmControl_ManagerWritesTheDiscussedSteps()
     {
+        const string planJson =
+            "{\"planVersion\":\"1\",\"goal\":\"做一个登录页\",\"steps\":["
+            + "{\"stepId\":\"step-1\",\"goal\":\"先把登录页的范围谈清楚。\",\"targetAgentId\":\"worker\",\"title\":\"谈范围\"},"
+            + "{\"stepId\":\"step-2\",\"goal\":\"画出登录页。\",\"targetAgentId\":\"worker\",\"title\":\"画页面\"},"
+            + "{\"stepId\":\"step-3\",\"goal\":\"验收登录页。\",\"targetAgentId\":\"worker\",\"title\":\"验收\"}]}";
         var result = await RunMultiTurnAsync(
             [
                 new WorkTurnScript("run-1", "先把登录页的范围谈清楚。", "做一个登录页"),
-                new WorkTurnScript("run-2", "请再确认一次，先不要执行。", "__work_user_confirm__")
+                new WorkTurnScript("run-2", planJson, "__work_user_confirm__")
             ]);
 
         Assert.AreEqual(RunStatus.Completed, result.RunStatus);
         Assert.AreEqual(WorkSessionStatus.Completed, result.WorkSessionStatus);
         Assert.HasCount(1, result.PlanRevisions);
-        Assert.HasCount(1, result.WorkSteps);
-        Assert.AreEqual("做一个登录页", result.WorkSteps[0].Goal);
-        Assert.AreEqual(WorkStepLifecycleStatus.Completed, result.WorkSteps[0].Status);
-        Assert.HasCount(1, result.InvokedAgentIds.Where(static id => id == "manager").ToArray());
-        Assert.IsTrue(result.InvokedAgentIds.Any(static id =>
-            id.StartsWith("ephemeral:", StringComparison.Ordinal)));
+        Assert.HasCount(3, result.WorkSteps);
+        Assert.IsFalse(result.WorkSteps.Any(static step => step.StepId == "ephemeral:step-1"));
+        Assert.HasCount(2, result.InvokedAgentIds.Where(static id => id == "manager").ToArray());
+        Assert.IsTrue(result.EventBatches[0].All(static item =>
+            item.MessageType != MessageTypes.WorkPlanUpdated));
         Assert.IsTrue(result.EventBatches[1].Any(static item =>
             item.MessageType == MessageTypes.WorkPlanUpdated));
     }
@@ -505,14 +509,54 @@ public sealed class WorkModeOrchestratorTests
         var result = await RunMultiTurnAsync(
             [
                 new WorkTurnScript("run-1", "先把登录页的范围谈清楚。", "做一个登录页"),
-                new WorkTurnScript("run-2", "请再确认一次，先不要执行。", "__work_user_confirm__"),
+                new WorkTurnScript(
+                    "run-2",
+                    "{\"planVersion\":\"1\",\"goal\":\"做一个登录页\",\"steps\":[{\"stepId\":\"step-1\",\"goal\":\"画出登录页。\",\"targetAgentId\":\"worker\"}]}",
+                    "__work_user_confirm__"),
                 new WorkTurnScript("run-3", "请再确认一次，先不要执行。", "__work_user_confirm__")
             ]);
 
         Assert.AreEqual(RunStatus.Completed, result.RunStatus);
         Assert.HasCount(1, result.PlanRevisions);
         Assert.HasCount(1, result.WorkSteps);
-        Assert.AreEqual("做一个登录页", result.WorkSteps[0].Goal);
+        Assert.AreEqual("画出登录页。", result.WorkSteps[0].Goal);
+    }
+
+    [TestMethod]
+    public async Task Confirm_MissingStepRows_RestoresThePublishedPlan()
+    {
+        const string planJson =
+            "{\"planVersion\":\"1\",\"goal\":\"做一个登录页\",\"steps\":["
+            + "{\"stepId\":\"step-1\",\"goal\":\"谈范围\",\"targetAgentId\":\"worker\"},"
+            + "{\"stepId\":\"step-2\",\"goal\":\"画页面\",\"targetAgentId\":\"worker\"},"
+            + "{\"stepId\":\"step-3\",\"goal\":\"验收\",\"targetAgentId\":\"worker\"}]}";
+        const string replacementJson =
+            "{\"planVersion\":\"1\",\"goal\":\"别的任务\",\"steps\":["
+            + "{\"stepId\":\"only\",\"goal\":\"只做一件事\",\"targetAgentId\":\"worker\"}]}";
+        var result = await RunMultiTurnAsync(
+            [
+                new WorkTurnScript("run-1", planJson, "__work_user_confirm__"),
+                new WorkTurnScript("run-2", replacementJson, "__work_user_confirm__")
+            ],
+            afterTurn: async (connection, completedTurns, ct) =>
+            {
+                if (completedTurns != 1)
+                {
+                    return;
+                }
+
+                await using var command = connection.CreateCommand();
+                command.CommandText = "DELETE FROM work_steps WHERE session_id = 'session-1';";
+                await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            });
+
+        Assert.AreEqual(RunStatus.Completed, result.RunStatus);
+        Assert.HasCount(1, result.PlanRevisions);
+        Assert.HasCount(3, result.WorkSteps);
+        var ids = string.Join(
+            ',',
+            result.WorkSteps.Select(static step => step.StepId).OrderBy(static id => id, StringComparer.Ordinal));
+        Assert.AreEqual("step-1,step-2,step-3", ids);
     }
 
     [TestMethod]
@@ -544,8 +588,9 @@ public sealed class WorkModeOrchestratorTests
 
         var result = await RunMultiTurnAsync(
             [
-                new WorkTurnScript("run-1", firstPlanJson, "Prepare the release notes."),
-                new WorkTurnScript("run-2", secondPlanJson, "Revise the release notes.")
+                new WorkTurnScript("run-1", firstPlanJson, "__work_user_confirm__"),
+                new WorkTurnScript("run-2", "先按新的范围再谈一次。", "Revise the release notes."),
+                new WorkTurnScript("run-3", secondPlanJson, "__work_user_confirm__")
             ]);
 
         Assert.AreEqual(RunStatus.Completed, result.RunStatus);
@@ -554,7 +599,7 @@ public sealed class WorkModeOrchestratorTests
         Assert.AreEqual("2", result.PlanRevisions[1].PlanVersion);
         Assert.AreEqual("1", result.PlanRevisions[1].PreviousPlanVersion);
 
-        var secondBatch = result.EventBatches[1];
+        var secondBatch = result.EventBatches[2];
         var planEvent = secondBatch.First(static item => item.MessageType == MessageTypes.WorkPlanUpdated);
         Assert.IsTrue(planEvent.Payload.TryGetProperty("workPlanVersion", out var version));
         Assert.AreEqual(2, version.GetInt32());
@@ -588,7 +633,7 @@ public sealed class WorkModeOrchestratorTests
         var result = await RunMultiTurnAsync(
             [
                 new WorkTurnScript("run-1", "我们先把范围谈清楚。", "准奏"),
-                new WorkTurnScript("run-2", planJson, "准奏")
+                new WorkTurnScript("run-2", planJson, "__work_user_confirm__")
             ],
             requirePlanConfirmation: true);
 
@@ -610,7 +655,7 @@ public sealed class WorkModeOrchestratorTests
             + "{\"stepId\":\"step-a\",\"goal\":\"Prepare notes\",\"targetAgentId\":\"worker\"}]}";
 
         var result = await RunMultiTurnAsync(
-            [new WorkTurnScript("run-1", planJson, "开始执行")],
+            [new WorkTurnScript("run-1", planJson, "__work_user_confirm__")],
             requirePlanConfirmation: true);
 
         Assert.AreEqual(RunStatus.Completed, result.RunStatus);
@@ -734,7 +779,7 @@ public sealed class WorkModeOrchestratorTests
             "{\"planVersion\":\"1\",\"goal\":\"Ship\",\"steps\":["
             + "{\"stepId\":\"step-a\",\"goal\":\"Prepare notes\",\"targetAgentId\":\"worker\"}]}";
         var result = await RunMultiTurnAsync(
-            [new WorkTurnScript("run-1", planJson, "确认执行")],
+            [new WorkTurnScript("run-1", planJson, "__work_user_confirm__")],
             requirePlanConfirmation: true);
 
         Assert.AreEqual(RunStatus.Completed, result.RunStatus);
@@ -755,8 +800,9 @@ public sealed class WorkModeOrchestratorTests
             + "{\"stepId\":\"step-a\",\"goal\":\"Prepare notes again\",\"targetAgentId\":\"worker\"}]}";
         var result = await RunMultiTurnAsync(
             [
-                new WorkTurnScript("run-1", planJson, "请先制定计划，先不要执行。"),
-                new WorkTurnScript("run-2", revisedJson, "再看一下范围")
+                new WorkTurnScript("run-1", planJson, "__work_user_confirm__"),
+                new WorkTurnScript("run-2", "先讨论新范围。", "再看一下范围"),
+                new WorkTurnScript("run-3", revisedJson, "__work_user_confirm__")
             ],
             requirePlanConfirmation: true);
 
@@ -773,7 +819,7 @@ public sealed class WorkModeOrchestratorTests
             + "{\"stepId\":\"step-1\",\"goal\":\"Write the file\",\"targetAgentId\":\"worker\"},"
             + "{\"stepId\":\"step-2\",\"goal\":\"验收步骤 1 的结果\",\"targetAgentId\":\"worker\"}]}";
         var result = await RunMultiTurnAsync(
-            [new WorkTurnScript("run-1", planJson, "请先制定计划，先不要执行。")]);
+            [new WorkTurnScript("run-1", planJson, "__work_user_confirm__")]);
 
         Assert.AreEqual(RunStatus.Completed, result.RunStatus);
         Assert.HasCount(1, result.PlanRevisions);
@@ -1114,7 +1160,7 @@ public sealed class WorkModeOrchestratorTests
             }
 
             var completed = await new SqliteSessionRepository(connection)
-                .GetCompletedWorkStepResultAsync("run-1:step-1", "1", ComputeHash(request.InitialInput), ct);
+                .GetCompletedWorkStepResultAsync("session-1", "run-1:step-1", "1", ComputeHash(request.InitialInput), ct);
             var runStatus = await new SqliteSessionRepository(connection)
                 .GetRunStatusAsync("run-1", ct);
             var workSteps = await new SqliteWorkRepository(connection)
@@ -1277,7 +1323,7 @@ public sealed class WorkModeOrchestratorTests
                     policy,
                     contextPolicy),
                 ToolCatalogVersion: "tools-v1"),
-            [new TextContentBlock("Prepare the release notes.")]);
+            [new TextContentBlock("__work_user_confirm__")]);
     }
 
     private sealed class FakeProviderAdapter :
@@ -1438,7 +1484,8 @@ public sealed class WorkModeOrchestratorTests
 
     private async Task<WorkRunResult> RunMultiTurnAsync(
         IReadOnlyList<WorkTurnScript> turns,
-        bool requirePlanConfirmation = false)
+        bool requirePlanConfirmation = false,
+        Func<SqliteConnection, int, CancellationToken, Task>? afterTurn = null)
     {
         ArgumentNullException.ThrowIfNull(turns);
         Assert.IsGreaterThan(0, turns.Count);
@@ -1518,6 +1565,10 @@ public sealed class WorkModeOrchestratorTests
                 invokedAgentIds.AddRange(provider.InvokedAgentIds);
                 capturedRequests.AddRange(provider.CapturedRequests);
                 lastRunStatus = await sessionRepo.GetRunStatusAsync(turn.RunId, ct);
+                if (afterTurn is not null)
+                {
+                    await afterTurn(connection, eventBatches.Count, ct).ConfigureAwait(false);
+                }
             }
 
             var workSteps = await workRepo.ListStepsAsync("session-1", ct: ct);

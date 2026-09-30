@@ -109,9 +109,10 @@ public sealed class WorkToolLoopTests
             Assert.AreEqual("1", intent.PlanVersion);
 
             var completed = await sessionRepo.GetCompletedWorkStepResultAsync(
+                "session-1",
                 "run-1:step-1",
                 "1",
-                ComputeHash([new TextContentBlock("Prepare the release notes.")]),
+                ComputeHash([new TextContentBlock("__work_user_confirm__")]),
                 ct);
             Assert.IsNotNull(completed);
             StringAssert.Contains(completed, "tool-result:worker");
@@ -647,7 +648,7 @@ public sealed class WorkToolLoopTests
                     [worker],
                     WorkflowPolicy.Default),
                 ToolCatalogVersion: "tools-v1"),
-            [new TextContentBlock("Prepare the release notes.")]);
+            [new TextContentBlock("__work_user_confirm__")]);
     }
 
     private static NewSessionRunRequest CreateConcurrentRequest()
@@ -678,7 +679,7 @@ public sealed class WorkToolLoopTests
                     [worker],
                     WorkflowPolicy.Default with { MaxConcurrentSteps = 2 }),
                 ToolCatalogVersion: "tools-v1"),
-            [new TextContentBlock("Prepare A and B in parallel.")]);
+            [new TextContentBlock("__work_user_confirm__")]);
     }
 
     private static async Task EnsureSessionRunAsync(
