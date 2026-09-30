@@ -9,7 +9,7 @@ namespace Madorin.AI.Runtime.Tools.Builtin;
 
 public sealed partial class BuiltinFsToolExecutor
 {
-    private const int MaxSearchFiles = 10_000;
+    private const int DefaultSearchPageSize = 20;
     private const int MaxSearchResults = 100;
     private const long MaxTransferFileSizeBytes = 64L * 1024 * 1024;
 
@@ -1180,12 +1180,22 @@ public sealed partial class BuiltinFsToolExecutor
             throw new ArgumentException("Tool argument 'query' cannot be empty.");
         }
 
-        var maxResults = GetOptionalInt32(arguments, "maxResults") ?? MaxSearchResults;
-        if (maxResults is < 1 or > MaxSearchResults)
+        var page = GetOptionalInt32(arguments, "page") ?? 1;
+        if (page < 1)
         {
             throw new ArgumentOutOfRangeException(
                 nameof(arguments),
-                $"Search results must be between 1 and {MaxSearchResults}.");
+                "Search page must be at least 1.");
+        }
+
+        var pageSize = GetOptionalInt32(arguments, "pageSize")
+            ?? GetOptionalInt32(arguments, "maxResults")
+            ?? DefaultSearchPageSize;
+        if (pageSize is < 1 or > MaxSearchResults)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(arguments),
+                $"Search page size must be between 1 and {MaxSearchResults}.");
         }
 
         var encodingName = GetRequiredString(arguments, "encoding");
@@ -1200,7 +1210,6 @@ public sealed partial class BuiltinFsToolExecutor
             : StringComparison.OrdinalIgnoreCase;
 
         var matches = new List<SearchMatch>();
-        var scanned = 0;
         var enumerationOptions = new EnumerationOptions
         {
             AttributesToSkip = FileAttributes.ReparsePoint,
@@ -1220,12 +1229,6 @@ public sealed partial class BuiltinFsToolExecutor
                     ignoreCase: OperatingSystem.IsWindows()))
             {
                 continue;
-            }
-
-            if (++scanned > MaxSearchFiles)
-            {
-                throw new InvalidDataException(
-                    $"Search exceeds the {MaxSearchFiles}-file scan limit.");
             }
 
             PinnedPath file;
@@ -1260,44 +1263,67 @@ public sealed partial class BuiltinFsToolExecutor
                 }
 
                 var lines = content.Split('\n');
+                var hits = 0;
+                var firstLine = 0;
+                var firstColumn = 0;
+                string? preview = null;
                 for (var index = 0; index < lines.Length; index++)
                 {
                     var line = lines[index].TrimEnd('\r');
-                    var column = line.IndexOf(query, comparison);
-                    if (column < 0)
+                    var column = 0;
+                    while (column <= line.Length - query.Length)
                     {
-                        continue;
-                    }
+                        var found = line.IndexOf(query, column, comparison);
+                        if (found < 0)
+                        {
+                            break;
+                        }
 
-                    var relative = policy.GetTargetSummary(file.Path)["workspace:".Length..];
-                    matches.Add(new SearchMatch(
-                        relative,
-                        index + 1,
-                        column + 1,
-                        line.Length <= 512 ? line : line[..512]));
-                    if (matches.Count >= maxResults)
-                    {
-                        break;
+                        if (preview is null)
+                        {
+                            firstLine = index + 1;
+                            firstColumn = found + 1;
+                            preview = line.Length <= 512 ? line : line[..512];
+                        }
+
+                        hits++;
+                        column = found + query.Length;
                     }
                 }
-            }
 
-            if (matches.Count >= maxResults)
-            {
-                break;
+                if (preview is not null)
+                {
+                    var relative = policy.GetTargetSummary(file.Path)["workspace:".Length..];
+                    matches.Add(new SearchMatch(relative, firstLine, firstColumn, preview, hits));
+                }
             }
         }
 
+        matches.Sort(static (left, right) =>
+        {
+            var byHits = right.Hits.CompareTo(left.Hits);
+            return byHits != 0 ? byHits : string.CompareOrdinal(left.Path, right.Path);
+        });
+        var total = matches.Count;
+        var offset = (page - 1L) * pageSize;
+        var pageMatches = offset >= total
+            ? []
+            : matches.Skip((int)offset).Take(pageSize).ToArray();
         var output = ToolJson.Write(writer =>
         {
             writer.WriteStartObject();
+            writer.WriteNumber("total", total);
+            writer.WriteNumber("page", page);
+            writer.WriteNumber("pageSize", pageSize);
+            writer.WriteBoolean("hasMore", offset + pageMatches.Length < total);
             writer.WriteStartArray("matches");
-            foreach (var match in matches)
+            foreach (var match in pageMatches)
             {
                 writer.WriteStartObject();
                 writer.WriteString("path", match.Path);
                 writer.WriteNumber("line", match.Line);
                 writer.WriteNumber("column", match.Column);
+                writer.WriteNumber("hits", match.Hits);
                 writer.WriteString("preview", match.Preview);
                 writer.WriteEndObject();
             }
@@ -1743,7 +1769,7 @@ public sealed partial class BuiltinFsToolExecutor
         }
     }
 
-    private sealed record SearchMatch(string Path, int Line, int Column, string Preview);
+    private sealed record SearchMatch(string Path, int Line, int Column, string Preview, int Hits);
 
     private sealed record TextEdit(int Offset, int Length, string Content);
 

@@ -32,6 +32,8 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
     private const string PendingContinuationGoal = "__work_continue_pending__";
     private const string WorkUserConfirm = "__work_user_confirm__";
     private const string WorkUserRedisuss = "__work_user_redisuss__";
+    private const string ConfirmedExecutionText = "已确认开始执行。";
+    private const string RedisussExecutionText = "继续沟通方案，先不执行。";
 
     private readonly Func<string, IRuntimeProviderAdapter> _providerFactory;
     private WorkPlanDraft? _capturedSetPlanDraft;
@@ -285,30 +287,57 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         // 确认执行是按钮，不是再问一轮总经理。再问就会按旧提示词继续征求确认。
         if (IsControlToken(goal, WorkUserConfirm))
         {
-            var taskGoal = await ReadLastDiscussedGoalAsync(sessionId, ct).ConfigureAwait(false);
-            plan = WorkPlanValidator.NormalizePlanRevision(
-                FallbackExecutionPlan(
-                    string.IsNullOrWhiteSpace(taskGoal) ? "完成已经谈定的任务。" : taskGoal),
-                publishedPlanVersion);
-            plan = WorkPlanValidator.ValidateOrThrow(plan, options);
-            parentInvocationId = "confirm:" + runId;
-            await AppendPlainDialogueAsync(
-                sessionId,
-                parentInvocationId,
-                "user",
-                "user",
-                "已确认开始执行。",
-                ct).ConfigureAwait(false);
-            yield return await PublishWorkPlanAsync(
-                sessionId,
-                runId,
-                runtimeInstanceId,
-                sequence,
-                parentInvocationId,
-                options,
-                policy,
-                plan,
-                ct).ConfigureAwait(false);
+            var existing = await ReadLatestWorkPlanDraftAsync(sessionId, ct).ConfigureAwait(false);
+            var existingSteps = existing is null
+                ? []
+                : await _workRepo.ListStepsAsync(sessionId, existing.PlanVersion, ct).ConfigureAwait(false);
+            if (existing is not null
+                && existingSteps.Count > 0
+                && existingSteps.All(step => IsStepSettled(existingSteps, step)))
+            {
+                await CompleteRunAsync(runId, ct).ConfigureAwait(false);
+                var alreadyDone = await CreateCompletedEnvelopeAsync(
+                    runId, sessionId, runtimeInstanceId, sequence.Current, ct).ConfigureAwait(false);
+                if (alreadyDone is not null)
+                {
+                    yield return alreadyDone;
+                }
+
+                yield break;
+            }
+
+            if (existing is not null && existingSteps.Count > 0)
+            {
+                plan = existing;
+                parentInvocationId = "confirm:" + runId;
+            }
+            else
+            {
+                var taskGoal = await ReadLastDiscussedGoalAsync(sessionId, ct).ConfigureAwait(false);
+                plan = WorkPlanValidator.NormalizePlanRevision(
+                    FallbackExecutionPlan(
+                        string.IsNullOrWhiteSpace(taskGoal) ? "完成已经谈定的任务。" : taskGoal),
+                    publishedPlanVersion);
+                plan = WorkPlanValidator.ValidateOrThrow(plan, options);
+                parentInvocationId = "confirm:" + runId;
+                await AppendPlainDialogueAsync(
+                    sessionId,
+                    parentInvocationId,
+                    "user",
+                    "user",
+                    ConfirmedExecutionText,
+                    ct).ConfigureAwait(false);
+                yield return await PublishWorkPlanAsync(
+                    sessionId,
+                    runId,
+                    runtimeInstanceId,
+                    sequence,
+                    parentInvocationId,
+                    options,
+                    policy,
+                    plan,
+                    ct).ConfigureAwait(false);
+            }
         }
         else
         {
@@ -1692,10 +1721,15 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
     private static string ShownPlanningUserText(string currentUserText)
         => currentUserText.Trim() switch
         {
-            WorkUserConfirm => "已确认开始执行。",
-            WorkUserRedisuss => "继续沟通方案，先不执行。",
+            WorkUserConfirm => ConfirmedExecutionText,
+            WorkUserRedisuss => RedisussExecutionText,
             _ => currentUserText,
         };
+
+    private static bool IsPlanningControlText(string text)
+        => text is WorkUserConfirm or WorkUserRedisuss or PendingContinuationGoal
+            or ConfirmedExecutionText
+            or RedisussExecutionText;
 
     private async Task<string> ReadLastDiscussedGoalAsync(string sessionId, CancellationToken ct)
     {
@@ -1709,8 +1743,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             }
 
             var text = ExtractDialogueText(record.Content).Trim();
-            if (string.IsNullOrWhiteSpace(text)
-                || text is WorkUserConfirm or WorkUserRedisuss or PendingContinuationGoal)
+            if (string.IsNullOrWhiteSpace(text) || IsPlanningControlText(text))
             {
                 continue;
             }
@@ -1719,6 +1752,39 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         }
 
         return string.Empty;
+    }
+
+    private async Task<WorkPlanDraft?> ReadLatestWorkPlanDraftAsync(string sessionId, CancellationToken ct)
+    {
+        var records = await _store.ReadAllAsync(sessionId, ct).ConfigureAwait(false);
+        for (var index = records.Count - 1; index >= 0; index--)
+        {
+            var record = records[index];
+            if (record.SummaryMetadata is not { ValueKind: JsonValueKind.Object } metadata
+                || !metadata.TryGetProperty("kind", out var kind)
+                || kind.ValueKind != JsonValueKind.String
+                || !string.Equals(kind.GetString(), "work.plan", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var text = ExtractDialogueText(record.Content);
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                continue;
+            }
+
+            try
+            {
+                return JsonSerializer.Deserialize(text, RuntimeJsonContext.Default.WorkPlanDraft);
+            }
+            catch (JsonException)
+            {
+                continue;
+            }
+        }
+
+        return null;
     }
 
     private static WorkPlanDraft FallbackExecutionPlan(string goal)

@@ -157,9 +157,9 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
             FileSearchToolId,
             "mcli",
             "Search text",
-            "Searches text files.",
-            """{"type":"object","properties":{"path":{"type":"string"},"query":{"type":"string"},"encoding":{"type":"string","enum":["auto","utf-8","utf-16le","utf-16be","gb2312","gbk","gb18030","ascii","latin1"]},"pattern":{"type":"string"},"caseSensitive":{"type":"boolean"},"maxResults":{"type":"integer","minimum":1,"maximum":100}},"required":["path","query","encoding"],"additionalProperties":false}""",
-            """{"type":"object","properties":{"matches":{"type":"array"}},"required":["matches"],"additionalProperties":false}""",
+            "Searches text under path and returns one page of the best matching files, ranked by how often query appears. page starts at 1. pageSize or maxResults sets the page length from 1 to 100; the default is 20. The result has matches, total, page, pageSize, and hasMore. Request the next page only when hasMore is true.",
+            """{"type":"object","properties":{"path":{"type":"string"},"query":{"type":"string"},"encoding":{"type":"string","enum":["auto","utf-8","utf-16le","utf-16be","gb2312","gbk","gb18030","ascii","latin1"]},"pattern":{"type":"string"},"caseSensitive":{"type":"boolean"},"page":{"type":"integer","minimum":1},"pageSize":{"type":"integer","minimum":1,"maximum":100},"maxResults":{"type":"integer","minimum":1,"maximum":100}},"required":["path","query","encoding"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"matches":{"type":"array"},"total":{"type":"integer"},"page":{"type":"integer"},"pageSize":{"type":"integer"},"hasMore":{"type":"boolean"}},"required":["matches","total","page","pageSize","hasMore"],"additionalProperties":false}""",
             Capabilities: ["filesystem.read"],
             Risk: ToolRiskLevel.SensitiveRead),
         new(

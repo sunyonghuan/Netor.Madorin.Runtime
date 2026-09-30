@@ -500,6 +500,22 @@ public sealed class WorkModeOrchestratorTests
     }
 
     [TestMethod]
+    public async Task SecondConfirm_KeepsTheDiscussedGoal()
+    {
+        var result = await RunMultiTurnAsync(
+            [
+                new WorkTurnScript("run-1", "先把登录页的范围谈清楚。", "做一个登录页"),
+                new WorkTurnScript("run-2", "请再确认一次，先不要执行。", "__work_user_confirm__"),
+                new WorkTurnScript("run-3", "请再确认一次，先不要执行。", "__work_user_confirm__")
+            ]);
+
+        Assert.AreEqual(RunStatus.Completed, result.RunStatus);
+        Assert.HasCount(1, result.PlanRevisions);
+        Assert.HasCount(1, result.WorkSteps);
+        Assert.AreEqual("做一个登录页", result.WorkSteps[0].Goal);
+    }
+
+    [TestMethod]
     public async Task InvalidStructuredPlan_DoesNotFallbackToExecutableStep()
     {
         const string invalidPlanJson =

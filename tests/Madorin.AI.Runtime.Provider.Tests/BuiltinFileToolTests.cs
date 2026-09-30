@@ -151,6 +151,57 @@ public sealed class BuiltinFileToolTests
     }
 
     [TestMethod]
+    public async Task FileSearch_RanksMatchesAndPagesThem()
+    {
+        var permission = CreatePermission();
+        await File.WriteAllTextAsync(
+            Path.Join(_root, "once.txt"),
+            "alpha\n",
+            TestContext.CancellationToken);
+        await File.WriteAllTextAsync(
+            Path.Join(_root, "often.txt"),
+            "alpha alpha\nalpha\n",
+            TestContext.CancellationToken);
+        await File.WriteAllTextAsync(
+            Path.Join(_root, "none.txt"),
+            "beta\n",
+            TestContext.CancellationToken);
+
+        var executor = new BuiltinFsToolExecutor();
+        var first = await ExecuteAsync(
+            executor,
+            BuiltinToolRegistry.FileSearchToolId,
+            """{"path":".","query":"alpha","encoding":"utf-8","page":1,"pageSize":1}""",
+            permission);
+        Assert.IsTrue(first.Success, first.Error);
+        using (var output = JsonDocument.Parse(first.OutputJson!))
+        {
+            Assert.AreEqual(2, output.RootElement.GetProperty("total").GetInt32());
+            Assert.AreEqual(1, output.RootElement.GetProperty("page").GetInt32());
+            Assert.AreEqual(1, output.RootElement.GetProperty("pageSize").GetInt32());
+            Assert.IsTrue(output.RootElement.GetProperty("hasMore").GetBoolean());
+            var match = Assert.ContainsSingle(
+                output.RootElement.GetProperty("matches").EnumerateArray().ToArray());
+            Assert.AreEqual("often.txt", match.GetProperty("path").GetString());
+            Assert.AreEqual(3, match.GetProperty("hits").GetInt32());
+        }
+
+        var second = await ExecuteAsync(
+            executor,
+            BuiltinToolRegistry.FileSearchToolId,
+            """{"path":".","query":"alpha","encoding":"utf-8","page":2,"pageSize":1}""",
+            permission);
+        Assert.IsTrue(second.Success, second.Error);
+        using (var output = JsonDocument.Parse(second.OutputJson!))
+        {
+            Assert.IsFalse(output.RootElement.GetProperty("hasMore").GetBoolean());
+            var match = Assert.ContainsSingle(
+                output.RootElement.GetProperty("matches").EnumerateArray().ToArray());
+            Assert.AreEqual("once.txt", match.GetProperty("path").GetString());
+        }
+    }
+
+    [TestMethod]
     public async Task FileRead_SymbolicLink_IsRejected()
     {
         var target = Path.Join(_root, "target.txt");
