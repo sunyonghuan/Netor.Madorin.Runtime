@@ -61,7 +61,7 @@ public sealed class RecoveryServiceTests
         var plan = new WorkPlanDraft(
             "1",
             "Ship release",
-            [new WorkPlanStepDraft("step-a", "Prepare notes", "worker")]);
+            [new WorkPlanStepDraft("step-a", "Prepare notes", "Prepare release notes", [])]);
         await workRepository.UpsertSessionAsync(
             sessionId,
             runId,
@@ -235,7 +235,7 @@ public sealed class RecoveryServiceTests
         var plan = new WorkPlanDraft(
             "1",
             "Ship release",
-            [new WorkPlanStepDraft("step-a", "Capture payment", "worker")]);
+            [new WorkPlanStepDraft("step-a", "Capture payment", "Capture payment details", [])]);
         await workRepository.UpsertSessionAsync(
             sessionId,
             runId,

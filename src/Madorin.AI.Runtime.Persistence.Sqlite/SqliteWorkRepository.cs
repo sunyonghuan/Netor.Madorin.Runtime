@@ -1335,37 +1335,6 @@ public sealed class SqliteWorkRepository : IWorkRecoveryStore
         return revisions;
     }
 
-    /// <summary>已提交的执行计划。和 work_steps 在同一次发布事务里写入。</summary>
-    public async Task<WorkPlanDraft?> GetLatestPublishedPlanAsync(
-        string sessionId,
-        CancellationToken ct = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
-        await using var command = _connection.CreateCommand();
-        command.CommandText = """
-            SELECT plan_json
-            FROM work_plan_revisions
-            WHERE session_id = $sessionId
-            ORDER BY created_at DESC, plan_version DESC
-            LIMIT 1;
-            """;
-        command.Parameters.AddWithValue("$sessionId", sessionId);
-        var planJson = await command.ExecuteScalarAsync(ct).ConfigureAwait(false) as string;
-        if (string.IsNullOrWhiteSpace(planJson))
-        {
-            return null;
-        }
-
-        try
-        {
-            return JsonSerializer.Deserialize(planJson, RuntimeJsonContext.Default.WorkPlanDraft);
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-    }
-
     private async Task UpdateLatestStepAttemptStatusAsync(
         string stepId,
         string planVersion,
@@ -1453,28 +1422,34 @@ public sealed class SqliteWorkRepository : IWorkRecoveryStore
             depends = JsonSerializer.Deserialize(dependsJson, RuntimeJsonContext.Default.StringArray);
         }
 
+        var parentStepId = reader.IsDBNull(8) ? null : reader.GetString(8);
+        var isSubStep = parentStepId is not null;
+
         return new WorkStepSnapshot(
-            reader.GetString(0),
-            reader.GetString(1),
-            reader.GetString(2),
-            reader.GetString(3),
-            reader.IsDBNull(4) ? string.Empty : reader.GetString(4),
-            reader.IsDBNull(16) ? string.Empty : reader.GetString(16),
-            ParseStepStatus(reader.IsDBNull(5) ? "pending" : reader.GetString(5)),
-            reader.IsDBNull(6) ? string.Empty : reader.GetString(6),
-            reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetInt64(7), CultureInfo.InvariantCulture),
-            reader.IsDBNull(8) ? null : reader.GetString(8),
-            reader.IsDBNull(9) ? null : reader.GetString(9),
-            reader.IsDBNull(10) ? null : reader.GetString(10),
-            reader.IsDBNull(11) ? null : reader.GetString(11),
-            reader.IsDBNull(12) ? 0 : Convert.ToInt32(reader.GetInt64(12), CultureInfo.InvariantCulture),
-            depends,
-            ParseTimestamp(reader.IsDBNull(14) ? null : reader.GetString(14)),
-            ParseTimestamp(reader.IsDBNull(15) ? null : reader.GetString(15)),
-            reader.IsDBNull(17) ? null : reader.GetString(17),
-            reader.IsDBNull(18) ? null : reader.GetString(18),
-            reader.IsDBNull(19) ? null : reader.GetString(19),
-            reader.IsDBNull(20) ? null : reader.GetString(20));
+            reader.GetString(0),                                                           // StepId
+            reader.GetString(1),                                                           // PlanVersion
+            reader.GetString(2),                                                           // SessionId
+            reader.GetString(3),                                                           // RunId
+            reader.IsDBNull(4) ? string.Empty : reader.GetString(4),                      // TargetAgentId
+            reader.IsDBNull(16) ? string.Empty : reader.GetString(16),                    // Goal
+            ParseStepStatus(reader.IsDBNull(5) ? "pending" : reader.GetString(5)),        // Status
+            reader.IsDBNull(6) ? string.Empty : reader.GetString(6),                      // StepInputHash
+            reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetInt64(7), CultureInfo.InvariantCulture), // Depth
+            parentStepId,                                                                  // ParentStepId
+            isSubStep,                                                                     // IsSubStep
+            0,                                                                             // StepIndex (default)
+            -1,                                                                            // SubStepIndex (default)
+            reader.IsDBNull(9) ? null : reader.GetString(9),                              // InvocationId
+            reader.IsDBNull(10) ? null : reader.GetString(10),                            // ResultJson
+            reader.IsDBNull(11) ? null : reader.GetString(11),                            // ErrorMessage
+            reader.IsDBNull(12) ? 0 : Convert.ToInt32(reader.GetInt64(12), CultureInfo.InvariantCulture), // AttemptCount
+            depends,                                                                       // DependsOn
+            ParseTimestamp(reader.IsDBNull(14) ? null : reader.GetString(14)),            // StartedAt
+            ParseTimestamp(reader.IsDBNull(15) ? null : reader.GetString(15)),            // CompletedAt
+            reader.IsDBNull(17) ? null : reader.GetString(17),                            // StepMessageId
+            reader.IsDBNull(18) ? null : reader.GetString(18),                            // ReusesStepId
+            reader.IsDBNull(19) ? null : reader.GetString(19),                            // ReplacesStepId
+            reader.IsDBNull(20) ? null : reader.GetString(20));                           // CheckpointJson
     }
 
     private async Task InsertPlanStepsAsync(
@@ -1486,72 +1461,101 @@ public sealed class SqliteWorkRepository : IWorkRecoveryStore
         CancellationToken ct)
     {
         var createdAt = FormatTimestamp(DateTimeOffset.UtcNow);
-        for (var index = 0; index < plan.Steps.Length; index++)
+        for (var stepIndex = 0; stepIndex < plan.Steps.Length; stepIndex++)
         {
-            var step = plan.Steps[index];
-            var inputs = SerializeStepInputs(step);
-            var hash = ComputeStepInputHash(step.StepId, plan.PlanVersion, inputs);
-            var dependsJson = JsonSerializer.Serialize(
-                step.DependsOn ?? [],
-                RuntimeJsonContext.Default.StringArray);
+            var step = plan.Steps[stepIndex];
 
-            await using var stepCommand = _connection.CreateCommand();
-            stepCommand.Transaction = transaction;
-            stepCommand.CommandText = """
-                INSERT INTO work_steps(
-                    step_id, plan_version, run_id, session_id, target_agent_id,
-                    status, step_input_hash, created_at, parent_step_id, depth,
-                    step_index, attempt_count, title, goal, is_background, depends_json,
-                    step_message_id, reuses_step_id, replaces_step_id)
-                VALUES(
-                    $stepId, $planVersion, $runId, $sessionId, $agentId,
-                    'pending', $hash, $createdAt, $parent, $depth,
-                    $index, 0, $title, $goal, $background, $depends,
-                    $stepMessageId, $reusesStepId, $replacesStepId);
-                """;
-            stepCommand.Parameters.AddWithValue("$stepId", step.StepId);
-            stepCommand.Parameters.AddWithValue("$planVersion", plan.PlanVersion);
-            stepCommand.Parameters.AddWithValue("$runId", runId);
-            stepCommand.Parameters.AddWithValue("$sessionId", sessionId);
-            stepCommand.Parameters.AddWithValue("$agentId", step.TargetAgentId);
-            stepCommand.Parameters.AddWithValue("$hash", hash);
-            stepCommand.Parameters.AddWithValue("$createdAt", createdAt);
-            stepCommand.Parameters.AddWithValue("$parent", (object?)step.ParentStepId ?? DBNull.Value);
-            stepCommand.Parameters.AddWithValue("$depth", step.Depth);
-            stepCommand.Parameters.AddWithValue("$index", index);
-            stepCommand.Parameters.AddWithValue("$title", (object?)step.Title ?? DBNull.Value);
-            stepCommand.Parameters.AddWithValue("$goal", step.Goal);
-            stepCommand.Parameters.AddWithValue("$background", step.IsBackground ? 1 : 0);
-            stepCommand.Parameters.AddWithValue("$depends", dependsJson);
-            stepCommand.Parameters.AddWithValue(
-                "$stepMessageId",
-                stepMessageIds is not null && stepMessageIds.TryGetValue(step.StepId, out var messageId)
-                    ? messageId
-                    : DBNull.Value);
-            stepCommand.Parameters.AddWithValue(
-                "$reusesStepId",
-                (object?)step.ReusesStepId ?? DBNull.Value);
-            stepCommand.Parameters.AddWithValue(
-                "$replacesStepId",
-                (object?)step.ReplacesStepId ?? DBNull.Value);
-            await stepCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-
-            foreach (var dep in step.DependsOn ?? [])
+            // Insert each sub-step as a work_step record
+            for (var subStepIndex = 0; subStepIndex < step.SubSteps.Length; subStepIndex++)
             {
-                await using var depCommand = _connection.CreateCommand();
-                depCommand.Transaction = transaction;
-                depCommand.CommandText = """
-                    INSERT INTO work_step_dependencies(
-                        session_id, step_id, plan_version, depends_on_step_id)
-                    VALUES($sessionId, $stepId, $planVersion, $dep);
+                var subStep = step.SubSteps[subStepIndex];
+                var inputs = SerializeSubStepInputs(subStep);
+                var hash = ComputeStepInputHash(subStep.SubStepId, plan.PlanVersion, inputs);
+                var dependsJson = JsonSerializer.Serialize(
+                    subStepIndex == 0 ? (step.DependsOn ?? []) : new[] { step.SubSteps[subStepIndex - 1].SubStepId },
+                    RuntimeJsonContext.Default.StringArray);
+
+                await using var stepCommand = _connection.CreateCommand();
+                stepCommand.Transaction = transaction;
+                stepCommand.CommandText = """
+                    INSERT INTO work_steps(
+                        step_id, plan_version, run_id, session_id, target_agent_id,
+                        status, step_input_hash, created_at, parent_step_id, depth,
+                        step_index, attempt_count, title, goal, is_background, depends_json,
+                        step_message_id, reuses_step_id, replaces_step_id)
+                    VALUES(
+                        $stepId, $planVersion, $runId, $sessionId, $agentId,
+                        'pending', $hash, $createdAt, $parent, $depth,
+                        $index, 0, $title, $goal, $background, $depends,
+                        $stepMessageId, $reusesStepId, $replacesStepId);
                     """;
-                depCommand.Parameters.AddWithValue("$sessionId", sessionId);
-                depCommand.Parameters.AddWithValue("$stepId", step.StepId);
-                depCommand.Parameters.AddWithValue("$planVersion", plan.PlanVersion);
-                depCommand.Parameters.AddWithValue("$dep", dep);
-                await depCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                stepCommand.Parameters.AddWithValue("$stepId", subStep.SubStepId);
+                stepCommand.Parameters.AddWithValue("$planVersion", plan.PlanVersion);
+                stepCommand.Parameters.AddWithValue("$runId", runId);
+                stepCommand.Parameters.AddWithValue("$sessionId", sessionId);
+                stepCommand.Parameters.AddWithValue("$agentId", subStep.TargetAgentId);
+                stepCommand.Parameters.AddWithValue("$hash", hash);
+                stepCommand.Parameters.AddWithValue("$createdAt", createdAt);
+                stepCommand.Parameters.AddWithValue("$parent", step.StepId);
+                stepCommand.Parameters.AddWithValue("$depth", 1);
+                stepCommand.Parameters.AddWithValue("$index", stepIndex * 1000 + subStepIndex);
+                stepCommand.Parameters.AddWithValue("$title", step.Title);
+                stepCommand.Parameters.AddWithValue("$goal", subStep.Goal);
+                stepCommand.Parameters.AddWithValue("$background", step.IsBackground ? 1 : 0);
+                stepCommand.Parameters.AddWithValue("$depends", dependsJson);
+                stepCommand.Parameters.AddWithValue(
+                    "$stepMessageId",
+                    stepMessageIds is not null && stepMessageIds.TryGetValue(step.StepId, out var messageId)
+                        ? messageId
+                        : DBNull.Value);
+                stepCommand.Parameters.AddWithValue(
+                    "$reusesStepId",
+                    (object?)step.ReusesStepId ?? DBNull.Value);
+                stepCommand.Parameters.AddWithValue(
+                    "$replacesStepId",
+                    (object?)step.ReplacesStepId ?? DBNull.Value);
+                await stepCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+
+                // Insert dependencies for first sub-step of each top-level step
+                if (subStepIndex == 0)
+                {
+                    foreach (var dep in step.DependsOn ?? [])
+                    {
+                        await using var depCommand = _connection.CreateCommand();
+                        depCommand.Transaction = transaction;
+                        depCommand.CommandText = """
+                            INSERT INTO work_step_dependencies(
+                                session_id, step_id, plan_version, depends_on_step_id)
+                            VALUES($sessionId, $stepId, $planVersion, $dep);
+                            """;
+                        depCommand.Parameters.AddWithValue("$sessionId", sessionId);
+                        depCommand.Parameters.AddWithValue("$stepId", subStep.SubStepId);
+                        depCommand.Parameters.AddWithValue("$planVersion", plan.PlanVersion);
+                        depCommand.Parameters.AddWithValue("$dep", dep);
+                        await depCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                    }
+                }
             }
         }
+    }
+
+    private static string SerializeSubStepInputs(WorkPlanSubStepDraft subStep)
+    {
+        var parts = new List<string>
+        {
+            subStep.SubStepId,
+            subStep.Goal,
+            subStep.Instruction,
+            subStep.TargetAgentId
+        };
+
+        if (subStep.Inputs is { } inputs && inputs.ValueKind is not JsonValueKind.Undefined
+            and not JsonValueKind.Null)
+        {
+            parts.Add(inputs.GetRawText());
+        }
+
+        return string.Join("\n", parts);
     }
 
     private async Task<string?> GetCurrentPlanVersionAsync(
@@ -1718,8 +1722,6 @@ public sealed class SqliteWorkRepository : IWorkRecoveryStore
         WorkSessionStatus.WaitingForApproval => "waiting_for_approval",
         WorkSessionStatus.WaitingForCredentials => "waiting_for_credentials",
         WorkSessionStatus.WaitingForPlanConfirmation => "waiting_for_plan_confirmation",
-        WorkSessionStatus.AwaitingExpansion => "awaiting_expansion",
-        WorkSessionStatus.ExecutionApproved => "execution_approved",
         WorkSessionStatus.Completed => "completed",
         WorkSessionStatus.Failed => "failed",
         WorkSessionStatus.Cancelled => "cancelled",
@@ -1735,8 +1737,6 @@ public sealed class SqliteWorkRepository : IWorkRecoveryStore
         "waiting_for_approval" => WorkSessionStatus.WaitingForApproval,
         "waiting_for_credentials" => WorkSessionStatus.WaitingForCredentials,
         "waiting_for_plan_confirmation" => WorkSessionStatus.WaitingForPlanConfirmation,
-        "awaiting_expansion" => WorkSessionStatus.AwaitingExpansion,
-        "execution_approved" => WorkSessionStatus.ExecutionApproved,
         "completed" => WorkSessionStatus.Completed,
         "failed" => WorkSessionStatus.Failed,
         "cancelled" => WorkSessionStatus.Cancelled,
@@ -1796,20 +1796,25 @@ public sealed class SqliteWorkRepository : IWorkRecoveryStore
 
     private static string SerializeStepInputs(WorkPlanStepDraft step)
     {
-        if (step.Inputs is { } inputs
-            && inputs.ValueKind is not JsonValueKind.Undefined
-            and not JsonValueKind.Null)
+        var parts = new List<string>
         {
-            return inputs.GetRawText();
+            step.StepId,
+            step.Title,
+            step.Description
+        };
+
+        if (step.SubSteps.Length > 0)
+        {
+            foreach (var subStep in step.SubSteps)
+            {
+                parts.Add(subStep.SubStepId);
+                parts.Add(subStep.Goal);
+                parts.Add(subStep.Instruction);
+                parts.Add(subStep.TargetAgentId);
+            }
         }
 
-        return string.Join(
-            "\n",
-            step.Goal,
-            step.Title ?? string.Empty,
-            step.TargetAgentId,
-            step.Depth.ToString(CultureInfo.InvariantCulture),
-            step.ParentStepId ?? string.Empty);
+        return string.Join("\n", parts);
     }
 
     private static string ComputeStepInputHash(

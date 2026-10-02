@@ -176,18 +176,12 @@ public sealed class BuiltinWorkTemplateToolTests
             """);
         Assert.IsTrue(setPlan.Success, setPlan.Error);
         using var output = JsonDocument.Parse(setPlan.OutputJson!);
-        Assert.AreEqual(3, output.RootElement.GetProperty("stepCount").GetInt32());
-        var steps = output.RootElement.GetProperty("plan").GetProperty("steps");
-        Assert.AreEqual("m1", steps[0].GetProperty("stepId").GetString());
-        Assert.AreEqual("m1-s1", steps[1].GetProperty("stepId").GetString());
-        Assert.AreEqual("m1", steps[1].GetProperty("parentStepId").GetString());
-        Assert.AreEqual("worker", steps[1].GetProperty("targetAgentId").GetString());
-        Assert.AreEqual("m1-s2", steps[2].GetProperty("stepId").GetString());
-        Assert.AreEqual("worker", steps[2].GetProperty("targetAgentId").GetString());
-        var salesGoal = steps[1].GetProperty("goal").GetString();
-        var refundGoal = steps[2].GetProperty("goal").GetString();
-        StringAssert.Contains(salesGoal, "Read sales");
-        StringAssert.Contains(refundGoal, "Read refunds");
+        Assert.AreEqual(1, output.RootElement.GetProperty("stepCount").GetInt32());
+        var step = output.RootElement.GetProperty("plan").GetProperty("steps")[0];
+        Assert.AreEqual("m1", step.GetProperty("stepId").GetString());
+        var goal = step.GetProperty("goal").GetString();
+        StringAssert.Contains(goal, "Read sales");
+        StringAssert.Contains(goal, "Read refunds");
     }
 
     [TestMethod]
@@ -216,13 +210,12 @@ public sealed class BuiltinWorkTemplateToolTests
             """);
         Assert.IsTrue(setPlan.Success, setPlan.Error);
         using var output = JsonDocument.Parse(setPlan.OutputJson!);
-        Assert.AreEqual(3, output.RootElement.GetProperty("stepCount").GetInt32());
+        Assert.AreEqual(2, output.RootElement.GetProperty("stepCount").GetInt32());
         var steps = output.RootElement.GetProperty("plan").GetProperty("steps");
-        Assert.AreEqual("m1", steps[0].GetProperty("stepId").GetString());
-        Assert.AreEqual("m1-s1", steps[1].GetProperty("stepId").GetString());
-        Assert.AreEqual("m1-s2", steps[2].GetProperty("stepId").GetString());
-        Assert.AreEqual("worker", steps[1].GetProperty("targetAgentId").GetString());
-        Assert.AreEqual("reviewer", steps[2].GetProperty("targetAgentId").GetString());
+        Assert.AreEqual("m1-s1", steps[0].GetProperty("stepId").GetString());
+        Assert.AreEqual("m1-s2", steps[1].GetProperty("stepId").GetString());
+        Assert.AreEqual("worker", steps[0].GetProperty("targetAgentId").GetString());
+        Assert.AreEqual("reviewer", steps[1].GetProperty("targetAgentId").GetString());
     }
 
     [TestMethod]

@@ -112,7 +112,7 @@ public sealed class WorkToolLoopTests
                 "session-1",
                 "run-1:step-1",
                 "1",
-                ComputeHash([new TextContentBlock("__work_user_confirm__")]),
+                ComputeHash([new TextContentBlock("Prepare the release notes.")]),
                 ct);
             Assert.IsNotNull(completed);
             StringAssert.Contains(completed, "tool-result:worker");
@@ -648,7 +648,7 @@ public sealed class WorkToolLoopTests
                     [worker],
                     WorkflowPolicy.Default),
                 ToolCatalogVersion: "tools-v1"),
-            [new TextContentBlock("__work_user_confirm__")]);
+            [new TextContentBlock("Prepare the release notes.")]);
     }
 
     private static NewSessionRunRequest CreateConcurrentRequest()
@@ -679,7 +679,7 @@ public sealed class WorkToolLoopTests
                     [worker],
                     WorkflowPolicy.Default with { MaxConcurrentSteps = 2 }),
                 ToolCatalogVersion: "tools-v1"),
-            [new TextContentBlock("__work_user_confirm__")]);
+            [new TextContentBlock("Prepare A and B in parallel.")]);
     }
 
     private static async Task EnsureSessionRunAsync(

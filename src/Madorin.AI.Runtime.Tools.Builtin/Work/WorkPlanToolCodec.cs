@@ -1,7 +1,6 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Contracts.Serialization;
 
@@ -38,8 +37,6 @@ internal static class WorkPlanToolCodec
             return false;
         }
 
-        root = NormalizeSetPlanArguments(root);
-
         if (root.TryGetProperty("steps", out _)
             && root.TryGetProperty("goal", out _)
             && root.TryGetProperty("planVersion", out _))
@@ -66,11 +63,7 @@ internal static class WorkPlanToolCodec
         }
 
         errorCode = "invalid_plan";
-        message = "Provide planVersion, goal, and flat steps[] "
-            + "(each step has stepId and goal; a leaf has targetAgentId; a child sets parentStepId), "
-            + "or main_steps[].sub_steps[] "
-            + "(each sub_step has title, acceptance_criteria, and targetAgentId). "
-            + "The agent property name is targetAgentId.";
+        message = "Provide WorkPlanDraft fields (planVersion/goal/steps) or main_steps[].sub_steps[].";
         return false;
     }
 
@@ -78,11 +71,11 @@ internal static class WorkPlanToolCodec
         WorkPlanDraft plan,
         int stepIndex,
         int subStepIndex,
-        out WorkPlanStepDraft? step,
+        out WorkPlanSubStepDraft? subStep,
         out string? errorCode,
         out string? message)
     {
-        step = null;
+        subStep = null;
         errorCode = null;
         message = null;
 
@@ -93,31 +86,27 @@ internal static class WorkPlanToolCodec
             return false;
         }
 
-        foreach (var candidate in plan.Steps)
+        if (stepIndex > plan.Steps.Length)
         {
-            if (!TryReadIndexPair(candidate, out var main, out var sub))
-            {
-                continue;
-            }
-
-            if (main == stepIndex && sub == subStepIndex)
-            {
-                step = candidate;
-                return true;
-            }
+            errorCode = "step_not_found";
+            message = string.Create(
+                CultureInfo.InvariantCulture,
+                $"stepIndex={stepIndex} exceeds total steps count={plan.Steps.Length}.");
+            return false;
         }
 
-        if (subStepIndex == 1 && stepIndex <= plan.Steps.Length)
+        var step = plan.Steps[stepIndex - 1];
+        if (subStepIndex > step.SubSteps.Length)
         {
-            step = plan.Steps[stepIndex - 1];
-            return true;
+            errorCode = "substep_not_found";
+            message = string.Create(
+                CultureInfo.InvariantCulture,
+                $"subStepIndex={subStepIndex} exceeds substeps count={step.SubSteps.Length} in step {stepIndex}.");
+            return false;
         }
 
-        errorCode = "step_not_found";
-        message = string.Create(
-            CultureInfo.InvariantCulture,
-            $"No step matches stepIndex={stepIndex}, subStepIndex={subStepIndex}.");
-        return false;
+        subStep = step.SubSteps[subStepIndex - 1];
+        return true;
     }
 
     private static bool TryParseNativeDraft(
@@ -156,12 +145,6 @@ internal static class WorkPlanToolCodec
             return false;
         }
 
-        if (!TryRejectEmptyLeafExecutors(plan, out errorCode, out message))
-        {
-            plan = null;
-            return false;
-        }
-
         return true;
     }
 
@@ -184,7 +167,7 @@ internal static class WorkPlanToolCodec
         var previous = ReadOptionalString(root, "previousPlanVersion");
         var summary = ReadOptionalString(root, "summary");
         var fallbackAgent = string.IsNullOrWhiteSpace(defaultTargetAgentId)
-            ? null
+            ? "project-lead"
             : defaultTargetAgentId.Trim();
 
         var steps = new List<WorkPlanStepDraft>();
@@ -240,12 +223,6 @@ internal static class WorkPlanToolCodec
             [.. steps],
             Summary: summary,
             PreviousPlanVersion: previous);
-        if (!TryRejectEmptyLeafExecutors(plan, out errorCode, out message))
-        {
-            plan = null;
-            return false;
-        }
-
         return true;
     }
 
@@ -254,7 +231,7 @@ internal static class WorkPlanToolCodec
         JsonElement subSteps,
         int mainOrdinal,
         string mainTitle,
-        string? fallbackAgent,
+        string fallbackAgent,
         List<WorkPlanStepDraft> steps,
         ref string? previousStepId,
         out string? errorCode,
@@ -262,15 +239,7 @@ internal static class WorkPlanToolCodec
     {
         errorCode = null;
         message = null;
-        var parentId = string.Create(CultureInfo.InvariantCulture, $"m{mainOrdinal}");
-        steps.Add(new WorkPlanStepDraft(
-            parentId,
-            mainTitle,
-            string.Empty,
-            Depth: 0,
-            Title: mainTitle));
-
-        string? previousChildId = null;
+        var gates = new List<PlanGate>();
         var subOrdinal = 0;
         foreach (var sub in subSteps.EnumerateArray())
         {
@@ -300,71 +269,50 @@ internal static class WorkPlanToolCodec
                 return false;
             }
 
-            var ephemeralName = ReadOptionalString(sub, "ephemeralName");
-            var ephemeralPrompt = ReadOptionalString(sub, "ephemeralSystemPrompt");
             var target = ReadOptionalString(sub, "targetAgentId")
                 ?? ReadOptionalString(sub, "target_agent_id")
                 ?? ReadOptionalString(main, "targetAgentId")
                 ?? fallbackAgent;
-            var hasEphemeral = !string.IsNullOrWhiteSpace(ephemeralPrompt) || !string.IsNullOrWhiteSpace(ephemeralName);
-            var hasAgent = !string.IsNullOrWhiteSpace(target)
-                && !target.StartsWith("ephemeral:", StringComparison.Ordinal);
-            if (hasEphemeral && hasAgent)
-            {
-                errorCode = "invalid_plan";
-                message = $"sub_step '{subTitle}' cannot both name an agent and define a temporary specialist.";
-                return false;
-            }
-
-            if (!hasEphemeral && !hasAgent)
-            {
-                errorCode = "invalid_plan";
-                message = $"sub_step '{subTitle}' needs targetAgentId or ephemeralSystemPrompt.";
-                return false;
-            }
-
-            var stepId = string.Create(CultureInfo.InvariantCulture, $"m{mainOrdinal}-s{subOrdinal}");
-            var dependsOn = previousChildId is not null
-                ? new[] { previousChildId }
-                : previousStepId is null
-                    ? Array.Empty<string>()
-                    : new[] { previousStepId };
-            steps.Add(new WorkPlanStepDraft(
-                stepId,
-                string.Create(CultureInfo.InvariantCulture, $"{subTitle}. Acceptance: {acceptance}"),
-                hasEphemeral ? "ephemeral:" + stepId : target!,
-                DependsOn: dependsOn,
-                ParentStepId: parentId,
-                Depth: 1,
-                Title: subTitle,
-                Inputs: BuildIndexInputs(mainOrdinal, subOrdinal, mainTitle, acceptance),
-                EphemeralName: ephemeralName,
-                EphemeralSystemPrompt: ephemeralPrompt,
-                Investigate: ReadOptionalBool(sub, "investigate")));
-            previousChildId = stepId;
+            gates.Add(new PlanGate(subTitle, acceptance, target));
         }
 
-        previousStepId = previousChildId;
+        var distinctAgents = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var gate in gates)
+        {
+            distinctAgents.Add(gate.TargetAgentId);
+        }
+
+        // 同一主步骤、同一执行人：门禁留在 goal 里，只派发一次。
+        // 主步骤里换了执行人时才拆成多个派发步骤。
+        var stepId = string.Create(CultureInfo.InvariantCulture, $"m{mainOrdinal}");
+        var dependsOn = previousStepId is null ? Array.Empty<string>() : new[] { previousStepId };
+
+        var subStepDrafts = new List<WorkPlanSubStepDraft>();
+        for (var index = 0; index < gates.Count; index++)
+        {
+            var gate = gates[index];
+            var subStepId = string.Create(CultureInfo.InvariantCulture, $"{stepId}.{index + 1}");
+            subStepDrafts.Add(new WorkPlanSubStepDraft(
+                subStepId,
+                gate.Title,
+                $"{gate.Title}. Acceptance: {gate.Acceptance}",
+                gate.TargetAgentId,
+                ExpectedOutput: gate.Acceptance,
+                Inputs: BuildIndexInputs(mainOrdinal, index + 1, mainTitle, gate.Acceptance)));
+        }
+
+        steps.Add(new WorkPlanStepDraft(
+            stepId,
+            mainTitle,
+            BuildFoldedDescription(mainTitle, gates),
+            subStepDrafts.ToArray(),
+            DependsOn: dependsOn,
+            IsBackground: false));
+        previousStepId = stepId;
         return true;
     }
 
-    private static bool ReadOptionalBool(JsonElement element, string name)
-    {
-        if (!element.TryGetProperty(name, out var value))
-        {
-            return false;
-        }
-
-        return value.ValueKind switch
-        {
-            JsonValueKind.True => true,
-            JsonValueKind.False => false,
-            JsonValueKind.String => string.Equals(value.GetString(), "true", StringComparison.OrdinalIgnoreCase),
-            _ => false,
-        };
-    }
-
-    private static string BuildFoldedGoal(string mainTitle, List<PlanGate> gates)
+    private static string BuildFoldedDescription(string mainTitle, List<PlanGate> gates)
     {
         var builder = new StringBuilder(mainTitle);
         builder.AppendLine();
@@ -400,28 +348,6 @@ internal static class WorkPlanToolCodec
         return doc.RootElement.Clone();
     }
 
-    private static bool TryReadIndexPair(WorkPlanStepDraft step, out int mainIndex, out int subIndex)
-    {
-        mainIndex = 0;
-        subIndex = 0;
-        if (step.Inputs is not JsonElement inputs || inputs.ValueKind != JsonValueKind.Object)
-        {
-            return false;
-        }
-
-        if (!inputs.TryGetProperty("mainIndex", out var main)
-            || !inputs.TryGetProperty("subIndex", out var sub)
-            || main.ValueKind != JsonValueKind.Number
-            || sub.ValueKind != JsonValueKind.Number)
-        {
-            return false;
-        }
-
-        mainIndex = main.GetInt32();
-        subIndex = sub.GetInt32();
-        return mainIndex >= 1 && subIndex >= 1;
-    }
-
     private static string? ReadOptionalString(JsonElement element, string name)
     {
         if (!element.TryGetProperty(name, out var value)
@@ -433,378 +359,6 @@ internal static class WorkPlanToolCodec
         return value.ValueKind == JsonValueKind.String
             ? value.GetString()
             : value.ToString();
-    }
-
-    private static readonly string[] AgentAliases = ["target_agent_id", "agentId", "assigneeId", "targetAgent"];
-
-    private static readonly string[] NestedChildNames = ["sub_steps", "subSteps", "substeps", "children"];
-
-    /// <summary>
-    /// 把模型猜出来的嵌套子步骤和执行人别名收成扁平 steps 或 main_steps.sub_steps。
-    /// 未收成的嵌套键在反序列化时会被丢掉，父步骤就会变成没有 targetAgentId 的叶子。
-    /// </summary>
-    private static JsonElement NormalizeSetPlanArguments(JsonElement root)
-    {
-        if (root.ValueKind != JsonValueKind.Object)
-        {
-            return root;
-        }
-
-        try
-        {
-            if (JsonNode.Parse(root.GetRawText()) is not JsonObject node)
-            {
-                return root;
-            }
-
-            FlattenRootSteps(node);
-            if (node["main_steps"] is JsonArray mainSteps)
-            {
-                NormalizeMainSteps(mainSteps);
-            }
-
-            using var document = JsonDocument.Parse(node.ToJsonString());
-            return document.RootElement.Clone();
-        }
-        catch (JsonException)
-        {
-            return root;
-        }
-    }
-
-    private static void FlattenRootSteps(JsonObject root)
-    {
-        if (root["steps"] is not JsonArray steps || steps.Count == 0)
-        {
-            return;
-        }
-
-        var flat = new JsonArray();
-        var ordinal = 0;
-        foreach (var item in steps.ToArray())
-        {
-            if (item is not JsonObject step)
-            {
-                continue;
-            }
-
-            steps.Remove(step);
-            ordinal++;
-            AppendFlatStep(step, flat, parentStepId: null, siblingOrdinal: ordinal);
-        }
-
-        root["steps"] = flat;
-        if (!HasText(root, "planVersion"))
-        {
-            root["planVersion"] = "1";
-        }
-
-        if (!HasText(root, "goal"))
-        {
-            root["goal"] = "Work plan";
-        }
-    }
-
-    private static void AppendFlatStep(
-        JsonObject step,
-        JsonArray flat,
-        string? parentStepId,
-        int siblingOrdinal)
-    {
-        PromoteAgent(step);
-        EnsureGoal(step);
-        FoldAcceptanceIntoGoal(step);
-        var children = DetachChildArray(step);
-        if (!string.IsNullOrWhiteSpace(parentStepId) && !HasText(step, "parentStepId"))
-        {
-            step["parentStepId"] = parentStepId;
-        }
-
-        var stepId = EnsureStepId(step, parentStepId, siblingOrdinal);
-        if (!string.IsNullOrWhiteSpace(parentStepId) && step["depth"] is null)
-        {
-            step["depth"] = 1;
-        }
-
-        flat.Add((JsonNode)step);
-        if (children is null)
-        {
-            return;
-        }
-
-        var childOrdinal = 0;
-        foreach (var child in children.ToArray())
-        {
-            if (child is not JsonObject childStep)
-            {
-                continue;
-            }
-
-            children.Remove(childStep);
-            childOrdinal++;
-            if (!HasText(childStep, "targetAgentId"))
-            {
-                PromoteAgent(childStep);
-            }
-
-            if (!HasText(childStep, "targetAgentId"))
-            {
-                var inherited = ReadJsonText(step["targetAgentId"]);
-                if (!string.IsNullOrWhiteSpace(inherited))
-                {
-                    childStep["targetAgentId"] = inherited;
-                }
-            }
-
-            AppendFlatStep(childStep, flat, stepId, childOrdinal);
-        }
-    }
-
-    private static void NormalizeMainSteps(JsonArray mainSteps)
-    {
-        foreach (var item in mainSteps)
-        {
-            if (item is not JsonObject main)
-            {
-                continue;
-            }
-
-            PromoteAgent(main);
-            PromoteChildProperty(main);
-            if (main["sub_steps"] is not JsonArray subSteps)
-            {
-                continue;
-            }
-
-            foreach (var sub in subSteps)
-            {
-                if (sub is not JsonObject subStep)
-                {
-                    continue;
-                }
-
-                PromoteAgent(subStep);
-                PromoteAcceptance(subStep);
-                if (HasText(subStep, "targetAgentId") || !HasText(main, "targetAgentId"))
-                {
-                    continue;
-                }
-
-                subStep["targetAgentId"] = ReadJsonText(main["targetAgentId"]);
-            }
-        }
-    }
-
-    private static void PromoteChildProperty(JsonObject main)
-    {
-        if (main["sub_steps"] is JsonArray)
-        {
-            return;
-        }
-
-        foreach (var name in NestedChildNames)
-        {
-            if (name == "sub_steps" || main[name] is not JsonArray array || array.Count == 0)
-            {
-                continue;
-            }
-
-            main.Remove(name);
-            main["sub_steps"] = array;
-            return;
-        }
-
-        if (main["steps"] is JsonArray nested
-            && nested.Count > 0
-            && nested[0] is JsonObject)
-        {
-            main.Remove("steps");
-            main["sub_steps"] = nested;
-        }
-    }
-
-    private static JsonArray? DetachChildArray(JsonObject step)
-    {
-        foreach (var name in NestedChildNames)
-        {
-            if (step[name] is not JsonArray array || array.Count == 0)
-            {
-                continue;
-            }
-
-            step.Remove(name);
-            return array;
-        }
-
-        if (step["steps"] is JsonArray nested
-            && nested.Count > 0
-            && nested[0] is JsonObject)
-        {
-            step.Remove("steps");
-            return nested;
-        }
-
-        return null;
-    }
-
-    private static void PromoteAgent(JsonObject step)
-    {
-        if (HasText(step, "targetAgentId"))
-        {
-            CoerceStringProperty(step, "targetAgentId");
-            return;
-        }
-
-        foreach (var alias in AgentAliases)
-        {
-            var text = ReadJsonText(step[alias]);
-            if (string.IsNullOrWhiteSpace(text))
-            {
-                continue;
-            }
-
-            step["targetAgentId"] = text;
-            step.Remove(alias);
-            return;
-        }
-    }
-
-    private static void PromoteAcceptance(JsonObject step)
-    {
-        if (HasText(step, "acceptance_criteria"))
-        {
-            return;
-        }
-
-        var acceptance = ReadJsonText(step["acceptanceCriteria"]);
-        if (!string.IsNullOrWhiteSpace(acceptance))
-        {
-            step["acceptance_criteria"] = acceptance;
-        }
-    }
-
-    private static void EnsureGoal(JsonObject step)
-    {
-        if (HasText(step, "goal"))
-        {
-            return;
-        }
-
-        var title = ReadJsonText(step["title"]);
-        if (!string.IsNullOrWhiteSpace(title))
-        {
-            step["goal"] = title;
-        }
-    }
-
-    private static void FoldAcceptanceIntoGoal(JsonObject step)
-    {
-        var acceptance = ReadJsonText(step["acceptance_criteria"])
-            ?? ReadJsonText(step["acceptanceCriteria"]);
-        if (string.IsNullOrWhiteSpace(acceptance))
-        {
-            return;
-        }
-
-        var goal = ReadJsonText(step["goal"]) ?? string.Empty;
-        if (goal.Contains(acceptance, StringComparison.Ordinal))
-        {
-            return;
-        }
-
-        step["goal"] = string.IsNullOrWhiteSpace(goal)
-            ? "Acceptance: " + acceptance
-            : goal.TrimEnd() + ". Acceptance: " + acceptance;
-    }
-
-    private static string EnsureStepId(JsonObject step, string? parentStepId, int siblingOrdinal)
-    {
-        var existing = ReadJsonText(step["stepId"]);
-        if (!string.IsNullOrWhiteSpace(existing))
-        {
-            step["stepId"] = existing;
-            return existing;
-        }
-
-        var generated = string.IsNullOrWhiteSpace(parentStepId)
-            ? "s" + siblingOrdinal.ToString(CultureInfo.InvariantCulture)
-            : parentStepId + "-s" + siblingOrdinal.ToString(CultureInfo.InvariantCulture);
-        step["stepId"] = generated;
-        return generated;
-    }
-
-    private static void CoerceStringProperty(JsonObject step, string name)
-    {
-        var text = ReadJsonText(step[name]);
-        if (!string.IsNullOrWhiteSpace(text))
-        {
-            step[name] = text;
-        }
-    }
-
-    private static bool TryRejectEmptyLeafExecutors(
-        WorkPlanDraft plan,
-        out string? errorCode,
-        out string? message)
-    {
-        errorCode = null;
-        message = null;
-        var parentIds = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var step in plan.Steps)
-        {
-            if (!string.IsNullOrWhiteSpace(step.ParentStepId))
-            {
-                parentIds.Add(step.ParentStepId);
-            }
-        }
-
-        foreach (var step in plan.Steps)
-        {
-            if (parentIds.Contains(step.StepId))
-            {
-                continue;
-            }
-
-            var hasEphemeral = !string.IsNullOrWhiteSpace(step.EphemeralSystemPrompt)
-                || !string.IsNullOrWhiteSpace(step.EphemeralName);
-            if (hasEphemeral || !string.IsNullOrWhiteSpace(step.TargetAgentId))
-            {
-                continue;
-            }
-
-            errorCode = "invalid_plan";
-            message = $"Step '{step.StepId}' is a leaf and targetAgentId is empty. "
-                + "Set targetAgentId to a specialist id from AvailableAgents. "
-                + "A parent omits targetAgentId only when another step sets parentStepId to this stepId. "
-                + "Put child steps in the same steps array, or use main_steps[].sub_steps[] with targetAgentId on every sub_step. "
-                + "The agent property name is targetAgentId.";
-            return false;
-        }
-
-        return true;
-    }
-
-    private static bool HasText(JsonObject obj, string name) =>
-        !string.IsNullOrWhiteSpace(ReadJsonText(obj[name]));
-
-    private static string? ReadJsonText(JsonNode? node)
-    {
-        if (node is not JsonValue value)
-        {
-            return null;
-        }
-
-        if (value.TryGetValue<string>(out var text))
-        {
-            return string.IsNullOrWhiteSpace(text) ? null : text.Trim();
-        }
-
-        if (value.TryGetValue<int>(out var number))
-        {
-            return number.ToString(CultureInfo.InvariantCulture);
-        }
-
-        return null;
     }
 
     private static bool ContainsPlaceholder(string text) =>

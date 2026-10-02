@@ -80,10 +80,11 @@ public sealed class BuiltinWorkSetPlanToolExecutor : IToolExecutor
             return Failure(
                 invocation,
                 "too_many_steps",
-                $"Plan has {plan.Steps.Length} steps which exceeds MaxStepsPerRun={maxSteps}. "
-                + "One plan step is one agent dispatch. Put each deliverable's create/verify gates in that step's goal. "
-                + "Ten documents are about ten to twelve steps, not document-count times gate-count. "
-                + "Call mcli_work_set_plan again with the collapsed plan.");
+                $"Plan has {plan.Steps.Length} top-level steps which exceeds MaxStepsPerRun={maxSteps}. "
+                + "One top-level step represents one deliverable (e.g., one document, one feature). "
+                + "Break each top-level step into sub-steps (subSteps[]) for create/verify/review gates. "
+                + "MaxStepsPerRun limits top-level steps only, not sub-steps. "
+                + "Call mcli_work_set_plan again with the restructured plan.");
         }
 
         var planJson = JsonSerializer.Serialize(plan, RuntimeJsonContext.Default.WorkPlanDraft);
@@ -102,8 +103,8 @@ public sealed class BuiltinWorkSetPlanToolExecutor : IToolExecutor
 
             writer.WriteString(
                 "message",
-                "Plan accepted. One step is one agent dispatch; create/verify gates stay inside the step goal. Runtime is dispatching the steps now. Do not ask the user to confirm again.");
-            writer.WriteBoolean("requiresConfirmation", false);
+                "Plan accepted. Each top-level step should contain subSteps[] defining the actual work units (create/verify/review). Runtime will persist it and wait for explicit user confirmation before dispatch.");
+            writer.WriteBoolean("requiresConfirmation", true);
             writer.WriteEndObject();
         });
         return new ToolResult(invocation.CallId, invocation.ToolId, true, output);

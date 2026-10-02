@@ -55,22 +55,6 @@ public static class WorkPlanValidator
             agentIds.Add(agent.AgentId);
         }
 
-        var parentIds = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var step in plan.Steps)
-        {
-            if (!string.IsNullOrWhiteSpace(step?.ParentStepId))
-            {
-                parentIds.Add(step.ParentStepId);
-            }
-        }
-
-        var blockedExecutors = new HashSet<string>(StringComparer.Ordinal)
-        {
-            "general-manager",
-            "project-lead",
-            options.GeneralManager.AgentId,
-        };
-
         var stepIds = new HashSet<string>(StringComparer.Ordinal);
         var deps = new Dictionary<string, string[]>(StringComparer.Ordinal);
 
@@ -88,44 +72,55 @@ public static class WorkPlanValidator
                 throw new ArgumentException($"Duplicate stepId '{step.StepId}'.", nameof(plan));
             }
 
-            if (string.IsNullOrWhiteSpace(step.Goal))
+            if (string.IsNullOrWhiteSpace(step.Title))
             {
-                throw new ArgumentException($"Step '{step.StepId}' is missing a goal.", nameof(plan));
+                throw new ArgumentException($"Step '{step.StepId}' is missing a title.", nameof(plan));
             }
 
-            if (!parentIds.Contains(step.StepId))
+            if (string.IsNullOrWhiteSpace(step.Description))
             {
-                EnsureLeafExecutor(plan, index, step, agentIds, blockedExecutors);
-                step = plan.Steps[index];
+                throw new ArgumentException($"Step '{step.StepId}' is missing a description.", nameof(plan));
             }
 
-            if (step.Depth < 0 || step.Depth > policy.MaxAgentDepth)
+            // Validate SubSteps
+            if (step.SubSteps is null or { Length: 0 })
             {
-                throw new ArgumentException(
-                    $"Step '{step.StepId}' depth {step.Depth} exceeds MaxAgentDepth={policy.MaxAgentDepth}.",
-                    nameof(plan));
+                throw new ArgumentException($"Step '{step.StepId}' has no sub-steps. Each top-level step must contain at least one sub-step.", nameof(plan));
             }
 
-            if (step.Depth > policy.HardMaxAgentDepth)
+            var subStepIds = new HashSet<string>(StringComparer.Ordinal);
+            for (var subIndex = 0; subIndex < step.SubSteps.Length; subIndex++)
             {
-                throw new ArgumentException(
-                    $"Step '{step.StepId}' depth exceeds HardMaxAgentDepth.",
-                    nameof(plan));
-            }
+                var subStep = step.SubSteps[subIndex]
+                    ?? throw new ArgumentException($"Step '{step.StepId}' has null sub-step at index {subIndex}.", nameof(plan));
 
-            if (string.Equals(step.ParentStepId, step.StepId, StringComparison.Ordinal))
-            {
-                throw new ArgumentException(
-                    $"Step '{step.StepId}' cannot be its own parent.",
-                    nameof(plan));
-            }
+                if (string.IsNullOrWhiteSpace(subStep.SubStepId))
+                {
+                    throw new ArgumentException($"Step '{step.StepId}' sub-step at index {subIndex} is missing subStepId.", nameof(plan));
+                }
 
-            if (step.ParentStepId is { Length: > 0 }
-                && !string.Equals(step.ParentStepId, step.StepId, StringComparison.Ordinal)
-                && !stepIds.Contains(step.ParentStepId)
-                && !(step.DependsOn?.Contains(step.ParentStepId, StringComparer.Ordinal) ?? false))
-            {
-                // Parent may appear later in the list; final check after full scan.
+                if (!subStepIds.Add(subStep.SubStepId))
+                {
+                    throw new ArgumentException($"Step '{step.StepId}' has duplicate subStepId '{subStep.SubStepId}'.", nameof(plan));
+                }
+
+                if (string.IsNullOrWhiteSpace(subStep.Goal))
+                {
+                    throw new ArgumentException($"SubStep '{subStep.SubStepId}' is missing a goal.", nameof(plan));
+                }
+
+                if (string.IsNullOrWhiteSpace(subStep.Instruction))
+                {
+                    throw new ArgumentException($"SubStep '{subStep.SubStepId}' is missing an instruction.", nameof(plan));
+                }
+
+                if (string.IsNullOrWhiteSpace(subStep.TargetAgentId)
+                    || !agentIds.Contains(subStep.TargetAgentId))
+                {
+                    throw new ArgumentException(
+                        $"SubStep '{subStep.SubStepId}' targets unknown agent '{subStep.TargetAgentId}'.",
+                        nameof(plan));
+                }
             }
 
             deps[step.StepId] = step.DependsOn ?? [];
@@ -133,14 +128,6 @@ public static class WorkPlanValidator
 
         foreach (var step in plan.Steps)
         {
-            if (step.ParentStepId is { Length: > 0 }
-                && !stepIds.Contains(step.ParentStepId))
-            {
-                throw new ArgumentException(
-                    $"Step '{step.StepId}' references unknown parent '{step.ParentStepId}'.",
-                    nameof(plan));
-            }
-
             foreach (var dependency in step.DependsOn ?? [])
             {
                 if (string.IsNullOrWhiteSpace(dependency) || !stepIds.Contains(dependency))
@@ -160,7 +147,48 @@ public static class WorkPlanValidator
         }
 
         DetectCycle(deps);
+        EnsureReferencedDependencies(plan);
         return plan;
+    }
+
+    /// <summary>
+    /// 后一步写明要使用前一步结果时，必须声明 dependsOn，避免并行开跑。
+    /// </summary>
+    private static void EnsureReferencedDependencies(WorkPlanDraft plan)
+    {
+        for (var index = 0; index < plan.Steps.Length; index++)
+        {
+            var step = plan.Steps[index];
+            var dependsOn = new HashSet<string>(step.DependsOn ?? [], StringComparer.Ordinal);
+            var text = string.Concat(step.Title, "\n", step.Description);
+            for (var priorIndex = 0; priorIndex < index; priorIndex++)
+            {
+                var prior = plan.Steps[priorIndex];
+                if (!ReferencesPriorStep(text, prior.StepId, priorIndex))
+                {
+                    continue;
+                }
+
+                if (!dependsOn.Contains(prior.StepId))
+                {
+                    throw new ArgumentException(
+                        $"Step '{step.StepId}' uses the result of '{prior.StepId}' but does not depend on it.",
+                        nameof(plan));
+                }
+            }
+        }
+    }
+
+    private static bool ReferencesPriorStep(string text, string priorStepId, int priorIndex)
+    {
+        if (text.Contains(priorStepId, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var number = (priorIndex + 1).ToString(CultureInfo.InvariantCulture);
+        return text.Contains("步骤" + number, StringComparison.Ordinal)
+            || text.Contains("步骤 " + number, StringComparison.Ordinal);
     }
 
     public static WorkPlanDraft CreateFallbackPlan(
@@ -184,11 +212,17 @@ public static class WorkPlanValidator
             [
                 new WorkPlanStepDraft(
                     stepId,
+                    "Execute Task",
                     goal,
-                    agent.AgentId,
+                    [
+                        new WorkPlanSubStepDraft(
+                            $"{stepId}.1",
+                            goal,
+                            goal,
+                            agent.AgentId)
+                    ],
                     DependsOn: [],
-                    Depth: 0,
-                    Title: "Execute")
+                    IsBackground: false)
             ]);
     }
 
@@ -197,65 +231,6 @@ public static class WorkPlanValidator
     /// First publish is forced to version "1"; later publishes auto-increment
     /// and set <see cref="WorkPlanDraft.PreviousPlanVersion"/> when the model omits them.
     /// </summary>
-    private static void EnsureLeafExecutor(
-        WorkPlanDraft plan,
-        int index,
-        WorkPlanStepDraft step,
-        HashSet<string> agentIds,
-        HashSet<string> blockedExecutors)
-    {
-        var hasEphemeral = !string.IsNullOrWhiteSpace(step.EphemeralSystemPrompt)
-            || !string.IsNullOrWhiteSpace(step.EphemeralName);
-        var hasAgent = !string.IsNullOrWhiteSpace(step.TargetAgentId)
-            && !step.TargetAgentId.StartsWith("ephemeral:", StringComparison.Ordinal);
-        if (hasEphemeral && hasAgent)
-        {
-            throw new ArgumentException(
-                $"Step '{step.StepId}' cannot both name an agent and define a temporary specialist.",
-                nameof(plan));
-        }
-
-        if (hasEphemeral)
-        {
-            if (string.IsNullOrWhiteSpace(step.EphemeralName) || string.IsNullOrWhiteSpace(step.EphemeralSystemPrompt))
-            {
-                throw new ArgumentException(
-                    $"Step '{step.StepId}' temporary specialist needs ephemeralName and ephemeralSystemPrompt.",
-                    nameof(plan));
-            }
-
-            plan.Steps[index] = step with { TargetAgentId = "ephemeral:" + step.StepId.Trim() };
-            return;
-        }
-
-        if (string.IsNullOrWhiteSpace(step.TargetAgentId))
-        {
-            throw new ArgumentException(
-                $"Step '{step.StepId}' is a leaf and targetAgentId is empty. "
-                + "Set targetAgentId to a specialist id from AvailableAgents. "
-                + "A parent omits targetAgentId only when another step sets parentStepId to this stepId. "
-                + "general-manager and project-lead cannot execute steps.",
-                nameof(plan));
-        }
-
-        if (blockedExecutors.Contains(step.TargetAgentId))
-        {
-            throw new ArgumentException(
-                $"Step '{step.StepId}' targets '{step.TargetAgentId}', which cannot execute steps. "
-                + "Omit targetAgentId and set ephemeralName plus ephemeralSystemPrompt. "
-                + "Do not use general-manager or project-lead.",
-                nameof(plan));
-        }
-
-        if (!agentIds.Contains(step.TargetAgentId))
-        {
-            throw new ArgumentException(
-                $"Step '{step.StepId}' targets unknown agent '{step.TargetAgentId}'. "
-                + "targetAgentId must equal an AvailableAgents id.",
-                nameof(plan));
-        }
-    }
-
     public static WorkPlanDraft NormalizePlanRevision(
         WorkPlanDraft plan,
         string? latestPublishedPlanVersion)
@@ -321,19 +296,28 @@ public static class WorkPlanValidator
     public static string SerializeStepInputs(WorkPlanStepDraft step)
     {
         ArgumentNullException.ThrowIfNull(step);
-        if (step.Inputs is { } inputs && inputs.ValueKind is not JsonValueKind.Undefined
-            and not JsonValueKind.Null)
+
+        var parts = new List<string>
         {
-            return inputs.GetRawText();
+            step.Title,
+            step.Description,
+            step.StepId
+        };
+
+        foreach (var subStep in step.SubSteps)
+        {
+            parts.Add(subStep.SubStepId);
+            parts.Add(subStep.Goal);
+            parts.Add(subStep.Instruction);
+            parts.Add(subStep.TargetAgentId);
+            if (subStep.Inputs is { } inputs && inputs.ValueKind is not JsonValueKind.Undefined
+                and not JsonValueKind.Null)
+            {
+                parts.Add(inputs.GetRawText());
+            }
         }
 
-        return string.Join(
-            "\n",
-            step.Goal,
-            step.Title ?? string.Empty,
-            step.TargetAgentId,
-            step.Depth.ToString(CultureInfo.InvariantCulture),
-            step.ParentStepId ?? string.Empty);
+        return string.Join("\n", parts);
     }
 
     private static void DetectCycle(Dictionary<string, string[]> deps)

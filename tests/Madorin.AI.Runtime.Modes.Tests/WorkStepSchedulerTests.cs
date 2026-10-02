@@ -102,28 +102,6 @@ public sealed class WorkStepSchedulerTests
     }
 
     [TestMethod]
-    public void SelectReadySteps_LaterPhase_WaitsUntilPreviousPhaseSettles()
-    {
-        var policy = WorkflowPolicy.Default with { MaxConcurrentSteps = 4 };
-        WorkStepSnapshot[] steps =
-        [
-            Step("phase-1", WorkStepLifecycleStatus.Pending),
-            Step("a", WorkStepLifecycleStatus.Pending, parentStepId: "phase-1"),
-            Step("phase-2", WorkStepLifecycleStatus.Pending),
-            Step("b", WorkStepLifecycleStatus.Pending, parentStepId: "phase-2")
-        ];
-
-        var waiting = WorkStepScheduler.SelectReadySteps(steps, policy);
-        var onlyFirst = Assert.ContainsSingle(waiting);
-        Assert.AreEqual("a", onlyFirst.StepId);
-
-        steps[1] = Step("a", WorkStepLifecycleStatus.Completed, parentStepId: "phase-1");
-        var next = WorkStepScheduler.SelectReadySteps(steps, policy);
-        var onlySecond = Assert.ContainsSingle(next);
-        Assert.AreEqual("b", onlySecond.StepId);
-    }
-
-    [TestMethod]
     public void SelectReadySteps_WithSkippedDependency_TreatsDependencyAsSatisfied()
     {
         var policy = WorkflowPolicy.Default with { MaxConcurrentSteps = 1 };

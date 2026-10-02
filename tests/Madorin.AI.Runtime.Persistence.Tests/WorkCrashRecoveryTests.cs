@@ -160,7 +160,7 @@ public sealed class WorkCrashRecoveryTests
         var plan = new WorkPlanDraft(
             "1",
             "Verify crash boundaries",
-            [new WorkPlanStepDraft("crash-step", "Complete durable work", "worker")]);
+            [new WorkPlanStepDraft("crash-step", "Complete durable work", "Complete durable work", [])]);
         await workRepository.SavePlanRevisionAsync(
             sessionId,
             runId,
@@ -241,6 +241,7 @@ public sealed class WorkCrashRecoveryTests
         CrashIf(boundary, WorkCrashBoundary.ToolResultCommitted, sessionId, runId);
 
         await sessionRepository.CompleteWorkStepAsync(
+            sessionId,
             "crash-step",
             "1",
             "step-input-hash",
