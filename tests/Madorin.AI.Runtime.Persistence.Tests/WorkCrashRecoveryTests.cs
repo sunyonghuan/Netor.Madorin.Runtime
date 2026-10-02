@@ -160,7 +160,7 @@ public sealed class WorkCrashRecoveryTests
         var plan = new WorkPlanDraft(
             "1",
             "Verify crash boundaries",
-            [new WorkPlanStepDraft("crash-step", "Complete durable work", "worker")]);
+            [new WorkPlanStepDraft("crash-step", "Complete durable work", "Complete durable work", [])]);
         await workRepository.SavePlanRevisionAsync(
             sessionId,
             runId,

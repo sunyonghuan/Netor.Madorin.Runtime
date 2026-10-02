@@ -71,11 +71,11 @@ internal static class WorkPlanToolCodec
         WorkPlanDraft plan,
         int stepIndex,
         int subStepIndex,
-        out WorkPlanStepDraft? step,
+        out WorkPlanSubStepDraft? subStep,
         out string? errorCode,
         out string? message)
     {
-        step = null;
+        subStep = null;
         errorCode = null;
         message = null;
 
@@ -86,31 +86,27 @@ internal static class WorkPlanToolCodec
             return false;
         }
 
-        foreach (var candidate in plan.Steps)
+        if (stepIndex > plan.Steps.Length)
         {
-            if (!TryReadIndexPair(candidate, out var main, out var sub))
-            {
-                continue;
-            }
-
-            if (main == stepIndex && sub == subStepIndex)
-            {
-                step = candidate;
-                return true;
-            }
+            errorCode = "step_not_found";
+            message = string.Create(
+                CultureInfo.InvariantCulture,
+                $"stepIndex={stepIndex} exceeds total steps count={plan.Steps.Length}.");
+            return false;
         }
 
-        if (subStepIndex == 1 && stepIndex <= plan.Steps.Length)
+        var step = plan.Steps[stepIndex - 1];
+        if (subStepIndex > step.SubSteps.Length)
         {
-            step = plan.Steps[stepIndex - 1];
-            return true;
+            errorCode = "substep_not_found";
+            message = string.Create(
+                CultureInfo.InvariantCulture,
+                $"subStepIndex={subStepIndex} exceeds substeps count={step.SubSteps.Length} in step {stepIndex}.");
+            return false;
         }
 
-        errorCode = "step_not_found";
-        message = string.Create(
-            CultureInfo.InvariantCulture,
-            $"No step matches stepIndex={stepIndex}, subStepIndex={subStepIndex}.");
-        return false;
+        subStep = step.SubSteps[subStepIndex - 1];
+        return true;
     }
 
     private static bool TryParseNativeDraft(
@@ -288,45 +284,35 @@ internal static class WorkPlanToolCodec
 
         // 同一主步骤、同一执行人：门禁留在 goal 里，只派发一次。
         // 主步骤里换了执行人时才拆成多个派发步骤。
-        if (distinctAgents.Count == 1)
-        {
-            var stepId = string.Create(CultureInfo.InvariantCulture, $"m{mainOrdinal}");
-            var dependsOn = previousStepId is null ? Array.Empty<string>() : new[] { previousStepId };
-            steps.Add(new WorkPlanStepDraft(
-                stepId,
-                BuildFoldedGoal(mainTitle, gates),
-                gates[0].TargetAgentId,
-                DependsOn: dependsOn,
-                Depth: 0,
-                Title: mainTitle,
-                Inputs: BuildIndexInputs(mainOrdinal, 1, mainTitle, gates[0].Acceptance)));
-            previousStepId = stepId;
-            return true;
-        }
+        var stepId = string.Create(CultureInfo.InvariantCulture, $"m{mainOrdinal}");
+        var dependsOn = previousStepId is null ? Array.Empty<string>() : new[] { previousStepId };
 
+        var subStepDrafts = new List<WorkPlanSubStepDraft>();
         for (var index = 0; index < gates.Count; index++)
         {
             var gate = gates[index];
-            var subOrdinalForId = index + 1;
-            var stepId = string.Create(
-                CultureInfo.InvariantCulture,
-                $"m{mainOrdinal}-s{subOrdinalForId}");
-            var dependsOn = previousStepId is null ? Array.Empty<string>() : new[] { previousStepId };
-            steps.Add(new WorkPlanStepDraft(
-                stepId,
-                string.Create(CultureInfo.InvariantCulture, $"{gate.Title}. Acceptance: {gate.Acceptance}"),
+            var subStepId = string.Create(CultureInfo.InvariantCulture, $"{stepId}.{index + 1}");
+            subStepDrafts.Add(new WorkPlanSubStepDraft(
+                subStepId,
+                gate.Title,
+                $"{gate.Title}. Acceptance: {gate.Acceptance}",
                 gate.TargetAgentId,
-                DependsOn: dependsOn,
-                Depth: 0,
-                Title: gate.Title,
-                Inputs: BuildIndexInputs(mainOrdinal, subOrdinalForId, mainTitle, gate.Acceptance)));
-            previousStepId = stepId;
+                ExpectedOutput: gate.Acceptance,
+                Inputs: BuildIndexInputs(mainOrdinal, index + 1, mainTitle, gate.Acceptance)));
         }
 
+        steps.Add(new WorkPlanStepDraft(
+            stepId,
+            mainTitle,
+            BuildFoldedDescription(mainTitle, gates),
+            subStepDrafts.ToArray(),
+            DependsOn: dependsOn,
+            IsBackground: false));
+        previousStepId = stepId;
         return true;
     }
 
-    private static string BuildFoldedGoal(string mainTitle, List<PlanGate> gates)
+    private static string BuildFoldedDescription(string mainTitle, List<PlanGate> gates)
     {
         var builder = new StringBuilder(mainTitle);
         builder.AppendLine();
@@ -360,28 +346,6 @@ internal static class WorkPlanToolCodec
         });
         using var doc = JsonDocument.Parse(json);
         return doc.RootElement.Clone();
-    }
-
-    private static bool TryReadIndexPair(WorkPlanStepDraft step, out int mainIndex, out int subIndex)
-    {
-        mainIndex = 0;
-        subIndex = 0;
-        if (step.Inputs is not JsonElement inputs || inputs.ValueKind != JsonValueKind.Object)
-        {
-            return false;
-        }
-
-        if (!inputs.TryGetProperty("mainIndex", out var main)
-            || !inputs.TryGetProperty("subIndex", out var sub)
-            || main.ValueKind != JsonValueKind.Number
-            || sub.ValueKind != JsonValueKind.Number)
-        {
-            return false;
-        }
-
-        mainIndex = main.GetInt32();
-        subIndex = sub.GetInt32();
-        return mainIndex >= 1 && subIndex >= 1;
     }
 
     private static string? ReadOptionalString(JsonElement element, string name)

@@ -1024,6 +1024,27 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                     resultJson,
                     ct).ConfigureAwait(false);
                 completedCount++;
+
+                // 检查是否需要生成一级步骤汇总
+                var stepSummary = await TryGenerateStepSummaryAsync(
+                    sessionId,
+                    readyStep.StepId,
+                    plan,
+                    options.GeneralManager,
+                    request,
+                    ct).ConfigureAwait(false);
+
+                if (!string.IsNullOrEmpty(stepSummary))
+                {
+                    // 发送汇总作为文本增量
+                    yield return await CreateTextDeltaEnvelopeAsync(
+                        runId,
+                        runtimeInstanceId,
+                        parentInvocationId ?? runId,
+                        $"\n\n**步骤汇总（{readyStep.StepId}）：**\n{stepSummary}\n",
+                        sequence.Take(),
+                        ct).ConfigureAwait(false);
+                }
             }
 
             if (completedCount > policy.HardMaxStepsPerRun)
@@ -1036,6 +1057,25 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         {
             await _workRepo.UpdateSessionStatusAsync(
                 sessionId, WorkSessionStatus.Completed, ct).ConfigureAwait(false);
+
+            // 生成总经理最终总结
+            var finalSummary = await GenerateFinalSummaryAsync(
+                sessionId,
+                runId,
+                runtimeInstanceId,
+                plan,
+                options.GeneralManager,
+                request,
+                ct).ConfigureAwait(false);
+
+            // 将总结作为文本增量发送给用户
+            yield return await CreateTextDeltaEnvelopeAsync(
+                runId,
+                runtimeInstanceId,
+                parentInvocationId ?? runId,
+                finalSummary,
+                sequence.Take(),
+                ct).ConfigureAwait(false);
         }
 
         await CompleteRunAsync(runId, ct).ConfigureAwait(false);
@@ -1362,6 +1402,27 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 item.StepInputHash,
                 resultJson,
                 ct).ConfigureAwait(false);
+
+            // 检查是否需要生成一级步骤汇总
+            var stepSummary = await TryGenerateStepSummaryAsync(
+                sessionId,
+                item.Step.StepId,
+                plan,
+                options.GeneralManager,
+                request,
+                ct).ConfigureAwait(false);
+
+            if (!string.IsNullOrEmpty(stepSummary))
+            {
+                // 发送汇总作为文本增量
+                yield return await CreateTextDeltaEnvelopeAsync(
+                    runId,
+                    runtimeInstanceId,
+                    parentInvocationId ?? runId,
+                    $"\n\n**步骤汇总（{item.Step.StepId}）：**\n{stepSummary}\n",
+                    runSequence++,
+                    ct).ConfigureAwait(false);
+            }
         }
 
         if (policy.FailurePolicy is WorkStepFailurePolicy.Stop
@@ -2897,9 +2958,9 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             parentInvocationId,
             workStepId,
             workPlanVersion,
-            Title: stepDraft?.Title ?? stepDraft?.Goal,
-            ParentStepId: stepDraft?.ParentStepId,
-            Depth: stepDraft?.Depth ?? 0,
+            Title: stepDraft?.Title,
+            ParentStepId: null,
+            Depth: 0,
             DisplayName: agent.AgentId,
             Role: null,
             ParticipantId: null,
@@ -3478,21 +3539,28 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
     /// </summary>
     private static WorkPlanUpdatedEvent MapToWorkPlanUpdatedEvent(WorkPlanDraft plan)
     {
-        var steps = plan.Steps.Select(s => new WorkPlanStepSnapshot(
-            s.StepId,
-            s.Title ?? s.Goal,
-            s.Goal,
-            s.TargetAgentId,
-            s.ParentStepId,
-            s.Depth,
-            s.DependsOn ?? Array.Empty<string>(),
-            Contracts.Work.WorkStepStatus.Pending
-        )).ToArray();
+        var steps = new List<WorkPlanStepSnapshot>();
+        foreach (var step in plan.Steps)
+        {
+            foreach (var subStep in step.SubSteps)
+            {
+                steps.Add(new WorkPlanStepSnapshot(
+                    subStep.SubStepId,
+                    subStep.Goal,
+                    subStep.Goal,
+                    subStep.TargetAgentId,
+                    step.StepId,  // ParentStepId is the parent step's StepId
+                    1,  // Depth is always 1 for substeps
+                    Array.Empty<string>(),  // SubSteps don't have DependsOn, only top-level steps do
+                    Contracts.Work.WorkStepStatus.Pending
+                ));
+            }
+        }
 
         return new WorkPlanUpdatedEvent(
             int.Parse(plan.PlanVersion, CultureInfo.InvariantCulture),
             plan.Goal,
-            steps);
+            steps.ToArray());
     }
 
     private static RuntimeEventEnvelope CreateWorkPlanUpdatedEnvelope(
@@ -3789,6 +3857,179 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             true,
             outputText,
             ChildInvocationId: childInvocation.InvocationId);
+    }
+
+    /// <summary>
+    /// 调用总经理生成最终工作总结报告。
+    /// </summary>
+    private async Task<string> GenerateFinalSummaryAsync(
+        string sessionId,
+        string runId,
+        string runtimeInstanceId,
+        WorkPlanDraft plan,
+        AgentRef generalManager,
+        NewSessionRunRequest request,
+        CancellationToken ct)
+    {
+        // 从数据库加载所有步骤（包括二级步骤）
+        var allSteps = await _workRepo.ListStepsAsync(sessionId, null, ct).ConfigureAwait(false);
+
+        var oneLevel = allSteps.Where(s => !s.IsSubStep).ToList();
+        var stepsSummary = new StringBuilder();
+        foreach (var step in oneLevel)
+        {
+            var subSteps = allSteps.Where(s => s.ParentStepId == step.StepId).ToList();
+            stepsSummary.AppendLine(CultureInfo.InvariantCulture, $"步骤 {step.StepId}：{step.Status}");
+            if (!string.IsNullOrWhiteSpace(step.ResultJson))
+            {
+                stepsSummary.AppendLine(CultureInfo.InvariantCulture, $"  结果：{step.ResultJson}");
+            }
+            if (subSteps.Count > 0)
+            {
+                stepsSummary.AppendLine(CultureInfo.InvariantCulture, $"  二级步骤：{subSteps.Count(s => s.Status == WorkStepLifecycleStatus.Completed)}/{subSteps.Count} 完成");
+            }
+        }
+
+        var prompt = $"""
+            你是总经理，现在要对整个工作计划的执行情况生成最终总结报告。
+
+            原始目标：{plan.Goal}
+
+            计划版本：{plan.PlanVersion}
+
+            执行结果：
+            {stepsSummary}
+
+            请生成总结报告，包括：
+            1. 整体完成情况（成功/失败步骤数量）
+            2. 各步骤的关键产出和位置
+            3. 是否达到原始目标
+            4. 存在的问题和建议
+            """;
+
+        var managerInvocation = await CreateInvocationRequestAsync(
+            runId,
+            sessionId,
+            request,
+            generalManager,
+            "work-summary-v1",
+            ct).ConfigureAwait(false);
+
+        await AppendPlainDialogueAsync(
+            sessionId,
+            managerInvocation.InvocationId,
+            generalManager.AgentId,
+            "user",
+            prompt,
+            ct).ConfigureAwait(false);
+
+        var summaryBuilder = new StringBuilder();
+        await foreach (var providerEvent in ExecuteInvocationAsync(managerInvocation, ct)
+            .ConfigureAwait(false))
+        {
+            if (providerEvent is TextDeltaProviderEvent textDelta)
+            {
+                summaryBuilder.Append(textDelta.Delta);
+            }
+        }
+
+        return summaryBuilder.ToString();
+    }
+
+    /// <summary>检查一级步骤是否完成，如果完成则生成汇总报告。</summary>
+    private async Task<string?> TryGenerateStepSummaryAsync(
+        string sessionId,
+        string stepId,
+        WorkPlanDraft plan,
+        AgentRef generalManager,
+        NewSessionRunRequest request,
+        CancellationToken ct)
+    {
+        // 从数据库加载所有步骤
+        var steps = await _workRepo.ListStepsAsync(sessionId, plan.PlanVersion, ct)
+            .ConfigureAwait(false);
+
+        // 查找当前完成的步骤
+        var currentStep = steps.FirstOrDefault(s => s.StepId == stepId);
+        if (currentStep == null || currentStep.IsSubStep)
+        {
+            return null; // 只处理一级步骤完成的情况
+        }
+
+        // 查找这个一级步骤的所有二级步骤
+        var subSteps = steps.Where(s =>
+            !string.IsNullOrEmpty(s.ParentStepId) &&
+            s.ParentStepId == stepId).ToList();
+
+        if (subSteps.Count == 0)
+        {
+            return null; // 没有二级步骤，不需要汇总
+        }
+
+        // 检查是否所有二级步骤都已完成
+        var allCompleted = subSteps.All(s =>
+            s.Status == WorkStepLifecycleStatus.Completed ||
+            s.Status == WorkStepLifecycleStatus.Skipped);
+
+        if (!allCompleted)
+        {
+            return null; // 还有未完成的二级步骤
+        }
+
+        // 找到对应的计划步骤
+        var planStep = plan.Steps.FirstOrDefault(s =>
+            string.Equals(s.StepId, stepId, StringComparison.Ordinal));
+
+        if (planStep == null)
+        {
+            return null;
+        }
+
+        // 构建汇总提示词
+        var prompt = $$"""
+            你是项目组长，现在要汇总一级步骤的所有二级步骤结果。
+
+            一级步骤：{{planStep.Title}}
+            描述：{{planStep.Description}}
+
+            二级步骤结果：
+            {{string.Join("\n", subSteps.Select(s =>
+                $"- {s.StepId}: {s.Status} - {(string.IsNullOrEmpty(s.ResultJson) ? "无输出" : s.ResultJson.Length > 200 ? s.ResultJson[..200] + "..." : s.ResultJson)}"))}}
+
+            请生成简洁的汇总报告（2-3句话），说明：
+            1. 这个一级步骤的整体完成情况
+            2. 关键产出和成果
+            3. 是否达到了步骤目标
+            """;
+
+        // 创建临时会话调用总经理生成汇总
+        var summaryInvocation = await CreateInvocationRequestAsync(
+            Guid.NewGuid().ToString(),
+            sessionId,
+            request,
+            generalManager,
+            "work-summary-v1",
+            ct).ConfigureAwait(false);
+
+        await AppendPlainDialogueAsync(
+            sessionId,
+            summaryInvocation.InvocationId,
+            generalManager.AgentId,
+            "user",
+            prompt,
+            ct).ConfigureAwait(false);
+
+        var summaryBuilder = new StringBuilder();
+        await foreach (var providerEvent in ExecuteInvocationAsync(summaryInvocation, ct)
+            .ConfigureAwait(false))
+        {
+            if (providerEvent is TextDeltaProviderEvent textDelta)
+            {
+                summaryBuilder.Append(textDelta.Delta);
+            }
+        }
+
+        return summaryBuilder.ToString();
     }
 
     /// <summary>Run-local sequence allocator shared by RunCoreAsync and sync dispatch_step.</summary>

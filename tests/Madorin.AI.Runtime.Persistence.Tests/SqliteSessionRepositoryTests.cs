@@ -120,11 +120,12 @@ public sealed class SqliteSessionRepositoryTests
             "1",
             "Delete complete Work state",
             [
-                new WorkPlanStepDraft("delete-step-a", "Prepare", "worker"),
+                new WorkPlanStepDraft("delete-step-a", "Prepare", "Prepare for deletion", []),
                 new WorkPlanStepDraft(
                     "delete-step-b",
                     "Review",
-                    "reviewer",
+                    "Review deletion",
+                    [],
                     DependsOn: ["delete-step-a"],
                     IsBackground: true)
             ]);
@@ -602,7 +603,7 @@ public sealed class SqliteSessionRepositoryTests
         var first = new WorkPlanDraft(
             "1",
             "Ship release",
-            [new WorkPlanStepDraft("step-a", "Prepare notes", "worker")]);
+            [new WorkPlanStepDraft("step-a", "Prepare notes", "Prepare release notes", [])]);
         await workRepo.SavePlanRevisionAsync(
             sessionId,
             runId,
@@ -639,7 +640,8 @@ public sealed class SqliteSessionRepositoryTests
                 new WorkPlanStepDraft(
                     "step-a-reused",
                     "Reuse prepared notes",
-                    "worker",
+                    "Reuse prepared notes",
+                    [],
                     ReusesStepId: "step-a")
             ],
             PreviousPlanVersion: "1");
@@ -670,7 +672,7 @@ public sealed class SqliteSessionRepositoryTests
         {
             PlanVersion = "4",
             PreviousPlanVersion = "2",
-            Steps = [new WorkPlanStepDraft("step-invalid", "Invalid", "worker")]
+            Steps = [new WorkPlanStepDraft("step-invalid", "Invalid", "Invalid step", [])]
         };
         await Assert.ThrowsExactlyAsync<InvalidOperationException>(
             () => workRepo.SavePlanRevisionAsync(
@@ -710,8 +712,8 @@ public sealed class SqliteSessionRepositoryTests
             "2",
             "Ship release",
             [
-                new WorkPlanStepDraft("step-a", "Prepare notes", "worker"),
-                new WorkPlanStepDraft("step-b", "Review notes", "reviewer", DependsOn: ["step-a"])
+                new WorkPlanStepDraft("step-a", "Prepare notes", "Prepare release notes", []),
+                new WorkPlanStepDraft("step-b", "Review notes", "Review release notes", [], DependsOn: ["step-a"])
             ]);
 
         await workRepo.UpsertSessionAsync(
@@ -792,7 +794,7 @@ public sealed class SqliteSessionRepositoryTests
         var plan = new WorkPlanDraft(
             "1",
             "Background job lifecycle",
-            [new WorkPlanStepDraft("step-a", "Run background work", "worker", IsBackground: true)]);
+            [new WorkPlanStepDraft("step-a", "Run background work", "Run background work", [], IsBackground: true)]);
         await workRepo.UpsertSessionAsync(
             sessionId,
             runId,
@@ -902,7 +904,7 @@ public sealed class SqliteSessionRepositoryTests
         var plan = new WorkPlanDraft(
             "1",
             "Cancel active work",
-            [new WorkPlanStepDraft("step-a", "Run cancellable work", "worker", IsBackground: true)]);
+            [new WorkPlanStepDraft("step-a", "Run cancellable work", "Run cancellable work", [], IsBackground: true)]);
         await workRepo.UpsertSessionAsync(
             sessionId,
             runId,
@@ -999,7 +1001,7 @@ public sealed class SqliteSessionRepositoryTests
         var plan = new WorkPlanDraft(
             "1",
             "Ship release",
-            [new WorkPlanStepDraft("step-a", "Prepare notes", "worker")]);
+            [new WorkPlanStepDraft("step-a", "Prepare notes", "Prepare release notes", [])]);
         await workRepo.UpsertSessionAsync(
             sessionId,
             runId,
@@ -1216,7 +1218,7 @@ public sealed class SqliteSessionRepositoryTests
         var plan = new WorkPlanDraft(
             "1",
             "Refresh provider credentials",
-            [new WorkPlanStepDraft("step-credential", "Call provider", "worker")]);
+            [new WorkPlanStepDraft("step-credential", "Call provider", "Call provider", [])]);
         await workRepo.UpsertSessionAsync(
             sessionId,
             runId,
@@ -1295,7 +1297,7 @@ public sealed class SqliteSessionRepositoryTests
         var plan = new WorkPlanDraft(
             "1",
             "Recover background job",
-            [new WorkPlanStepDraft("step-a", "Run background work", "worker", IsBackground: true)]);
+            [new WorkPlanStepDraft("step-a", "Run background work", "Run background work", [], IsBackground: true)]);
         await workRepo.UpsertSessionAsync(
             sessionId,
             runId,

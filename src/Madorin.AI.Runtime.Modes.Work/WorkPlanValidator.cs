@@ -72,46 +72,55 @@ public static class WorkPlanValidator
                 throw new ArgumentException($"Duplicate stepId '{step.StepId}'.", nameof(plan));
             }
 
-            if (string.IsNullOrWhiteSpace(step.Goal))
+            if (string.IsNullOrWhiteSpace(step.Title))
             {
-                throw new ArgumentException($"Step '{step.StepId}' is missing a goal.", nameof(plan));
+                throw new ArgumentException($"Step '{step.StepId}' is missing a title.", nameof(plan));
             }
 
-            if (string.IsNullOrWhiteSpace(step.TargetAgentId)
-                || !agentIds.Contains(step.TargetAgentId))
+            if (string.IsNullOrWhiteSpace(step.Description))
             {
-                throw new ArgumentException(
-                    $"Step '{step.StepId}' targets unknown agent '{step.TargetAgentId}'.",
-                    nameof(plan));
+                throw new ArgumentException($"Step '{step.StepId}' is missing a description.", nameof(plan));
             }
 
-            if (step.Depth < 0 || step.Depth > policy.MaxAgentDepth)
+            // Validate SubSteps
+            if (step.SubSteps is null or { Length: 0 })
             {
-                throw new ArgumentException(
-                    $"Step '{step.StepId}' depth {step.Depth} exceeds MaxAgentDepth={policy.MaxAgentDepth}.",
-                    nameof(plan));
+                throw new ArgumentException($"Step '{step.StepId}' has no sub-steps. Each top-level step must contain at least one sub-step.", nameof(plan));
             }
 
-            if (step.Depth > policy.HardMaxAgentDepth)
+            var subStepIds = new HashSet<string>(StringComparer.Ordinal);
+            for (var subIndex = 0; subIndex < step.SubSteps.Length; subIndex++)
             {
-                throw new ArgumentException(
-                    $"Step '{step.StepId}' depth exceeds HardMaxAgentDepth.",
-                    nameof(plan));
-            }
+                var subStep = step.SubSteps[subIndex]
+                    ?? throw new ArgumentException($"Step '{step.StepId}' has null sub-step at index {subIndex}.", nameof(plan));
 
-            if (string.Equals(step.ParentStepId, step.StepId, StringComparison.Ordinal))
-            {
-                throw new ArgumentException(
-                    $"Step '{step.StepId}' cannot be its own parent.",
-                    nameof(plan));
-            }
+                if (string.IsNullOrWhiteSpace(subStep.SubStepId))
+                {
+                    throw new ArgumentException($"Step '{step.StepId}' sub-step at index {subIndex} is missing subStepId.", nameof(plan));
+                }
 
-            if (step.ParentStepId is { Length: > 0 }
-                && !string.Equals(step.ParentStepId, step.StepId, StringComparison.Ordinal)
-                && !stepIds.Contains(step.ParentStepId)
-                && !(step.DependsOn?.Contains(step.ParentStepId, StringComparer.Ordinal) ?? false))
-            {
-                // Parent may appear later in the list; final check after full scan.
+                if (!subStepIds.Add(subStep.SubStepId))
+                {
+                    throw new ArgumentException($"Step '{step.StepId}' has duplicate subStepId '{subStep.SubStepId}'.", nameof(plan));
+                }
+
+                if (string.IsNullOrWhiteSpace(subStep.Goal))
+                {
+                    throw new ArgumentException($"SubStep '{subStep.SubStepId}' is missing a goal.", nameof(plan));
+                }
+
+                if (string.IsNullOrWhiteSpace(subStep.Instruction))
+                {
+                    throw new ArgumentException($"SubStep '{subStep.SubStepId}' is missing an instruction.", nameof(plan));
+                }
+
+                if (string.IsNullOrWhiteSpace(subStep.TargetAgentId)
+                    || !agentIds.Contains(subStep.TargetAgentId))
+                {
+                    throw new ArgumentException(
+                        $"SubStep '{subStep.SubStepId}' targets unknown agent '{subStep.TargetAgentId}'.",
+                        nameof(plan));
+                }
             }
 
             deps[step.StepId] = step.DependsOn ?? [];
@@ -119,14 +128,6 @@ public static class WorkPlanValidator
 
         foreach (var step in plan.Steps)
         {
-            if (step.ParentStepId is { Length: > 0 }
-                && !stepIds.Contains(step.ParentStepId))
-            {
-                throw new ArgumentException(
-                    $"Step '{step.StepId}' references unknown parent '{step.ParentStepId}'.",
-                    nameof(plan));
-            }
-
             foreach (var dependency in step.DependsOn ?? [])
             {
                 if (string.IsNullOrWhiteSpace(dependency) || !stepIds.Contains(dependency))
@@ -159,7 +160,7 @@ public static class WorkPlanValidator
         {
             var step = plan.Steps[index];
             var dependsOn = new HashSet<string>(step.DependsOn ?? [], StringComparer.Ordinal);
-            var text = string.Concat(step.Goal, "\n", step.Title);
+            var text = string.Concat(step.Title, "\n", step.Description);
             for (var priorIndex = 0; priorIndex < index; priorIndex++)
             {
                 var prior = plan.Steps[priorIndex];
@@ -211,11 +212,17 @@ public static class WorkPlanValidator
             [
                 new WorkPlanStepDraft(
                     stepId,
+                    "Execute Task",
                     goal,
-                    agent.AgentId,
+                    [
+                        new WorkPlanSubStepDraft(
+                            $"{stepId}.1",
+                            goal,
+                            goal,
+                            agent.AgentId)
+                    ],
                     DependsOn: [],
-                    Depth: 0,
-                    Title: "Execute")
+                    IsBackground: false)
             ]);
     }
 
@@ -289,19 +296,28 @@ public static class WorkPlanValidator
     public static string SerializeStepInputs(WorkPlanStepDraft step)
     {
         ArgumentNullException.ThrowIfNull(step);
-        if (step.Inputs is { } inputs && inputs.ValueKind is not JsonValueKind.Undefined
-            and not JsonValueKind.Null)
+
+        var parts = new List<string>
         {
-            return inputs.GetRawText();
+            step.Title,
+            step.Description,
+            step.StepId
+        };
+
+        foreach (var subStep in step.SubSteps)
+        {
+            parts.Add(subStep.SubStepId);
+            parts.Add(subStep.Goal);
+            parts.Add(subStep.Instruction);
+            parts.Add(subStep.TargetAgentId);
+            if (subStep.Inputs is { } inputs && inputs.ValueKind is not JsonValueKind.Undefined
+                and not JsonValueKind.Null)
+            {
+                parts.Add(inputs.GetRawText());
+            }
         }
 
-        return string.Join(
-            "\n",
-            step.Goal,
-            step.Title ?? string.Empty,
-            step.TargetAgentId,
-            step.Depth.ToString(CultureInfo.InvariantCulture),
-            step.ParentStepId ?? string.Empty);
+        return string.Join("\n", parts);
     }
 
     private static void DetectCycle(Dictionary<string, string[]> deps)

@@ -295,7 +295,7 @@ internal static class WorkContextProjectionBuilder
         return $"[CURRENT STEP REFERENCE]\nstepId={step.StepId}\n"
             + $"planVersion={state.PlanVersion}\nstepInputHash={state.StepInputHash}\n"
             + $"stepMessageId={state.StepMessageId}\nsha256={ComputeHash(stepJson)}\n"
-            + $"goal={BoundedPrefix(step.Goal)}";
+            + $"description={BoundedPrefix(step.Description)}";
     }
 
     private static string BuildDependencyOutput(WorkStepSnapshot step, bool summarize)

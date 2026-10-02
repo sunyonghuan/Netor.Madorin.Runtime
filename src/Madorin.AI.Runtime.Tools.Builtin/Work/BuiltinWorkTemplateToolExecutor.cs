@@ -306,7 +306,7 @@ public sealed class BuiltinWorkTemplateToolExecutor : IToolExecutor
                 writer.WriteString("planVersion", plan.PlanVersion);
                 writer.WriteNumber("stepIndex", stepIndex);
                 writer.WriteNumber("subStepIndex", subStepIndex);
-                writer.WriteString("stepId", step.StepId);
+                writer.WriteString("subStepId", step.SubStepId);
                 writer.WriteString("targetAgentId", step.TargetAgentId);
                 writer.WriteString("goal", step.Goal);
                 writer.WriteString("instruction", trimmedInstruction);
@@ -325,7 +325,7 @@ public sealed class BuiltinWorkTemplateToolExecutor : IToolExecutor
                     invocation.AgentId,
                     invocation.CallId,
                     plan.PlanVersion,
-                    step.StepId,
+                    step.SubStepId,
                     step.TargetAgentId,
                     step.Goal ?? string.Empty,
                     trimmedInstruction,
@@ -353,7 +353,7 @@ public sealed class BuiltinWorkTemplateToolExecutor : IToolExecutor
             writer.WriteString("planVersion", plan.PlanVersion);
             writer.WriteNumber("stepIndex", stepIndex);
             writer.WriteNumber("subStepIndex", subStepIndex);
-            writer.WriteString("stepId", step.StepId);
+            writer.WriteString("subStepId", step.SubStepId);
             writer.WriteString("targetAgentId", step.TargetAgentId);
             writer.WriteString("goal", step.Goal);
             writer.WriteString("instruction", trimmedInstruction);

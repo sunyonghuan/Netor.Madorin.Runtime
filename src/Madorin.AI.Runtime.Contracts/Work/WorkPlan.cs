@@ -10,19 +10,25 @@ public sealed record WorkPlanDraft(
     string? Summary = null,
     string? PreviousPlanVersion = null);
 
-/// <summary>One planned work step before persistence and scheduling.</summary>
+/// <summary>One planned work step (top-level) containing sub-steps.</summary>
 public sealed record WorkPlanStepDraft(
     string StepId,
-    string Goal,
-    string TargetAgentId,
+    string Title,
+    string Description,
+    WorkPlanSubStepDraft[] SubSteps,
     string[]? DependsOn = null,
-    string? ParentStepId = null,
-    int Depth = 0,
-    string? Title = null,
-    JsonElement? Inputs = null,
     bool IsBackground = false,
     string? ReusesStepId = null,
     string? ReplacesStepId = null);
+
+/// <summary>One sub-step within a WorkPlanStepDraft, representing the actual executable unit.</summary>
+public sealed record WorkPlanSubStepDraft(
+    string SubStepId,
+    string Goal,
+    string Instruction,
+    string TargetAgentId,
+    string? ExpectedOutput = null,
+    JsonElement? Inputs = null);
 
 /// <summary>One immutable persisted revision of a work plan.</summary>
 public sealed record WorkPlanRevisionSnapshot(
@@ -33,7 +39,7 @@ public sealed record WorkPlanRevisionSnapshot(
     string? PreviousPlanVersion,
     DateTimeOffset CreatedAt);
 
-/// <summary>Persisted/resumable snapshot of one work-plan step.</summary>
+/// <summary>Persisted/resumable snapshot of one work-plan step (can be top-level or sub-step).</summary>
 public sealed record WorkStepSnapshot(
     string StepId,
     string PlanVersion,
@@ -45,6 +51,9 @@ public sealed record WorkStepSnapshot(
     string StepInputHash,
     int Depth = 0,
     string? ParentStepId = null,
+    bool IsSubStep = false,
+    int StepIndex = 0,
+    int SubStepIndex = -1,
     string? InvocationId = null,
     string? ResultJson = null,
     string? ErrorMessage = null,
