@@ -179,9 +179,12 @@ public sealed class BuiltinWorkTemplateToolTests
         Assert.AreEqual(1, output.RootElement.GetProperty("stepCount").GetInt32());
         var step = output.RootElement.GetProperty("plan").GetProperty("steps")[0];
         Assert.AreEqual("m1", step.GetProperty("stepId").GetString());
-        var goal = step.GetProperty("goal").GetString();
-        StringAssert.Contains(goal, "Read sales");
-        StringAssert.Contains(goal, "Read refunds");
+        Assert.AreEqual("Collect", step.GetProperty("title").GetString());
+        var subSteps = step.GetProperty("subSteps");
+        Assert.AreEqual(2, subSteps.GetArrayLength());
+        Assert.AreEqual("m1.1", subSteps[0].GetProperty("subStepId").GetString());
+        StringAssert.Contains(subSteps[0].GetProperty("goal").GetString(), "Read sales");
+        StringAssert.Contains(subSteps[1].GetProperty("goal").GetString(), "Read refunds");
     }
 
     [TestMethod]
@@ -210,12 +213,15 @@ public sealed class BuiltinWorkTemplateToolTests
             """);
         Assert.IsTrue(setPlan.Success, setPlan.Error);
         using var output = JsonDocument.Parse(setPlan.OutputJson!);
-        Assert.AreEqual(2, output.RootElement.GetProperty("stepCount").GetInt32());
-        var steps = output.RootElement.GetProperty("plan").GetProperty("steps");
-        Assert.AreEqual("m1-s1", steps[0].GetProperty("stepId").GetString());
-        Assert.AreEqual("m1-s2", steps[1].GetProperty("stepId").GetString());
-        Assert.AreEqual("worker", steps[0].GetProperty("targetAgentId").GetString());
-        Assert.AreEqual("reviewer", steps[1].GetProperty("targetAgentId").GetString());
+        Assert.AreEqual(1, output.RootElement.GetProperty("stepCount").GetInt32());
+        var step = output.RootElement.GetProperty("plan").GetProperty("steps")[0];
+        Assert.AreEqual("m1", step.GetProperty("stepId").GetString());
+        var subSteps = step.GetProperty("subSteps");
+        Assert.AreEqual(2, subSteps.GetArrayLength());
+        Assert.AreEqual("m1.1", subSteps[0].GetProperty("subStepId").GetString());
+        Assert.AreEqual("m1.2", subSteps[1].GetProperty("subStepId").GetString());
+        Assert.AreEqual("worker", subSteps[0].GetProperty("targetAgentId").GetString());
+        Assert.AreEqual("reviewer", subSteps[1].GetProperty("targetAgentId").GetString());
     }
 
     [TestMethod]
@@ -273,7 +279,7 @@ public sealed class BuiltinWorkTemplateToolTests
     {
         var planJson =
             """
-            {"planVersion":"1","goal":"g","steps":[{"stepId":"s1","goal":"do","targetAgentId":"worker","dependsOn":[]}]}
+            {"planVersion":"1","goal":"g","steps":[{"stepId":"1","title":"Do","description":"Do the work","subSteps":[{"subStepId":"1.1","goal":"do","instruction":"do it","targetAgentId":"worker"}]}]}
             """;
         var executor = new BuiltinWorkTemplateToolExecutor(
             _userRoot,
@@ -288,7 +294,7 @@ public sealed class BuiltinWorkTemplateToolTests
         using var output = JsonDocument.Parse(dispatch.OutputJson!);
         Assert.IsTrue(output.RootElement.GetProperty("ok").GetBoolean());
         Assert.IsFalse(output.RootElement.GetProperty("executed").GetBoolean());
-        Assert.AreEqual("s1", output.RootElement.GetProperty("stepId").GetString());
+        Assert.AreEqual("1.1", output.RootElement.GetProperty("subStepId").GetString());
         Assert.AreEqual("worker", output.RootElement.GetProperty("targetAgentId").GetString());
     }
 
@@ -297,7 +303,7 @@ public sealed class BuiltinWorkTemplateToolTests
     {
         var planJson =
             """
-            {"planVersion":"1","goal":"g","steps":[{"stepId":"s1","goal":"do","targetAgentId":"worker","dependsOn":[]}]}
+            {"planVersion":"1","goal":"g","steps":[{"stepId":"1","title":"Do","description":"Do the work","subSteps":[{"subStepId":"1.1","goal":"do","instruction":"do it","targetAgentId":"worker"}]}]}
             """;
         var executor = new BuiltinWorkTemplateToolExecutor(
             _userRoot,
@@ -306,7 +312,7 @@ public sealed class BuiltinWorkTemplateToolTests
                 new WorkSessionPlanView(planJson, "Executing")),
             dispatchRunner: (request, _) =>
             {
-                Assert.AreEqual("s1", request.StepId);
+                Assert.AreEqual("1.1", request.StepId);
                 Assert.AreEqual("worker", request.TargetAgentId);
                 Assert.AreEqual("run s1", request.Instruction);
                 return Task.FromResult(

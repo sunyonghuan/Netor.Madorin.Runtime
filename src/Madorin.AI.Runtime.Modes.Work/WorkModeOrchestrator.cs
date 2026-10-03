@@ -524,6 +524,40 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         var approvedLoopRisks = new HashSet<string>(StringComparer.Ordinal);
         var stoppedForPendingInput = false;
 
+        // 创建 WorkSupervisor 实例用于执行一级步骤（包含验证、重试、汇总）
+        var supervisor = new WorkSupervisor(
+            workerDispatcher: async (subStep, ct) =>
+            {
+                // 派发 Worker Agent 执行二级步骤
+                return await DispatchSubStepAsync(
+                    sessionId,
+                    runId,
+                    runtimeInstanceId,
+                    parentInvocationId,
+                    subStep,
+                    plan,
+                    options,
+                    agentById,
+                    request,
+                    sequence,
+                    ct).ConfigureAwait(false);
+            },
+            supervisorInvoker: async (prompt, ct) =>
+            {
+                // 调用项目组长 Agent（使用总经理 Agent）
+                return await InvokeSupervisorAgentAsync(
+                    sessionId,
+                    runId,
+                    options.GeneralManager,
+                    prompt,
+                    request,
+                    ct).ConfigureAwait(false);
+            },
+            policy: new WorkflowPolicy(
+                MaxRetriesPerStep: policy.MaxRetriesPerStep,
+                FailurePolicy: WorkStepFailurePolicy.Continue,
+                RetryBackoffMilliseconds: 1000));
+
         while (true)
         {
             ct.ThrowIfCancellationRequested();
@@ -1028,24 +1062,28 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 completedCount++;
 
                 // 检查是否需要生成一级步骤汇总
-                var stepSummary = await TryGenerateStepSummaryAsync(
-                    sessionId,
-                    readyStep.StepId,
-                    plan,
-                    options.GeneralManager,
-                    request,
-                    ct).ConfigureAwait(false);
-
-                if (!string.IsNullOrEmpty(stepSummary))
+                // readyStep 是二级步骤，需要传入其父步骤 ID
+                if (!string.IsNullOrEmpty(readyStep.ParentStepId))
                 {
-                    // 发送汇总作为文本增量
-                    yield return await CreateTextDeltaEnvelopeAsync(
-                        runId,
-                        runtimeInstanceId,
-                        parentInvocationId ?? runId,
-                        $"\n\n**步骤汇总（{readyStep.StepId}）：**\n{stepSummary}\n",
-                        sequence.Take(),
+                    var stepSummary = await TryGenerateStepSummaryAsync(
+                        sessionId,
+                        readyStep.ParentStepId,
+                        plan,
+                        options.GeneralManager,
+                        request,
                         ct).ConfigureAwait(false);
+
+                    if (!string.IsNullOrEmpty(stepSummary))
+                    {
+                        // 发送汇总作为文本增量
+                        yield return await CreateTextDeltaEnvelopeAsync(
+                            runId,
+                            runtimeInstanceId,
+                            parentInvocationId ?? runId,
+                            $"\n\n**步骤汇总（{readyStep.ParentStepId}）：**\n{stepSummary}\n",
+                            sequence.Take(),
+                            ct).ConfigureAwait(false);
+                    }
                 }
             }
 
@@ -2875,8 +2913,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             && planSteps is not null
             && request.Selection.ModeOptions is WorkModeOptions projectedWorkOptions)
         {
-            var currentStep = workPlan.Steps.FirstOrDefault(step =>
-                string.Equals(step.StepId, currentStepState.StepId, StringComparison.Ordinal))
+            var currentStep = ResolvePlanStep(workPlan, currentStepState)
                 ?? throw new InvalidDataException(
                     $"Work plan '{workPlan.PlanVersion}' does not contain step '{currentStepState.StepId}'.");
             var modelContextWindow = provider.Models
@@ -2940,11 +2977,21 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             ? HostModeSkillsSnapshot.BuildMaps(skillCatalogSnapshot)
             : null;
 
-        // Query plan to get step semantic fields for work mode
+        // Query plan to get step semantic fields for work mode.
+        // 展平模型下 workStepId 是二级步骤 ID，需要经 ParentStepId 回退到一级步骤。
         WorkPlanStepDraft? stepDraft = null;
         if (workStepId is not null && !string.IsNullOrEmpty(workPlanVersion) && workPlan is not null)
         {
-            stepDraft = workPlan.Steps.FirstOrDefault(s => string.Equals(s.StepId, workStepId, StringComparison.Ordinal));
+            if (currentStepState is not null
+                && string.Equals(currentStepState.StepId, workStepId, StringComparison.Ordinal))
+            {
+                stepDraft = ResolvePlanStep(workPlan, currentStepState);
+            }
+            else
+            {
+                stepDraft = workPlan.Steps.FirstOrDefault(
+                    s => string.Equals(s.StepId, workStepId, StringComparison.Ordinal));
+            }
         }
 
         var snapshot = new InvocationSnapshot(
@@ -3514,7 +3561,19 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         agentListBuilder.AppendLine();
         agentListBuilder.AppendLine("## Agent Delegation in Work Mode");
         agentListBuilder.AppendLine();
-        agentListBuilder.AppendLine("When creating the WorkPlanDraft, assign each step to the most appropriate agent by setting the `targetAgentId` field in each WorkPlanStepDraft.");
+        agentListBuilder.AppendLine("When creating the WorkPlanDraft, structure it with top-level steps and sub-steps:");
+        agentListBuilder.AppendLine();
+        agentListBuilder.AppendLine("1. **Top-level steps** (WorkPlanStepDraft): Each represents one deliverable (e.g., one document, one feature)");
+        agentListBuilder.AppendLine("   - Set `title` to a short deliverable name");
+        agentListBuilder.AppendLine("   - Set `description` to the overall objective");
+        agentListBuilder.AppendLine("   - Define `subSteps[]` array containing the actual work units");
+        agentListBuilder.AppendLine();
+        agentListBuilder.AppendLine("2. **Sub-steps** (WorkPlanSubStepDraft): Each represents one atomic task (create/verify/review)");
+        agentListBuilder.AppendLine("   - Set `subStepId` to a unique identifier (e.g., \"doc1-create\", \"doc1-verify\")");
+        agentListBuilder.AppendLine("   - Set `goal` to describe what this sub-step achieves");
+        agentListBuilder.AppendLine("   - Set `instruction` with detailed guidance for the worker agent");
+        agentListBuilder.AppendLine("   - Set `targetAgentId` to assign the agent who will execute this sub-step");
+        agentListBuilder.AppendLine("   - Optionally set `expectedOutput` to specify the deliverable format");
         agentListBuilder.AppendLine();
         agentListBuilder.AppendLine("Available agents:");
         agentListBuilder.AppendLine();
@@ -3525,10 +3584,69 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         }
 
         agentListBuilder.AppendLine();
-        agentListBuilder.AppendLine("When the user mentions \"@AgentName\" or \"let {Agent} do...\", assign that step's targetAgentId to the specified agent.");
-        agentListBuilder.AppendLine("The orchestrator will automatically invoke the correct agent for each step during execution.");
+        agentListBuilder.AppendLine("When the user mentions \"@AgentName\" or \"let {Agent} do...\", assign that sub-step's targetAgentId to the specified agent.");
+        agentListBuilder.AppendLine("The orchestrator will automatically invoke the correct agent for each sub-step during execution.");
+        agentListBuilder.AppendLine();
+        agentListBuilder.AppendLine("Example structure:");
+        agentListBuilder.AppendLine("```");
+        agentListBuilder.AppendLine("{");
+        agentListBuilder.AppendLine("  \"steps\": [");
+        agentListBuilder.AppendLine("    {");
+        agentListBuilder.AppendLine("      \"stepId\": \"deliverable-1\",");
+        agentListBuilder.AppendLine("      \"title\": \"Design Document\",");
+        agentListBuilder.AppendLine("      \"description\": \"Create and verify the design document\",");
+        agentListBuilder.AppendLine("      \"subSteps\": [");
+        agentListBuilder.AppendLine("        {");
+        agentListBuilder.AppendLine("          \"subStepId\": \"design-create\",");
+        agentListBuilder.AppendLine("          \"goal\": \"Write the design document\",");
+        agentListBuilder.AppendLine("          \"instruction\": \"Create a design document covering architecture and data flow\",");
+        agentListBuilder.AppendLine("          \"targetAgentId\": \"worker-agent-id\",");
+        agentListBuilder.AppendLine("          \"expectedOutput\": \"A markdown file with design details\"");
+        agentListBuilder.AppendLine("        },");
+        agentListBuilder.AppendLine("        {");
+        agentListBuilder.AppendLine("          \"subStepId\": \"design-verify\",");
+        agentListBuilder.AppendLine("          \"goal\": \"Verify the design document is complete\",");
+        agentListBuilder.AppendLine("          \"instruction\": \"Review the design document for completeness and correctness\",");
+        agentListBuilder.AppendLine("          \"targetAgentId\": \"worker-agent-id\"");
+        agentListBuilder.AppendLine("        }");
+        agentListBuilder.AppendLine("      ]");
+        agentListBuilder.AppendLine("    }");
+        agentListBuilder.AppendLine("  ]");
+        agentListBuilder.AppendLine("}");
+        agentListBuilder.AppendLine("```");
 
         return baseInstructions + agentListBuilder.ToString();
+    }
+
+    /// <summary>
+    /// 在展平执行模型下，调度器交给执行器的是二级步骤快照（StepId 形如 "1.1"），
+    /// 而 workPlan.Steps 只保存一级步骤（StepId 形如 "1"）。
+    /// 先按精确 ID 匹配一级步骤本身，匹配不到时回退到快照 ParentStepId 对应的一级步骤。
+    /// </summary>
+    private static WorkPlanStepDraft? ResolvePlanStep(
+        WorkPlanDraft plan,
+        WorkStepSnapshot stepState)
+    {
+        foreach (var step in plan.Steps)
+        {
+            if (string.Equals(step.StepId, stepState.StepId, StringComparison.Ordinal))
+            {
+                return step;
+            }
+        }
+
+        if (stepState.ParentStepId is { Length: > 0 } parentId)
+        {
+            foreach (var step in plan.Steps)
+            {
+                if (string.Equals(step.StepId, parentId, StringComparison.Ordinal))
+                {
+                    return step;
+                }
+            }
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -3953,13 +4071,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         var steps = await _workRepo.ListStepsAsync(sessionId, plan.PlanVersion, ct)
             .ConfigureAwait(false);
 
-        // 查找当前完成的步骤
-        var currentStep = steps.FirstOrDefault(s => s.StepId == stepId);
-        if (currentStep == null || currentStep.IsSubStep)
-        {
-            return null; // 只处理一级步骤完成的情况
-        }
-
+        // stepId 是一级步骤的 ID（ParentStepId）
         // 查找这个一级步骤的所有二级步骤
         var subSteps = steps.Where(s =>
             !string.IsNullOrEmpty(s.ParentStepId) &&
@@ -4034,6 +4146,104 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         }
 
         return summaryBuilder.ToString();
+    }
+
+    /// <summary>派发 Worker Agent 执行二级步骤。</summary>
+    private async Task<string> DispatchSubStepAsync(
+        string sessionId,
+        string runId,
+        string runtimeInstanceId,
+        string? parentInvocationId,
+        WorkPlanSubStepDraft subStep,
+        WorkPlanDraft plan,
+        WorkModeOptions options,
+        Dictionary<string, AgentRef> agentById,
+        NewSessionRunRequest request,
+        RunSequenceAllocator sequence,
+        CancellationToken ct)
+    {
+        // 查找目标 Agent
+        if (!agentById.TryGetValue(subStep.TargetAgentId, out var targetAgent))
+        {
+            throw new InvalidOperationException(
+                $"Target agent '{subStep.TargetAgentId}' not found for sub-step '{subStep.SubStepId}'.");
+        }
+
+        // 创建 Invocation
+        var invocation = await CreateInvocationRequestAsync(
+            runId,
+            sessionId,
+            request,
+            targetAgent,
+            "work-substep-v1",
+            ct).ConfigureAwait(false);
+
+        // 构建提示词
+        var prompt = $"""
+            {subStep.Instruction}
+
+            目标：{subStep.Goal}
+            {(string.IsNullOrWhiteSpace(subStep.ExpectedOutput) ? "" : $"期望产出：{subStep.ExpectedOutput}")}
+            """;
+
+        await AppendPlainDialogueAsync(
+            sessionId,
+            invocation.InvocationId,
+            targetAgent.AgentId,
+            "user",
+            prompt,
+            ct).ConfigureAwait(false);
+
+        // 执行并收集输出
+        var outputBuilder = new StringBuilder();
+        await foreach (var providerEvent in ExecuteInvocationAsync(invocation, ct)
+            .ConfigureAwait(false))
+        {
+            if (providerEvent is TextDeltaProviderEvent textDelta)
+            {
+                outputBuilder.Append(textDelta.Delta);
+            }
+        }
+
+        return outputBuilder.ToString();
+    }
+
+    /// <summary>调用项目组长 Agent 进行验证或汇总。</summary>
+    private async Task<string> InvokeSupervisorAgentAsync(
+        string sessionId,
+        string runId,
+        AgentRef supervisorAgent,
+        string prompt,
+        NewSessionRunRequest request,
+        CancellationToken ct)
+    {
+        var invocation = await CreateInvocationRequestAsync(
+            runId,
+            sessionId,
+            request,
+            supervisorAgent,
+            "work-supervisor-v1",
+            ct).ConfigureAwait(false);
+
+        await AppendPlainDialogueAsync(
+            sessionId,
+            invocation.InvocationId,
+            supervisorAgent.AgentId,
+            "user",
+            prompt,
+            ct).ConfigureAwait(false);
+
+        var resultBuilder = new StringBuilder();
+        await foreach (var providerEvent in ExecuteInvocationAsync(invocation, ct)
+            .ConfigureAwait(false))
+        {
+            if (providerEvent is TextDeltaProviderEvent textDelta)
+            {
+                resultBuilder.Append(textDelta.Delta);
+            }
+        }
+
+        return resultBuilder.ToString();
     }
 
     /// <summary>Run-local sequence allocator shared by RunCoreAsync and sync dispatch_step.</summary>

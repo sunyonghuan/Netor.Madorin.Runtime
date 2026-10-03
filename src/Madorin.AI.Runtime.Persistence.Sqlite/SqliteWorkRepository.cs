@@ -1461,6 +1461,20 @@ public sealed class SqliteWorkRepository : IWorkRecoveryStore
         CancellationToken ct)
     {
         var createdAt = FormatTimestamp(DateTimeOffset.UtcNow);
+
+        // 展平后只有二级步骤落库，一级步骤 ID 不存在。
+        // 一级步骤 DependsOn 引用的是其它一级步骤 ID，必须翻译为该步骤最后一个二级步骤 ID，
+        // 否则依赖永远无法满足（调度器找不到对应行 → 死锁）。
+        var lastSubStepByStep = new Dictionary<string, string>(StringComparer.Ordinal);
+        for (var index = 0; index < plan.Steps.Length; index++)
+        {
+            var candidate = plan.Steps[index];
+            if (candidate.SubSteps.Length > 0)
+            {
+                lastSubStepByStep[candidate.StepId] = candidate.SubSteps[^1].SubStepId;
+            }
+        }
+
         for (var stepIndex = 0; stepIndex < plan.Steps.Length; stepIndex++)
         {
             var step = plan.Steps[stepIndex];
@@ -1471,8 +1485,11 @@ public sealed class SqliteWorkRepository : IWorkRecoveryStore
                 var subStep = step.SubSteps[subStepIndex];
                 var inputs = SerializeSubStepInputs(subStep);
                 var hash = ComputeStepInputHash(subStep.SubStepId, plan.PlanVersion, inputs);
+                var firstSubStepDeps = (step.DependsOn ?? [])
+                    .Select(dep => lastSubStepByStep.TryGetValue(dep, out var last) ? last : dep)
+                    .ToArray();
                 var dependsJson = JsonSerializer.Serialize(
-                    subStepIndex == 0 ? (step.DependsOn ?? []) : new[] { step.SubSteps[subStepIndex - 1].SubStepId },
+                    subStepIndex == 0 ? firstSubStepDeps : new[] { step.SubSteps[subStepIndex - 1].SubStepId },
                     RuntimeJsonContext.Default.StringArray);
 
                 await using var stepCommand = _connection.CreateCommand();

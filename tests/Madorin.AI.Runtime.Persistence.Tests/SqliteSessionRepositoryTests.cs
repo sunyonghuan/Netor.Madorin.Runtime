@@ -120,12 +120,16 @@ public sealed class SqliteSessionRepositoryTests
             "1",
             "Delete complete Work state",
             [
-                new WorkPlanStepDraft("delete-step-a", "Prepare", "Prepare for deletion", []),
+                new WorkPlanStepDraft(
+                    "delete-step-a",
+                    "Prepare",
+                    "Prepare for deletion",
+                    [new WorkPlanSubStepDraft("delete-step-a.1", "Prepare", "Prepare for deletion", "worker")]),
                 new WorkPlanStepDraft(
                     "delete-step-b",
                     "Review",
                     "Review deletion",
-                    [],
+                    [new WorkPlanSubStepDraft("delete-step-b.1", "Review", "Review deletion", "worker")],
                     DependsOn: ["delete-step-a"],
                     IsBackground: true)
             ]);
@@ -147,11 +151,11 @@ public sealed class SqliteSessionRepositoryTests
             TestContext.CancellationToken);
         var stepInputHash = await ReadStepInputHashAsync(
             connection,
-            "delete-step-a",
+            "delete-step-a.1",
             plan.PlanVersion,
             TestContext.CancellationToken);
         Assert.IsTrue(await sessionRepository.TryStartWorkStepAsync(
-            "delete-step-a",
+            "delete-step-a.1",
             plan.PlanVersion,
             runId,
             sessionId,
@@ -163,7 +167,7 @@ public sealed class SqliteSessionRepositoryTests
             "delete-job",
             sessionId,
             runId,
-            "delete-step-b",
+            "delete-step-b.1",
             plan.PlanVersion,
             TestContext.CancellationToken);
 
@@ -193,10 +197,10 @@ public sealed class SqliteSessionRepositoryTests
               + (SELECT COUNT(*) FROM work_steps WHERE session_id = $sessionId)
               + (SELECT COUNT(*) FROM work_background_jobs WHERE session_id = $sessionId)
               + (SELECT COUNT(*) FROM work_step_dependencies
-                 WHERE step_id IN ('delete-step-a', 'delete-step-b')
-                    OR depends_on_step_id IN ('delete-step-a', 'delete-step-b'))
+                 WHERE step_id IN ('delete-step-a.1', 'delete-step-b.1')
+                    OR depends_on_step_id IN ('delete-step-a.1', 'delete-step-b.1'))
               + (SELECT COUNT(*) FROM work_step_attempts
-                 WHERE step_id IN ('delete-step-a', 'delete-step-b'));
+                 WHERE step_id IN ('delete-step-a.1', 'delete-step-b.1'));
             """;
         countCommand.Parameters.AddWithValue("$sessionId", sessionId);
         Assert.AreEqual(
@@ -603,7 +607,11 @@ public sealed class SqliteSessionRepositoryTests
         var first = new WorkPlanDraft(
             "1",
             "Ship release",
-            [new WorkPlanStepDraft("step-a", "Prepare notes", "Prepare release notes", [])]);
+            [new WorkPlanStepDraft(
+                "step-a",
+                "Prepare notes",
+                "Prepare release notes",
+                [new WorkPlanSubStepDraft("step-a.1", "Prepare", "Prepare release notes", "worker")])]);
         await workRepo.SavePlanRevisionAsync(
             sessionId,
             runId,
@@ -618,19 +626,18 @@ public sealed class SqliteSessionRepositoryTests
             },
             ct);
         Assert.IsTrue(await sessionRepo.TryStartWorkStepAsync(
-            "step-a",
+            "step-a.1",
             "1",
             runId,
             sessionId,
             "worker",
-            await ReadStepInputHashAsync(connection, "step-a", "1", ct),
+            await ReadStepInputHashAsync(connection, "step-a.1", "1", ct),
             "invocation-a",
             ct));
         await sessionRepo.CompleteWorkStepAsync(
-            sessionId,
-            "step-a",
+            "step-a.1",
             "1",
-            await ReadStepInputHashAsync(connection, "step-a", "1", ct),
+            await ReadStepInputHashAsync(connection, "step-a.1", "1", ct),
             "{}",
             ct);
 
@@ -642,8 +649,12 @@ public sealed class SqliteSessionRepositoryTests
                     "step-a-reused",
                     "Reuse prepared notes",
                     "Reuse prepared notes",
-                    [],
-                    ReusesStepId: "step-a")
+                    [new WorkPlanSubStepDraft(
+                        "step-a-reused.1",
+                        "Reuse",
+                        "Reuse prepared notes",
+                        "worker")],
+                    ReusesStepId: "step-a.1")
             ],
             PreviousPlanVersion: "1");
         await workRepo.SavePlanRevisionAsync(
@@ -665,9 +676,11 @@ public sealed class SqliteSessionRepositoryTests
         Assert.AreEqual("1", revisions[1].PreviousPlanVersion);
         var allSteps = await workRepo.ListStepsAsync(sessionId, ct: ct);
         Assert.HasCount(2, allSteps);
-        Assert.AreEqual(WorkStepLifecycleStatus.Completed, allSteps[0].Status);
-        Assert.AreEqual("step-a", allSteps[1].ReusesStepId);
-        Assert.AreEqual("step-message-2", allSteps[1].StepMessageId);
+        var original = allSteps.Single(static s => s.StepId == "step-a.1");
+        var reused = allSteps.Single(static s => s.StepId == "step-a-reused.1");
+        Assert.AreEqual(WorkStepLifecycleStatus.Completed, original.Status);
+        Assert.AreEqual("step-a.1", reused.ReusesStepId);
+        Assert.AreEqual("step-message-2", reused.StepMessageId);
 
         var invalid = second with
         {
@@ -713,8 +726,17 @@ public sealed class SqliteSessionRepositoryTests
             "2",
             "Ship release",
             [
-                new WorkPlanStepDraft("step-a", "Prepare notes", "Prepare release notes", []),
-                new WorkPlanStepDraft("step-b", "Review notes", "Review release notes", [], DependsOn: ["step-a"])
+                new WorkPlanStepDraft(
+                    "step-a",
+                    "Prepare notes",
+                    "Prepare release notes",
+                    [new WorkPlanSubStepDraft("step-a.1", "Prepare", "Prepare release notes", "worker")]),
+                new WorkPlanStepDraft(
+                    "step-b",
+                    "Review notes",
+                    "Review release notes",
+                    [new WorkPlanSubStepDraft("step-b.1", "Review", "Review release notes", "worker")],
+                    DependsOn: ["step-a"])
             ]);
 
         await workRepo.UpsertSessionAsync(
@@ -730,26 +752,26 @@ public sealed class SqliteSessionRepositoryTests
             TestContext.CancellationToken);
         await workRepo.SavePlanStepsAsync(sessionId, runId, plan, TestContext.CancellationToken);
         await sessionRepo.TryStartWorkStepAsync(
-            "step-a",
+            "step-a.1",
             plan.PlanVersion,
             runId,
             sessionId,
             "worker",
-            await ReadStepInputHashAsync(connection, "step-a", plan.PlanVersion, TestContext.CancellationToken),
+            await ReadStepInputHashAsync(connection, "step-a.1", plan.PlanVersion, TestContext.CancellationToken),
             "invocation-a",
             TestContext.CancellationToken);
         await InsertSentToolIntentAsync(
             connection,
             sessionId,
             runId,
-            "step-a",
+            "step-a.1",
             plan.PlanVersion,
             TestContext.CancellationToken);
         await workRepo.CreateBackgroundJobAsync(
             "job-step-a",
             sessionId,
             runId,
-            "step-a",
+            "step-a.1",
             plan.PlanVersion,
             TestContext.CancellationToken);
         Assert.IsTrue(
@@ -764,12 +786,12 @@ public sealed class SqliteSessionRepositoryTests
         Assert.AreEqual("message-plan", resume.PlanMessageId);
         Assert.HasCount(2, resume.Steps);
         Assert.IsNotNull(resume.CurrentStep);
-        Assert.AreEqual("step-a", resume.CurrentStep.StepId);
+        Assert.AreEqual("step-a.1", resume.CurrentStep.StepId);
         Assert.AreEqual(WorkStepLifecycleStatus.Running, resume.CurrentStep.Status);
         Assert.IsNotNull(resume.BackgroundJobs);
         var backgroundJob = Assert.ContainsSingle(resume.BackgroundJobs);
         Assert.AreEqual("job-step-a", backgroundJob.JobId);
-        Assert.AreEqual("step-a", backgroundJob.StepId);
+        Assert.AreEqual("step-a.1", backgroundJob.StepId);
         Assert.AreEqual(WorkBackgroundJobStatus.Running, backgroundJob.Status);
         Assert.IsNotNull(backgroundJob.StartedAt);
         Assert.IsNull(backgroundJob.CompletedAt);
@@ -905,7 +927,12 @@ public sealed class SqliteSessionRepositoryTests
         var plan = new WorkPlanDraft(
             "1",
             "Cancel active work",
-            [new WorkPlanStepDraft("step-a", "Run cancellable work", "Run cancellable work", [], IsBackground: true)]);
+            [new WorkPlanStepDraft(
+                "step-a",
+                "Run cancellable work",
+                "Run cancellable work",
+                [new WorkPlanSubStepDraft("step-a.1", "Run", "Run cancellable work", "worker")],
+                IsBackground: true)]);
         await workRepo.UpsertSessionAsync(
             sessionId,
             runId,
@@ -920,12 +947,12 @@ public sealed class SqliteSessionRepositoryTests
         await workRepo.SavePlanStepsAsync(sessionId, runId, plan, TestContext.CancellationToken);
         var stepInputHash = await ReadStepInputHashAsync(
             connection,
-            "step-a",
+            "step-a.1",
             plan.PlanVersion,
             TestContext.CancellationToken);
         Assert.IsTrue(
             await sessionRepo.TryStartWorkStepAsync(
-                "step-a",
+                "step-a.1",
                 plan.PlanVersion,
                 runId,
                 sessionId,
@@ -935,7 +962,7 @@ public sealed class SqliteSessionRepositoryTests
                 TestContext.CancellationToken));
         await workRepo.MarkStepWaitingForApprovalAsync(
             sessionId,
-            "step-a",
+            "step-a.1",
             plan.PlanVersion,
             "approval-a",
             "{\"kind\":\"tool\"}",
@@ -944,7 +971,7 @@ public sealed class SqliteSessionRepositoryTests
             "job-a",
             sessionId,
             runId,
-            "step-a",
+            "step-a.1",
             plan.PlanVersion,
             TestContext.CancellationToken);
         Assert.IsTrue(await workRepo.TryStartBackgroundJobAsync("job-a", TestContext.CancellationToken));
@@ -972,7 +999,7 @@ public sealed class SqliteSessionRepositoryTests
         attempt.CommandText = """
             SELECT status, error_message, completed_at
             FROM work_step_attempts
-            WHERE step_id = 'step-a'
+            WHERE step_id = 'step-a.1'
               AND plan_version = '1'
               AND invocation_id = 'invocation-a';
             """;
@@ -1002,7 +1029,11 @@ public sealed class SqliteSessionRepositoryTests
         var plan = new WorkPlanDraft(
             "1",
             "Ship release",
-            [new WorkPlanStepDraft("step-a", "Prepare notes", "Prepare release notes", [])]);
+            [new WorkPlanStepDraft(
+                "step-a",
+                "Prepare notes",
+                "Prepare release notes",
+                [new WorkPlanSubStepDraft("step-a.1", "Prepare", "Prepare release notes", "worker")])]);
         await workRepo.UpsertSessionAsync(
             sessionId,
             runId,
@@ -1017,11 +1048,11 @@ public sealed class SqliteSessionRepositoryTests
         await workRepo.SavePlanStepsAsync(sessionId, runId, plan, TestContext.CancellationToken);
         var stepInputHash = await ReadStepInputHashAsync(
             connection,
-            "step-a",
+            "step-a.1",
             plan.PlanVersion,
             TestContext.CancellationToken);
         await sessionRepo.TryStartWorkStepAsync(
-            "step-a",
+            "step-a.1",
             plan.PlanVersion,
             runId,
             sessionId,
@@ -1030,18 +1061,18 @@ public sealed class SqliteSessionRepositoryTests
             "invocation-a",
             TestContext.CancellationToken);
         await sessionRepo.FailWorkStepAsync(
-            "step-a",
+            "step-a.1",
             plan.PlanVersion,
             "temporary failure",
             TestContext.CancellationToken);
 
         await workRepo.ResetStepForRetryAsync(
-            "step-a",
+            "step-a.1",
             plan.PlanVersion,
             "retry scheduled",
             TestContext.CancellationToken);
         var restarted = await sessionRepo.TryStartWorkStepAsync(
-            "step-a",
+            "step-a.1",
             plan.PlanVersion,
             runId,
             sessionId,
