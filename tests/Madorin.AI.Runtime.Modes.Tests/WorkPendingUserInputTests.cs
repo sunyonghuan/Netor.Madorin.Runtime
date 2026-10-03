@@ -72,7 +72,8 @@ public sealed class WorkPendingUserInputTests
 
             const string planJson =
                 "{\"planVersion\":\"1\",\"goal\":\"Ship revised\",\"steps\":["
-                + "{\"stepId\":\"step-a\",\"goal\":\"Prepare notes\",\"targetAgentId\":\"worker\"}]}";
+                + "{\"stepId\":\"1\",\"title\":\"Prepare notes\",\"description\":\"Prepare the release notes\","
+                + "\"subSteps\":[{\"subStepId\":\"1.1\",\"goal\":\"Prepare notes\",\"instruction\":\"Prepare the release notes\",\"targetAgentId\":\"worker\"}]}]}";
             var provider = new ScriptedProvider(planJson);
             var orchestrator = new WorkModeOrchestrator(
                 _ => provider,
@@ -133,8 +134,10 @@ public sealed class WorkPendingUserInputTests
 
             const string firstPlan =
                 "{\"planVersion\":\"1\",\"goal\":\"Ship v1\",\"steps\":["
-                + "{\"stepId\":\"step-a\",\"goal\":\"Prepare notes\",\"targetAgentId\":\"worker\"},"
-                + "{\"stepId\":\"step-b\",\"goal\":\"Publish notes\",\"targetAgentId\":\"worker\",\"dependsOn\":[\"step-a\"]}]}";
+                + "{\"stepId\":\"1\",\"title\":\"Prepare notes\",\"description\":\"Prepare the notes\","
+                + "\"subSteps\":[{\"subStepId\":\"1.1\",\"goal\":\"Prepare notes\",\"instruction\":\"Prepare the notes\",\"targetAgentId\":\"worker\"}]},"
+                + "{\"stepId\":\"2\",\"title\":\"Publish notes\",\"description\":\"Publish the notes\",\"dependsOn\":[\"1\"],"
+                + "\"subSteps\":[{\"subStepId\":\"2.1\",\"goal\":\"Publish notes\",\"instruction\":\"Publish the notes\",\"targetAgentId\":\"worker\"}]}]}";
             await RunTurnAsync(
                 connection,
                 store,
@@ -159,8 +162,10 @@ public sealed class WorkPendingUserInputTests
 
             const string secondPlan =
                 "{\"planVersion\":\"1\",\"goal\":\"Ship v2\",\"steps\":["
-                + "{\"stepId\":\"step-a\",\"goal\":\"Prepare notes\",\"targetAgentId\":\"worker\",\"reusesStepId\":\"step-a\"},"
-                + "{\"stepId\":\"step-c\",\"goal\":\"Rewrite notes\",\"targetAgentId\":\"worker\"}]}";
+                + "{\"stepId\":\"1\",\"title\":\"Prepare notes\",\"description\":\"Prepare the notes\",\"reusesStepId\":\"1.1\","
+                + "\"subSteps\":[{\"subStepId\":\"1.1\",\"goal\":\"Prepare notes\",\"instruction\":\"Prepare the notes\",\"targetAgentId\":\"worker\"}]},"
+                + "{\"stepId\":\"3\",\"title\":\"Rewrite notes\",\"description\":\"Rewrite the notes\","
+                + "\"subSteps\":[{\"subStepId\":\"3.1\",\"goal\":\"Rewrite notes\",\"instruction\":\"Rewrite the notes\",\"targetAgentId\":\"worker\"}]}]}";
             await RunTurnAsync(
                 connection,
                 store,
@@ -182,12 +187,12 @@ public sealed class WorkPendingUserInputTests
 
             var v2Steps = await workRepo.ListStepsAsync("session-1", "2", ct);
             Assert.HasCount(2, v2Steps);
-            var reused = v2Steps.Single(static s => s.StepId == "step-a");
+            var reused = v2Steps.Single(static s => s.StepId == "1.1");
             Assert.AreEqual(WorkStepLifecycleStatus.Completed, reused.Status);
-            Assert.AreEqual("step-a", reused.ReusesStepId);
+            Assert.AreEqual("1.1", reused.ReusesStepId);
             Assert.AreEqual(
                 WorkStepLifecycleStatus.Completed,
-                v2Steps.Single(static s => s.StepId == "step-c").Status);
+                v2Steps.Single(static s => s.StepId == "3.1").Status);
 
             var resume = await workRepo.GetResumeStateAsync("session-1", ct);
             Assert.IsNotNull(resume);

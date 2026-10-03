@@ -160,7 +160,11 @@ public sealed class WorkCrashRecoveryTests
         var plan = new WorkPlanDraft(
             "1",
             "Verify crash boundaries",
-            [new WorkPlanStepDraft("crash-step", "Complete durable work", "Complete durable work", [])]);
+            [new WorkPlanStepDraft(
+                "crash-step",
+                "Complete durable work",
+                "Complete durable work",
+                [new WorkPlanSubStepDraft("crash-step.1", "Complete", "Complete durable work", "worker")])]);
         await workRepository.SavePlanRevisionAsync(
             sessionId,
             runId,
@@ -177,7 +181,7 @@ public sealed class WorkCrashRecoveryTests
         CrashIf(boundary, WorkCrashBoundary.PlanCommitted, sessionId, runId);
 
         Assert.IsTrue(await sessionRepository.TryStartWorkStepWithCheckpointAsync(
-            "crash-step",
+            "crash-step.1",
             "1",
             runId,
             sessionId,
@@ -214,7 +218,7 @@ public sealed class WorkCrashRecoveryTests
                 DateTimeOffset.UtcNow,
                 SentAt: null,
                 CompletedAt: null,
-                WorkStepId: "crash-step",
+                WorkStepId: "crash-step.1",
                 PlanVersion: "1"),
             ct));
         Assert.IsTrue(await toolRepository.TryMarkSentAsync(
@@ -241,7 +245,7 @@ public sealed class WorkCrashRecoveryTests
         CrashIf(boundary, WorkCrashBoundary.ToolResultCommitted, sessionId, runId);
 
         await sessionRepository.CompleteWorkStepAsync(
-            "crash-step",
+            "crash-step.1",
             "1",
             "step-input-hash",
             StepResultJson,

@@ -63,7 +63,7 @@ public sealed class WorkDispatchStepTests
                             "manager",
                             "call-dispatch-b",
                             "1",
-                            "step-b",
+                            "2.1",
                             "worker",
                             "Prepare B",
                             "do B now",
@@ -78,7 +78,7 @@ public sealed class WorkDispatchStepTests
                             "manager",
                             "call-dispatch-b2",
                             "1",
-                            "step-b",
+                            "2.1",
                             "worker",
                             "Prepare B",
                             "again",
@@ -92,7 +92,7 @@ public sealed class WorkDispatchStepTests
                             "manager",
                             "call-dispatch-a",
                             "1",
-                            "step-a",
+                            "1.1",
                             "worker",
                             "Prepare A",
                             "steal",
@@ -114,8 +114,10 @@ public sealed class WorkDispatchStepTests
             await EnsureSessionRunAsync(connection, "session-1", "run-1", ct);
             const string planJson =
                 "{\"planVersion\":\"1\",\"goal\":\"Ship\",\"steps\":["
-                + "{\"stepId\":\"step-a\",\"goal\":\"Prepare A\",\"targetAgentId\":\"worker\"},"
-                + "{\"stepId\":\"step-b\",\"goal\":\"Prepare B\",\"targetAgentId\":\"worker\"}]}";
+                + "{\"stepId\":\"1\",\"title\":\"Prepare A\",\"description\":\"Prepare A\","
+                + "\"subSteps\":[{\"subStepId\":\"1.1\",\"goal\":\"Prepare A\",\"instruction\":\"Prepare A\",\"targetAgentId\":\"worker\"}]},"
+                + "{\"stepId\":\"2\",\"title\":\"Prepare B\",\"description\":\"Prepare B\","
+                + "\"subSteps\":[{\"subStepId\":\"2.1\",\"goal\":\"Prepare B\",\"instruction\":\"Prepare B\",\"targetAgentId\":\"worker\"}]}]}";
             provider.ManagerPlanJson = planJson;
 
             var events = new List<RuntimeEventEnvelope>();
@@ -162,10 +164,10 @@ public sealed class WorkDispatchStepTests
             var steps = await workRepo.ListStepsAsync("session-1", "1", ct);
             Assert.AreEqual(
                 WorkStepLifecycleStatus.Completed,
-                steps.Single(static step => step.StepId == "step-a").Status);
+                steps.Single(static step => step.StepId == "1.1").Status);
             Assert.AreEqual(
                 WorkStepLifecycleStatus.Completed,
-                steps.Single(static step => step.StepId == "step-b").Status);
+                steps.Single(static step => step.StepId == "2.1").Status);
             Assert.IsTrue(events.Any(static item => item.MessageType == MessageTypes.RunCompleted));
         }
         finally

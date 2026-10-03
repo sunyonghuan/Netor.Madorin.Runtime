@@ -96,16 +96,17 @@ internal static class WorkPlanToolCodec
         }
 
         var step = plan.Steps[stepIndex - 1];
-        if (subStepIndex > step.SubSteps.Length)
+        var subSteps = step.SubSteps ?? [];
+        if (subSteps.Length == 0 || subStepIndex > subSteps.Length)
         {
             errorCode = "substep_not_found";
             message = string.Create(
                 CultureInfo.InvariantCulture,
-                $"subStepIndex={subStepIndex} exceeds substeps count={step.SubSteps.Length} in step {stepIndex}.");
+                $"step {stepIndex} has no resolvable sub-steps; subStepIndex={subStepIndex} exceeds count={subSteps.Length}.");
             return false;
         }
 
-        subStep = step.SubSteps[subStepIndex - 1];
+        subStep = subSteps[subStepIndex - 1];
         return true;
     }
 
@@ -118,6 +119,23 @@ internal static class WorkPlanToolCodec
         plan = null;
         errorCode = null;
         message = null;
+
+        // Check if this is legacy format (steps have 'goal' and 'targetAgentId' instead of 'subSteps')
+        if (root.TryGetProperty("steps", out var stepsElement)
+            && stepsElement.ValueKind == JsonValueKind.Array
+            && stepsElement.GetArrayLength() > 0)
+        {
+            var firstStep = stepsElement[0];
+            if (firstStep.ValueKind == JsonValueKind.Object
+                && firstStep.TryGetProperty("goal", out _)
+                && firstStep.TryGetProperty("targetAgentId", out _)
+                && !firstStep.TryGetProperty("subSteps", out _))
+            {
+                // Legacy format detected - convert to new format
+                return TryConvertLegacyFormat(root, out plan, out errorCode, out message);
+            }
+        }
+
         try
         {
             plan = JsonSerializer.Deserialize(
@@ -144,6 +162,115 @@ internal static class WorkPlanToolCodec
             message = "WorkPlanDraft requires planVersion and goal.";
             return false;
         }
+
+        return true;
+    }
+
+    private static bool TryConvertLegacyFormat(
+        JsonElement root,
+        out WorkPlanDraft? plan,
+        out string? errorCode,
+        out string? message)
+    {
+        plan = null;
+        errorCode = null;
+        message = null;
+
+        var planVersion = ReadOptionalString(root, "planVersion") ?? "1";
+        var goal = ReadOptionalString(root, "goal") ?? "Work plan";
+        var summary = ReadOptionalString(root, "summary");
+        var previousPlanVersion = ReadOptionalString(root, "previousPlanVersion");
+
+        if (!root.TryGetProperty("steps", out var stepsElement)
+            || stepsElement.ValueKind != JsonValueKind.Array)
+        {
+            errorCode = "invalid_plan";
+            message = "Legacy plan must have steps array.";
+            return false;
+        }
+
+        var steps = new List<WorkPlanStepDraft>();
+        var stepIndex = 0;
+
+        foreach (var legacyStep in stepsElement.EnumerateArray())
+        {
+            stepIndex++;
+            if (legacyStep.ValueKind != JsonValueKind.Object)
+            {
+                errorCode = "invalid_plan";
+                message = $"Step at index {stepIndex} must be an object.";
+                return false;
+            }
+
+            var stepId = ReadOptionalString(legacyStep, "stepId");
+            if (string.IsNullOrWhiteSpace(stepId))
+            {
+                errorCode = "invalid_plan";
+                message = $"Step at index {stepIndex} is missing stepId.";
+                return false;
+            }
+
+            var legacyGoal = ReadOptionalString(legacyStep, "goal");
+            var targetAgentId = ReadOptionalString(legacyStep, "targetAgentId");
+            var title = ReadOptionalString(legacyStep, "title") ?? legacyGoal ?? $"Step {stepIndex}";
+            var description = ReadOptionalString(legacyStep, "description") ?? legacyGoal ?? title;
+
+            if (string.IsNullOrWhiteSpace(targetAgentId))
+            {
+                errorCode = "invalid_plan";
+                message = $"Step '{stepId}' is missing targetAgentId.";
+                return false;
+            }
+
+            // Parse dependsOn array
+            string[]? dependsOn = null;
+            if (legacyStep.TryGetProperty("dependsOn", out var dependsOnElement)
+                && dependsOnElement.ValueKind == JsonValueKind.Array)
+            {
+                var deps = new List<string>();
+                foreach (var dep in dependsOnElement.EnumerateArray())
+                {
+                    if (dep.ValueKind == JsonValueKind.String)
+                    {
+                        var depValue = dep.GetString();
+                        if (!string.IsNullOrWhiteSpace(depValue))
+                        {
+                            deps.Add(depValue);
+                        }
+                    }
+                }
+                dependsOn = deps.Count > 0 ? deps.ToArray() : null;
+            }
+
+            // Convert legacy step to new format with one SubStep
+            var subStepId = $"{stepId}.1";
+            var subStep = new WorkPlanSubStepDraft(
+                subStepId,
+                legacyGoal ?? title,
+                description,
+                targetAgentId,
+                ExpectedOutput: null,
+                Inputs: null);
+
+            var newStep = new WorkPlanStepDraft(
+                stepId,
+                title,
+                description,
+                [subStep],
+                DependsOn: dependsOn,
+                IsBackground: false,
+                ReusesStepId: ReadOptionalString(legacyStep, "reusesStepId"),
+                ReplacesStepId: ReadOptionalString(legacyStep, "replacesStepId"));
+
+            steps.Add(newStep);
+        }
+
+        plan = new WorkPlanDraft(
+            planVersion,
+            goal,
+            steps.ToArray(),
+            Summary: summary,
+            PreviousPlanVersion: previousPlanVersion);
 
         return true;
     }

@@ -1060,24 +1060,28 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 completedCount++;
 
                 // 检查是否需要生成一级步骤汇总
-                var stepSummary = await TryGenerateStepSummaryAsync(
-                    sessionId,
-                    readyStep.StepId,
-                    plan,
-                    options.GeneralManager,
-                    request,
-                    ct).ConfigureAwait(false);
-
-                if (!string.IsNullOrEmpty(stepSummary))
+                // readyStep 是二级步骤，需要传入其父步骤 ID
+                if (!string.IsNullOrEmpty(readyStep.ParentStepId))
                 {
-                    // 发送汇总作为文本增量
-                    yield return await CreateTextDeltaEnvelopeAsync(
-                        runId,
-                        runtimeInstanceId,
-                        parentInvocationId ?? runId,
-                        $"\n\n**步骤汇总（{readyStep.StepId}）：**\n{stepSummary}\n",
-                        sequence.Take(),
+                    var stepSummary = await TryGenerateStepSummaryAsync(
+                        sessionId,
+                        readyStep.ParentStepId,
+                        plan,
+                        options.GeneralManager,
+                        request,
                         ct).ConfigureAwait(false);
+
+                    if (!string.IsNullOrEmpty(stepSummary))
+                    {
+                        // 发送汇总作为文本增量
+                        yield return await CreateTextDeltaEnvelopeAsync(
+                            runId,
+                            runtimeInstanceId,
+                            parentInvocationId ?? runId,
+                            $"\n\n**步骤汇总（{readyStep.ParentStepId}）：**\n{stepSummary}\n",
+                            sequence.Take(),
+                            ct).ConfigureAwait(false);
+                    }
                 }
             }
 
@@ -2906,8 +2910,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             && planSteps is not null
             && request.Selection.ModeOptions is WorkModeOptions projectedWorkOptions)
         {
-            var currentStep = workPlan.Steps.FirstOrDefault(step =>
-                string.Equals(step.StepId, currentStepState.StepId, StringComparison.Ordinal))
+            var currentStep = ResolvePlanStep(workPlan, currentStepState)
                 ?? throw new InvalidDataException(
                     $"Work plan '{workPlan.PlanVersion}' does not contain step '{currentStepState.StepId}'.");
             var modelContextWindow = provider.Models
@@ -2971,11 +2974,21 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             ? HostModeSkillsSnapshot.BuildMaps(skillCatalogSnapshot)
             : null;
 
-        // Query plan to get step semantic fields for work mode
+        // Query plan to get step semantic fields for work mode.
+        // 展平模型下 workStepId 是二级步骤 ID，需要经 ParentStepId 回退到一级步骤。
         WorkPlanStepDraft? stepDraft = null;
         if (workStepId is not null && !string.IsNullOrEmpty(workPlanVersion) && workPlan is not null)
         {
-            stepDraft = workPlan.Steps.FirstOrDefault(s => string.Equals(s.StepId, workStepId, StringComparison.Ordinal));
+            if (currentStepState is not null
+                && string.Equals(currentStepState.StepId, workStepId, StringComparison.Ordinal))
+            {
+                stepDraft = ResolvePlanStep(workPlan, currentStepState);
+            }
+            else
+            {
+                stepDraft = workPlan.Steps.FirstOrDefault(
+                    s => string.Equals(s.StepId, workStepId, StringComparison.Ordinal));
+            }
         }
 
         var snapshot = new InvocationSnapshot(
@@ -3603,6 +3616,37 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
     }
 
     /// <summary>
+    /// 在展平执行模型下，调度器交给执行器的是二级步骤快照（StepId 形如 "1.1"），
+    /// 而 workPlan.Steps 只保存一级步骤（StepId 形如 "1"）。
+    /// 先按精确 ID 匹配一级步骤本身，匹配不到时回退到快照 ParentStepId 对应的一级步骤。
+    /// </summary>
+    private static WorkPlanStepDraft? ResolvePlanStep(
+        WorkPlanDraft plan,
+        WorkStepSnapshot stepState)
+    {
+        foreach (var step in plan.Steps)
+        {
+            if (string.Equals(step.StepId, stepState.StepId, StringComparison.Ordinal))
+            {
+                return step;
+            }
+        }
+
+        if (stepState.ParentStepId is { Length: > 0 } parentId)
+        {
+            foreach (var step in plan.Steps)
+            {
+                if (string.Equals(step.StepId, parentId, StringComparison.Ordinal))
+                {
+                    return step;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// 将 WorkPlanDraft 映射为 work.plan.updated 事件载荷。
     ///
     /// 状态映射策略说明：
@@ -4023,13 +4067,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         var steps = await _workRepo.ListStepsAsync(sessionId, plan.PlanVersion, ct)
             .ConfigureAwait(false);
 
-        // 查找当前完成的步骤
-        var currentStep = steps.FirstOrDefault(s => s.StepId == stepId);
-        if (currentStep == null || currentStep.IsSubStep)
-        {
-            return null; // 只处理一级步骤完成的情况
-        }
-
+        // stepId 是一级步骤的 ID（ParentStepId）
         // 查找这个一级步骤的所有二级步骤
         var subSteps = steps.Where(s =>
             !string.IsNullOrEmpty(s.ParentStepId) &&

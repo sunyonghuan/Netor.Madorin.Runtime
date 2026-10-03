@@ -165,15 +165,48 @@ Planning → Executing → Completed
 
 ## 10. 计划结构
 
-Work 模式的计划和步骤通过以下数据结构表达：
+Work 模式的计划采用**二级步骤结构**：一级步骤（交付物）包含多个二级步骤（执行单元）。
+
+### 10.1 数据结构
 
 | 类型 | 说明 |
 | --- | --- |
-| `WorkPlanDraft` | 初始计划，由 Manager Agent 生成 |
-| `WorkPlanStepDraft` | 单个步骤定义，包含描述、依赖和 Sub-Agent 指定 |
+| `WorkPlanDraft` | 初始计划，由 Manager Agent 生成，包含多个一级步骤 |
+| `WorkPlanStepDraft` | 一级步骤定义，表示一个交付物阶段，包含 `title`、`description`、`subSteps` 和 `dependsOn` |
+| `WorkPlanSubStepDraft` | 二级步骤定义，表示实际执行单元，包含 `subStepId`、`goal`、`instruction`、`targetAgentId` |
 | `WorkPlanRevisionSnapshot` | 计划修订历史，记录 Manager 对计划的每次修改 |
-| `WorkStepSnapshot` | 已执行步骤的完整状态快照 |
+| `WorkStepSnapshot` | 已执行步骤的完整状态快照（仅二级步骤有独立记录） |
 | `WorkStepAttemptSnapshot` | 单次执行尝试的记录，包含输入输出和耗时 |
+
+### 10.2 二级步骤结构
+
+**一级步骤（`WorkPlanStepDraft`）**：
+- `stepId`：一级步骤 ID（格式：`"1"`、`"2"`）
+- `title`：一级步骤标题（交付物名称）
+- `description`：一级步骤描述（交付物说明）
+- `subSteps`：二级步骤数组（必须至少包含一个二级步骤）
+- `dependsOn`：依赖的一级步骤 ID 数组（可选）
+
+**二级步骤（`WorkPlanSubStepDraft`）**：
+- `subStepId`：二级步骤 ID（格式：`"1.1"`、`"1.2"`、`"2.1"`）
+- `goal`：二级步骤目标
+- `instruction`：给 Worker Agent 的执行指令
+- `targetAgentId`：执行该步骤的 Worker Agent ID
+- `expectedOutput`：期望产出（可选，用于验证）
+
+### 10.3 执行模型
+
+1. **展平调度**：二级步骤在持久化时展平到 `work_steps` 表，只有二级步骤有独立的 `WorkStepSnapshot` 记录。
+2. **依赖翻译**：一级步骤的 `dependsOn` 会自动翻译到二级步骤的依赖关系：
+   - 一级步骤 `"2"` 依赖 `"1"` 时，`"2.1"` 会依赖 `"1"` 的最后一个二级步骤（如 `"1.2"`）
+   - 同一级步骤内的二级步骤按顺序依赖（`"1.2"` 依赖 `"1.1"`）
+3. **汇总生成**：一级步骤的所有二级步骤完成后，自动生成一级步骤的汇总报告。
+
+### 10.4 旧格式兼容
+
+运行时自动将旧格式计划转换为新格式：
+- 旧格式：包含 `goal` 和 `targetAgentId`，无 `subSteps`
+- 新格式：自动生成包含一个二级步骤的一级步骤
 
 计划修订历史允许回溯 Manager 的决策过程，用于调试和审计。
 

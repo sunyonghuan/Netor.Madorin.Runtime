@@ -61,6 +61,7 @@ public sealed class WorkToolLoopTests
                 Path.Join(dataDirectory, "home"),
                 Path.Join(dataDirectory, "workspace"));
             var sessionRepo = new SqliteSessionRepository(connection);
+            var workRepo = new SqliteWorkRepository(connection);
             var orchestrator = new WorkModeOrchestrator(
                 _ => provider,
                 new ConversationStore(dataDirectory),
@@ -70,7 +71,7 @@ public sealed class WorkToolLoopTests
                 toolStateStore: toolState,
                 toolGateway: gateway,
                 toolCatalogSnapshot: catalog,
-                workRepo: new SqliteWorkRepository(connection),
+                workRepo: workRepo,
                 connection: connection);
 
             await EnsureSessionRunAsync(connection, "session-1", "run-1", ct);
@@ -91,7 +92,7 @@ public sealed class WorkToolLoopTests
             Assert.IsNotNull(executor.LastInvocation);
             Assert.AreEqual("worker", executor.LastInvocation.AgentId);
             Assert.AreEqual("manager", executor.LastInvocation.ParentAgentId);
-            Assert.AreEqual("run-1:step-1", executor.LastInvocation.WorkStepId);
+            Assert.AreEqual("1.1", executor.LastInvocation.WorkStepId);
             Assert.AreEqual("1", executor.LastInvocation.PlanVersion);
             Assert.IsFalse(string.IsNullOrWhiteSpace(executor.LastInvocation.ParentInvocationId));
             Assert.AreEqual(2, provider.WorkerCallCount);
@@ -105,13 +106,16 @@ public sealed class WorkToolLoopTests
             Assert.AreEqual(ToolIntentStatus.Succeeded, intent.Status);
             Assert.AreEqual("worker", intent.AgentId);
             Assert.AreEqual("manager", intent.ParentAgentId);
-            Assert.AreEqual("run-1:step-1", intent.WorkStepId);
+            Assert.AreEqual("1.1", intent.WorkStepId);
             Assert.AreEqual("1", intent.PlanVersion);
 
+            // 展平后二级步骤的输入哈希由子步骤字段派生，直接读取落库值而非硬编码。
+            var persistedSteps = await workRepo.ListStepsAsync("session-1", "1", ct);
+            var persistedStep = persistedSteps.Single(static s => s.StepId == "1.1");
             var completed = await sessionRepo.GetCompletedWorkStepResultAsync(
-                "run-1:step-1",
+                "1.1",
                 "1",
-                ComputeHash([new TextContentBlock("Prepare the release notes.")]),
+                persistedStep.StepInputHash,
                 ct);
             Assert.IsNotNull(completed);
             StringAssert.Contains(completed, "tool-result:worker");
@@ -381,7 +385,7 @@ public sealed class WorkToolLoopTests
             Assert.AreEqual(permissionRequest.ApprovalRequestId, resumeWhileWaiting.PendingApprovalRequestId);
             Assert.IsNotNull(resumeWhileWaiting.CurrentStep);
             Assert.AreEqual(WorkStepLifecycleStatus.WaitingForApproval, resumeWhileWaiting.CurrentStep.Status);
-            Assert.AreEqual("run-1:step-1", resumeWhileWaiting.CurrentStep.StepId);
+            Assert.AreEqual("1.1", resumeWhileWaiting.CurrentStep.StepId);
             Assert.AreEqual(0, executor.CallCount);
 
             releasePermission.SetResult();
@@ -735,7 +739,8 @@ public sealed class WorkToolLoopTests
                 yield return new TextDeltaProviderEvent(
                     request.InvocationId,
                     "{\"planVersion\":\"1\",\"goal\":\"Calculate\",\"steps\":["
-                    + "{\"stepId\":\"run-1:step-1\",\"goal\":\"Calculate\",\"targetAgentId\":\"worker\",\"title\":\"Execute\"}]}");
+                    + "{\"stepId\":\"1\",\"title\":\"Execute\",\"description\":\"Calculate the result\","
+                    + "\"subSteps\":[{\"subStepId\":\"1.1\",\"goal\":\"Calculate\",\"instruction\":\"Perform calculation\",\"targetAgentId\":\"worker\"}]}]}");
                 yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
                 yield break;
             }
@@ -830,8 +835,10 @@ public sealed class WorkToolLoopTests
                 yield return new TextDeltaProviderEvent(
                     request.InvocationId,
                     "{\"planVersion\":\"1\",\"goal\":\"Ship\",\"steps\":["
-                    + "{\"stepId\":\"run-1:step-a\",\"goal\":\"Prepare A\",\"targetAgentId\":\"worker\"},"
-                    + "{\"stepId\":\"run-1:step-b\",\"goal\":\"Prepare B\",\"targetAgentId\":\"worker\"}]}");
+                    + "{\"stepId\":\"1\",\"title\":\"Prepare A\",\"description\":\"Prepare component A\","
+                    + "\"subSteps\":[{\"subStepId\":\"1.1\",\"goal\":\"Prepare A\",\"instruction\":\"Prepare component A\",\"targetAgentId\":\"worker\"}]},"
+                    + "{\"stepId\":\"2\",\"title\":\"Prepare B\",\"description\":\"Prepare component B\","
+                    + "\"subSteps\":[{\"subStepId\":\"2.1\",\"goal\":\"Prepare B\",\"instruction\":\"Prepare component B\",\"targetAgentId\":\"worker\"}]}]}");
                 yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
                 yield break;
             }
