@@ -30,8 +30,7 @@ public static class WorkStepScheduler
         var ready = new List<WorkStepSnapshot>();
         foreach (var step in steps
             .Where(static s => s.Status == WorkStepLifecycleStatus.Pending)
-            .OrderBy(static s => s.Depth)
-            .ThenBy(static s => s.StepId, StringComparer.Ordinal))
+            .OrderBy(static s => s.StepId, StringComparer.Ordinal))
         {
             var deps = step.DependsOn ?? [];
             if (deps.Any(dep => !completed.Contains(dep)))

@@ -5,7 +5,7 @@ namespace Madorin.AI.Runtime.Persistence.Sqlite;
 /// <summary>Creates and migrates the Runtime SQLite metadata schema.</summary>
 public static class SqliteSchema
 {
-    public const int CurrentVersion = 19;
+    public const int CurrentVersion = 20;
 
     private static readonly string[] RequiredTables =
     [
@@ -179,7 +179,6 @@ public static class SqliteSchema
         ("work_sessions", "requires_manual_intervention"),
         ("work_steps", "parent_step_id"),
         ("work_steps", "invocation_id"),
-        ("work_steps", "depth"),
         ("work_steps", "step_index"),
         ("work_steps", "attempt_count"),
         ("work_steps", "error_message"),
@@ -365,6 +364,9 @@ public static class SqliteSchema
                     break;
                 case 19:
                     await ApplyVersionNineteenAsync(conn, ct).ConfigureAwait(false);
+                    break;
+                case 20:
+                    await ApplyVersionTwentyAsync(conn, ct).ConfigureAwait(false);
                     break;
                 default:
                     throw new InvalidOperationException($"No migration is registered for schema version {version}.");
@@ -1231,6 +1233,11 @@ public static class SqliteSchema
     private static async Task ApplyVersionEighteenAsync(SqliteConnection conn, CancellationToken ct)
     {
         using var transaction = conn.BeginTransaction(deferred: false);
+
+        // Check if depth column exists (added in v13, will be removed in v20)
+        var hasDepth = await ColumnExistsAsync(conn, "work_steps", "depth", ct)
+            .ConfigureAwait(false);
+
         await using var command = conn.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
@@ -1247,7 +1254,6 @@ public static class SqliteSchema
                 completed_at TEXT,
                 parent_step_id TEXT,
                 invocation_id TEXT,
-                depth INTEGER NOT NULL DEFAULT 0,
                 step_index INTEGER NOT NULL DEFAULT 0,
                 attempt_count INTEGER NOT NULL DEFAULT 0,
                 error_message TEXT,
@@ -1260,23 +1266,58 @@ public static class SqliteSchema
                 reuses_step_id TEXT,
                 replaces_step_id TEXT,
                 checkpoint_json TEXT,
+                depth INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (session_id, step_id, plan_version)
             );
-            INSERT INTO work_steps_v18 (
-                session_id, step_id, plan_version, run_id, target_agent_id, status,
-                step_input_hash, result_json, created_at, completed_at, parent_step_id,
-                invocation_id, depth, step_index, attempt_count, error_message, started_at,
-                title, goal, is_background, depends_json, step_message_id, reuses_step_id,
-                replaces_step_id, checkpoint_json)
-            SELECT
-                session_id, step_id, plan_version, run_id, target_agent_id, status,
-                step_input_hash, result_json, created_at, completed_at, parent_step_id,
-                invocation_id, COALESCE(depth, 0), COALESCE(step_index, 0),
-                COALESCE(attempt_count, 0), error_message, started_at,
-                title, goal, COALESCE(is_background, 0), depends_json, step_message_id,
-                reuses_step_id, replaces_step_id, checkpoint_json
-            FROM work_steps;
+            """;
+        await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
 
+        // Insert with or without depth column based on source table structure
+        await using var insertCommand = conn.CreateCommand();
+        insertCommand.Transaction = transaction;
+        if (hasDepth)
+        {
+            insertCommand.CommandText = """
+                INSERT INTO work_steps_v18 (
+                    session_id, step_id, plan_version, run_id, target_agent_id, status,
+                    step_input_hash, result_json, created_at, completed_at, parent_step_id,
+                    invocation_id, step_index, attempt_count, error_message, started_at,
+                    title, goal, is_background, depends_json, step_message_id, reuses_step_id,
+                    replaces_step_id, checkpoint_json, depth)
+                SELECT
+                    session_id, step_id, plan_version, run_id, target_agent_id, status,
+                    step_input_hash, result_json, created_at, completed_at, parent_step_id,
+                    invocation_id, COALESCE(step_index, 0),
+                    COALESCE(attempt_count, 0), error_message, started_at,
+                    title, goal, COALESCE(is_background, 0), depends_json, step_message_id,
+                    reuses_step_id, replaces_step_id, checkpoint_json, COALESCE(depth, 0)
+                FROM work_steps;
+                """;
+        }
+        else
+        {
+            insertCommand.CommandText = """
+                INSERT INTO work_steps_v18 (
+                    session_id, step_id, plan_version, run_id, target_agent_id, status,
+                    step_input_hash, result_json, created_at, completed_at, parent_step_id,
+                    invocation_id, step_index, attempt_count, error_message, started_at,
+                    title, goal, is_background, depends_json, step_message_id, reuses_step_id,
+                    replaces_step_id, checkpoint_json, depth)
+                SELECT
+                    session_id, step_id, plan_version, run_id, target_agent_id, status,
+                    step_input_hash, result_json, created_at, completed_at, parent_step_id,
+                    invocation_id, COALESCE(step_index, 0),
+                    COALESCE(attempt_count, 0), error_message, started_at,
+                    title, goal, COALESCE(is_background, 0), depends_json, step_message_id,
+                    reuses_step_id, replaces_step_id, checkpoint_json, 0
+                FROM work_steps;
+                """;
+        }
+        await insertCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+
+        await using var restCommand = conn.CreateCommand();
+        restCommand.Transaction = transaction;
+        restCommand.CommandText = """
             CREATE TABLE work_step_dependencies_v18 (
                 session_id TEXT NOT NULL,
                 step_id TEXT NOT NULL,
@@ -1339,7 +1380,7 @@ public static class SqliteSchema
             INSERT OR IGNORE INTO schema_versions(version, applied_at)
             VALUES(18, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
             """;
-        await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        await restCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         transaction.Commit();
     }
 
@@ -1473,6 +1514,84 @@ public static class SqliteSchema
                 "TEXT NOT NULL DEFAULT 'approval'",
                 ct)
             .ConfigureAwait(false);
+        transaction.Commit();
+    }
+
+    private static async Task ApplyVersionTwentyAsync(SqliteConnection conn, CancellationToken ct)
+    {
+        using var transaction = conn.BeginTransaction(deferred: false);
+
+        // Remove the unused depth column from work_steps table
+        var hasDepth = await ColumnExistsAsync(conn, "work_steps", "depth", ct)
+            .ConfigureAwait(false);
+
+        if (hasDepth)
+        {
+            await using var command = conn.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                CREATE TABLE work_steps_v20 (
+                    step_id TEXT NOT NULL,
+                    plan_version TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    target_agent_id TEXT,
+                    status TEXT NOT NULL,
+                    step_input_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    parent_step_id TEXT,
+                    invocation_id TEXT,
+                    result_json TEXT,
+                    error_message TEXT,
+                    step_index INTEGER NOT NULL DEFAULT 0,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    title TEXT,
+                    goal TEXT,
+                    is_background INTEGER NOT NULL DEFAULT 0,
+                    depends_json TEXT,
+                    step_message_id TEXT,
+                    reuses_step_id TEXT,
+                    replaces_step_id TEXT,
+                    checkpoint_json TEXT,
+                    PRIMARY KEY (step_id, plan_version)
+                );
+
+                INSERT INTO work_steps_v20 (
+                    step_id, plan_version, run_id, session_id, target_agent_id,
+                    status, step_input_hash, created_at, parent_step_id, invocation_id,
+                    result_json, error_message, step_index, attempt_count, started_at,
+                    completed_at, title, goal, is_background, depends_json,
+                    step_message_id, reuses_step_id, replaces_step_id, checkpoint_json
+                )
+                SELECT
+                    step_id, plan_version, run_id, session_id, target_agent_id,
+                    status, step_input_hash, created_at, parent_step_id, invocation_id,
+                    result_json, error_message, step_index, attempt_count, started_at,
+                    completed_at, title, goal, is_background, depends_json,
+                    step_message_id, reuses_step_id, replaces_step_id, checkpoint_json
+                FROM work_steps;
+
+                DROP TABLE work_steps;
+                ALTER TABLE work_steps_v20 RENAME TO work_steps;
+
+                CREATE INDEX idx_work_steps_session ON work_steps(session_id, plan_version);
+                CREATE INDEX idx_work_steps_run ON work_steps(run_id);
+                CREATE INDEX idx_work_steps_status ON work_steps(session_id, status);
+                CREATE INDEX idx_work_steps_agent ON work_steps(target_agent_id);
+                """;
+            await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
+
+        await using var versionCommand = conn.CreateCommand();
+        versionCommand.Transaction = transaction;
+        versionCommand.CommandText = """
+            INSERT OR IGNORE INTO schema_versions(version, applied_at)
+            VALUES(20, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            """;
+        await versionCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+
         transaction.Commit();
     }
 

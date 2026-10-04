@@ -44,7 +44,8 @@ public static class RunRequestFactory
             RuntimeMode.Work => new WorkModeOptions(
                 primary,
                 additional,
-                WorkflowPolicy.Default),
+                supervisor: null,
+                workflowPolicy: WorkflowPolicy.Default),
             _ => throw new ArgumentOutOfRangeException(nameof(draft), draft.Mode, null),
         };
 

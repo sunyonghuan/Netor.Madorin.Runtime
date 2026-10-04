@@ -966,6 +966,7 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
         try
         {
             await DowngradeToVersionFifteenAsync(fixture);
+
             await using var workspaceLock = await WorkspaceWriteLock.AcquireAsync(
                 fixture.Workspace,
                 "migration-dry-run-lock-holder",
@@ -984,12 +985,12 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
             Assert.AreEqual("db migrate", document.RootElement.GetProperty("data").GetProperty("command").GetString());
             Assert.AreEqual("dry-run", document.RootElement.GetProperty("data").GetProperty("status").GetString());
             Assert.AreEqual(15, document.RootElement.GetProperty("data").GetProperty("fromVersion").GetInt32());
-            Assert.AreEqual(16, document.RootElement.GetProperty("data").GetProperty("targetVersion").GetInt32());
+            Assert.AreEqual(20, document.RootElement.GetProperty("data").GetProperty("targetVersion").GetInt32());
             var pendingVersions = document.RootElement.GetProperty("data").GetProperty("pendingVersions")
                 .EnumerateArray()
                 .Select(static value => value.GetInt32())
                 .ToArray();
-            Assert.HasCount(1, pendingVersions);
+            Assert.HasCount(5, pendingVersions);
             Assert.AreEqual(16, pendingVersions[0]);
             Assert.AreEqual(JsonValueKind.Null, document.RootElement.GetProperty("data").GetProperty("backupPath").ValueKind);
             AssertTreeEqual(before, await CaptureTreeAsync(fixture.Root));
@@ -1010,7 +1011,7 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
             var output = new StringWriter();
 
             var exitCode = Run(
-                ["db", "migrate", "--workspace", fixture.Workspace, "--data-dir", fixture.DataDirectory, "--to", "16", "--json"],
+                ["db", "migrate", "--workspace", fixture.Workspace, "--data-dir", fixture.DataDirectory, "--to", "20", "--json"],
                 output,
                 new StringReader(string.Empty),
                 fixture.ConfigDirectory);
@@ -1019,12 +1020,12 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
             using var document = JsonDocument.Parse(output.ToString());
             Assert.AreEqual("migrated", document.RootElement.GetProperty("data").GetProperty("status").GetString());
             Assert.AreEqual(15, document.RootElement.GetProperty("data").GetProperty("fromVersion").GetInt32());
-            Assert.AreEqual(16, document.RootElement.GetProperty("data").GetProperty("targetVersion").GetInt32());
+            Assert.AreEqual(20, document.RootElement.GetProperty("data").GetProperty("targetVersion").GetInt32());
             var appliedVersions = document.RootElement.GetProperty("data").GetProperty("appliedVersions")
                 .EnumerateArray()
                 .Select(static value => value.GetInt32())
                 .ToArray();
-            Assert.HasCount(1, appliedVersions);
+            Assert.HasCount(5, appliedVersions);
             Assert.AreEqual(16, appliedVersions[0]);
             var backupPath = document.RootElement.GetProperty("data").GetProperty("backupPath").GetString();
             Assert.IsNotNull(backupPath);
@@ -1039,7 +1040,7 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
                     Path.Combine(backupPath, "state.db"),
                     "SELECT MAX(version) FROM schema_versions;"));
             Assert.AreEqual(
-                16L,
+                20L,
                 await ExecuteScalarAsync(
                     fixture.DataDirectory,
                     "SELECT MAX(version) FROM schema_versions;",
@@ -1258,8 +1259,8 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
             Assert.AreEqual(ExitCodes.Success, exitCode, output.ToString());
             using var document = JsonDocument.Parse(output.ToString());
             Assert.AreEqual("up-to-date", document.RootElement.GetProperty("data").GetProperty("status").GetString());
-            Assert.AreEqual(16, document.RootElement.GetProperty("data").GetProperty("fromVersion").GetInt32());
-            Assert.AreEqual(16, document.RootElement.GetProperty("data").GetProperty("targetVersion").GetInt32());
+            Assert.AreEqual(20, document.RootElement.GetProperty("data").GetProperty("fromVersion").GetInt32());
+            Assert.AreEqual(20, document.RootElement.GetProperty("data").GetProperty("targetVersion").GetInt32());
             Assert.IsEmpty(document.RootElement.GetProperty("data").GetProperty("appliedVersions").EnumerateArray());
             Assert.AreEqual(JsonValueKind.Null, document.RootElement.GetProperty("data").GetProperty("backupPath").ValueKind);
             Assert.IsFalse(Directory.Exists(Path.Combine(fixture.DataDirectory, "backups")));
@@ -1273,7 +1274,7 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
     [TestMethod]
     [DataRow(-1)]
     [DataRow(15)]
-    [DataRow(17)]
+    [DataRow(21)]
     public async Task DbMigrate_InvalidTarget_ReturnsInvalidArgumentsWithoutWriting(int targetVersion)
     {
         var fixture = await CreateFixtureAsync();
@@ -1656,22 +1657,120 @@ public sealed class StandaloneDatabaseCommandsStage7Tests
             Encoding.UTF8,
             TestContext.CancellationToken);
 
-    private async Task DowngradeToVersionFifteenAsync(DatabaseFixture fixture) =>
+    private async Task DowngradeToVersionFifteenAsync(DatabaseFixture fixture)
+    {
+        await ExecuteAsync(fixture.DataDirectory, "PRAGMA foreign_keys = OFF;", fixture.SessionId);
+
+        await ExecuteAsync(fixture.DataDirectory, "DROP TABLE IF EXISTS meeting_pending_inputs;", fixture.SessionId);
+        await ExecuteAsync(fixture.DataDirectory, "DROP TABLE IF EXISTS work_pending_inputs;", fixture.SessionId);
+
+        await ExecuteAsync(fixture.DataDirectory, "DROP TABLE IF EXISTS work_step_dependencies;", fixture.SessionId);
+        await ExecuteAsync(fixture.DataDirectory, "DROP TABLE IF EXISTS work_step_attempts;", fixture.SessionId);
+        await ExecuteAsync(fixture.DataDirectory, "DROP TABLE IF EXISTS work_steps;", fixture.SessionId);
+
         await ExecuteAsync(
             fixture.DataDirectory,
             """
-            PRAGMA foreign_keys = OFF;
-            DROP INDEX IF EXISTS idx_runs_progress;
-            ALTER TABLE runs DROP COLUMN phase;
-            ALTER TABLE runs DROP COLUMN current_step;
-            ALTER TABLE runs DROP COLUMN completed_units;
-            ALTER TABLE runs DROP COLUMN total_units;
-            ALTER TABLE runs DROP COLUMN last_run_sequence;
-            ALTER TABLE runs DROP COLUMN error_json;
-            DELETE FROM schema_versions WHERE version = 16;
-            PRAGMA wal_checkpoint(TRUNCATE);
+            CREATE TABLE work_steps (
+                step_id TEXT NOT NULL,
+                plan_version TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                target_agent_id TEXT,
+                status TEXT DEFAULT 'pending',
+                step_input_hash TEXT,
+                result_json TEXT,
+                created_at TEXT,
+                completed_at TEXT,
+                parent_step_id TEXT,
+                invocation_id TEXT,
+                depth INTEGER NOT NULL DEFAULT 0,
+                step_index INTEGER NOT NULL DEFAULT 0,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                error_message TEXT,
+                started_at TEXT,
+                title TEXT,
+                goal TEXT,
+                is_background INTEGER NOT NULL DEFAULT 0,
+                depends_json TEXT,
+                step_message_id TEXT,
+                reuses_step_id TEXT,
+                replaces_step_id TEXT,
+                checkpoint_json TEXT,
+                PRIMARY KEY (step_id, plan_version)
+            );
             """,
             fixture.SessionId);
+
+        await ExecuteAsync(
+            fixture.DataDirectory,
+            """
+            CREATE TABLE work_step_dependencies (
+                step_id TEXT NOT NULL,
+                plan_version TEXT NOT NULL,
+                depends_on_step_id TEXT NOT NULL,
+                PRIMARY KEY (step_id, plan_version, depends_on_step_id)
+            );
+            """,
+            fixture.SessionId);
+
+        await ExecuteAsync(
+            fixture.DataDirectory,
+            """
+            CREATE TABLE work_step_attempts (
+                step_id TEXT NOT NULL,
+                plan_version TEXT NOT NULL,
+                attempt_number INTEGER NOT NULL,
+                invocation_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                error_message TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                PRIMARY KEY (step_id, plan_version, attempt_number)
+            );
+            """,
+            fixture.SessionId);
+
+        await ExecuteAsync(
+            fixture.DataDirectory,
+            """
+            CREATE TABLE runs_temp (
+                run_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES sessions(session_id),
+                status TEXT NOT NULL,
+                run_sequence INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                terminal_text TEXT
+            );
+            """,
+            fixture.SessionId);
+
+        await ExecuteAsync(
+            fixture.DataDirectory,
+            """
+            INSERT INTO runs_temp (
+                run_id, session_id, status, run_sequence,
+                created_at, updated_at, terminal_text
+            )
+            SELECT
+                run_id, session_id, status, run_sequence,
+                created_at, updated_at, terminal_text
+            FROM runs;
+            """,
+            fixture.SessionId);
+
+        await ExecuteAsync(fixture.DataDirectory, "DROP TABLE runs;", fixture.SessionId);
+        await ExecuteAsync(fixture.DataDirectory, "ALTER TABLE runs_temp RENAME TO runs;", fixture.SessionId);
+        await ExecuteAsync(fixture.DataDirectory, "DROP INDEX IF EXISTS idx_runs_progress;", fixture.SessionId);
+
+        await ExecuteAsync(fixture.DataDirectory, "CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(session_id);", fixture.SessionId);
+        await ExecuteAsync(fixture.DataDirectory, "CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);", fixture.SessionId);
+
+        await ExecuteAsync(fixture.DataDirectory, "DELETE FROM schema_versions WHERE version > 15;", fixture.SessionId);
+        await ExecuteAsync(fixture.DataDirectory, "PRAGMA wal_checkpoint(TRUNCATE);", fixture.SessionId);
+        await ExecuteAsync(fixture.DataDirectory, "PRAGMA foreign_keys = ON;", fixture.SessionId);
+    }
 
     private async Task ExecuteAsync(string dataDirectory, string sql, string sessionId)
     {

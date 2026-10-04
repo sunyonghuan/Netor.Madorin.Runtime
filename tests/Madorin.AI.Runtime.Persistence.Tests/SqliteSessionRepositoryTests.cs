@@ -23,7 +23,6 @@ public sealed class SqliteSessionRepositoryTests
     [
         "parent_step_id",
         "invocation_id",
-        "depth",
         "step_index",
         "attempt_count",
         "error_message",
@@ -1902,119 +1901,183 @@ public sealed class SqliteSessionRepositoryTests
         int targetVersion,
         CancellationToken ct)
     {
-        var commands = new List<string>();
+        // Note: Some columns may already be removed by later migrations (e.g., depth removed in v20).
+        // We must check if columns exist before dropping them to avoid "no such column" errors.
+
         if (targetVersion < 13)
         {
-            commands.Add("DROP INDEX IF EXISTS idx_work_plan_revisions_session;");
-            commands.Add("DROP TABLE IF EXISTS work_plan_revisions;");
-            commands.Add("ALTER TABLE work_steps DROP COLUMN step_message_id;");
-            commands.Add("ALTER TABLE work_steps DROP COLUMN reuses_step_id;");
-            commands.Add("ALTER TABLE work_steps DROP COLUMN replaces_step_id;");
-            commands.Add("ALTER TABLE work_steps DROP COLUMN checkpoint_json;");
+            await using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = """
+                    DROP INDEX IF EXISTS idx_work_plan_revisions_session;
+                    DROP TABLE IF EXISTS work_plan_revisions;
+                    """;
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+
+            await DropColumnIfExistsAsync(connection, "work_steps", "step_message_id", ct);
+            await DropColumnIfExistsAsync(connection, "work_steps", "reuses_step_id", ct);
+            await DropColumnIfExistsAsync(connection, "work_steps", "replaces_step_id", ct);
+            await DropColumnIfExistsAsync(connection, "work_steps", "checkpoint_json", ct);
         }
 
         if (targetVersion < 12)
         {
-            commands.Add("ALTER TABLE tool_audit DROP COLUMN session_id;");
-            commands.Add("ALTER TABLE tool_audit DROP COLUMN invocation_id;");
-            commands.Add("ALTER TABLE tool_audit DROP COLUMN parent_invocation_id;");
-            commands.Add("ALTER TABLE tool_audit DROP COLUMN work_step_id;");
-            commands.Add("ALTER TABLE tool_audit DROP COLUMN plan_version;");
-            commands.Add("ALTER TABLE tool_audit DROP COLUMN root_grant_id;");
+            await DropColumnIfExistsAsync(connection, "tool_audit", "session_id", ct);
+            await DropColumnIfExistsAsync(connection, "tool_audit", "invocation_id", ct);
+            await DropColumnIfExistsAsync(connection, "tool_audit", "parent_invocation_id", ct);
+            await DropColumnIfExistsAsync(connection, "tool_audit", "work_step_id", ct);
+            await DropColumnIfExistsAsync(connection, "tool_audit", "plan_version", ct);
+            await DropColumnIfExistsAsync(connection, "tool_audit", "root_grant_id", ct);
         }
 
         if (targetVersion < 11)
         {
-            commands.Add("DROP INDEX IF EXISTS idx_work_sessions_status;");
-            commands.Add("DROP INDEX IF EXISTS idx_work_steps_session;");
-            commands.Add("DROP INDEX IF EXISTS idx_work_steps_run;");
-            commands.Add("DROP INDEX IF EXISTS idx_work_steps_status;");
-            commands.Add("DROP INDEX IF EXISTS idx_work_steps_agent;");
-            commands.Add("DROP INDEX IF EXISTS idx_work_step_dependencies_step;");
-            commands.Add("DROP INDEX IF EXISTS idx_work_step_dependencies_depends;");
-            commands.Add("DROP INDEX IF EXISTS idx_work_step_attempts_step;");
-            commands.Add("DROP INDEX IF EXISTS idx_work_background_jobs_session;");
-            commands.Add("DROP INDEX IF EXISTS idx_work_background_jobs_step;");
-            commands.Add("DROP INDEX IF EXISTS idx_tool_intents_work_step;");
-            commands.Add("DROP TABLE IF EXISTS work_sessions;");
-            commands.Add("DROP TABLE IF EXISTS work_step_dependencies;");
-            commands.Add("DROP TABLE IF EXISTS work_step_attempts;");
-            commands.Add("DROP TABLE IF EXISTS work_background_jobs;");
-            commands.Add("ALTER TABLE work_steps DROP COLUMN parent_step_id;");
-            commands.Add("ALTER TABLE work_steps DROP COLUMN invocation_id;");
-            commands.Add("ALTER TABLE work_steps DROP COLUMN depth;");
-            commands.Add("ALTER TABLE work_steps DROP COLUMN step_index;");
-            commands.Add("ALTER TABLE work_steps DROP COLUMN attempt_count;");
-            commands.Add("ALTER TABLE work_steps DROP COLUMN error_message;");
-            commands.Add("ALTER TABLE work_steps DROP COLUMN started_at;");
-            commands.Add("ALTER TABLE work_steps DROP COLUMN title;");
-            commands.Add("ALTER TABLE work_steps DROP COLUMN goal;");
-            commands.Add("ALTER TABLE work_steps DROP COLUMN is_background;");
-            commands.Add("ALTER TABLE work_steps DROP COLUMN depends_json;");
-            commands.Add("ALTER TABLE tool_intents DROP COLUMN work_step_id;");
-            commands.Add("ALTER TABLE tool_intents DROP COLUMN plan_version;");
+            await using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = """
+                    DROP INDEX IF EXISTS idx_work_sessions_status;
+                    DROP INDEX IF EXISTS idx_work_steps_session;
+                    DROP INDEX IF EXISTS idx_work_steps_run;
+                    DROP INDEX IF EXISTS idx_work_steps_status;
+                    DROP INDEX IF EXISTS idx_work_steps_agent;
+                    DROP INDEX IF EXISTS idx_work_step_dependencies_step;
+                    DROP INDEX IF EXISTS idx_work_step_dependencies_depends;
+                    DROP INDEX IF EXISTS idx_work_step_attempts_step;
+                    DROP INDEX IF EXISTS idx_work_background_jobs_session;
+                    DROP INDEX IF EXISTS idx_work_background_jobs_step;
+                    DROP INDEX IF EXISTS idx_tool_intents_work_step;
+                    DROP TABLE IF EXISTS work_sessions;
+                    DROP TABLE IF EXISTS work_step_dependencies;
+                    DROP TABLE IF EXISTS work_step_attempts;
+                    DROP TABLE IF EXISTS work_background_jobs;
+                    """;
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+
+            await DropColumnIfExistsAsync(connection, "work_steps", "parent_step_id", ct);
+            await DropColumnIfExistsAsync(connection, "work_steps", "invocation_id", ct);
+            await DropColumnIfExistsAsync(connection, "work_steps", "depth", ct);  // May already be removed in v20
+            await DropColumnIfExistsAsync(connection, "work_steps", "step_index", ct);
+            await DropColumnIfExistsAsync(connection, "work_steps", "attempt_count", ct);
+            await DropColumnIfExistsAsync(connection, "work_steps", "error_message", ct);
+            await DropColumnIfExistsAsync(connection, "work_steps", "started_at", ct);
+            await DropColumnIfExistsAsync(connection, "work_steps", "title", ct);
+            await DropColumnIfExistsAsync(connection, "work_steps", "goal", ct);
+            await DropColumnIfExistsAsync(connection, "work_steps", "is_background", ct);
+            await DropColumnIfExistsAsync(connection, "work_steps", "depends_json", ct);
+            await DropColumnIfExistsAsync(connection, "tool_intents", "work_step_id", ct);
+            await DropColumnIfExistsAsync(connection, "tool_intents", "plan_version", ct);
         }
 
         if (targetVersion < 8)
         {
-            commands.Add("DROP TABLE tool_audit;");
-            commands.Add("DROP TABLE tool_approvals;");
-            commands.Add("DROP TABLE tool_grants;");
-            commands.Add("DROP INDEX idx_tool_intents_status;");
-            commands.Add("DROP INDEX idx_tool_intents_run;");
-            commands.Add("ALTER TABLE tool_intents DROP COLUMN agent_id;");
-            commands.Add("ALTER TABLE tool_intents DROP COLUMN parent_agent_id;");
-            commands.Add("ALTER TABLE tool_intents DROP COLUMN catalog_version;");
-            commands.Add("ALTER TABLE tool_intents DROP COLUMN sent_at;");
-            commands.Add("ALTER TABLE tool_intents DROP COLUMN grant_id;");
-            commands.Add("ALTER TABLE tool_intents DROP COLUMN approval_request_id;");
-            commands.Add("ALTER TABLE tool_intents DROP COLUMN result_hash;");
-            commands.Add("ALTER TABLE tool_intents DROP COLUMN result_blob_id;");
-            commands.Add("ALTER TABLE tool_intents DROP COLUMN result_blob_length;");
-            commands.Add("ALTER TABLE tool_intents DROP COLUMN result_blob_sha256;");
-            commands.Add("ALTER TABLE tool_intents DROP COLUMN result_blob_content_type;");
-            commands.Add("ALTER TABLE tool_intents DROP COLUMN result_blob_access_scope;");
-            commands.Add("ALTER TABLE tool_intents DROP COLUMN result_blob_expires_at;");
-            commands.Add("ALTER TABLE tool_intents DROP COLUMN error_code;");
-            commands.Add("ALTER TABLE tool_intents DROP COLUMN result_visible;");
+            await using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = """
+                    DROP TABLE IF EXISTS tool_audit;
+                    DROP TABLE IF EXISTS tool_approvals;
+                    DROP TABLE IF EXISTS tool_grants;
+                    DROP INDEX IF EXISTS idx_tool_intents_status;
+                    DROP INDEX IF EXISTS idx_tool_intents_run;
+                    """;
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+
+            await DropColumnIfExistsAsync(connection, "tool_intents", "agent_id", ct);
+            await DropColumnIfExistsAsync(connection, "tool_intents", "parent_agent_id", ct);
+            await DropColumnIfExistsAsync(connection, "tool_intents", "catalog_version", ct);
+            await DropColumnIfExistsAsync(connection, "tool_intents", "sent_at", ct);
+            await DropColumnIfExistsAsync(connection, "tool_intents", "grant_id", ct);
+            await DropColumnIfExistsAsync(connection, "tool_intents", "approval_request_id", ct);
+            await DropColumnIfExistsAsync(connection, "tool_intents", "result_hash", ct);
+            await DropColumnIfExistsAsync(connection, "tool_intents", "result_blob_id", ct);
+            await DropColumnIfExistsAsync(connection, "tool_intents", "result_blob_length", ct);
+            await DropColumnIfExistsAsync(connection, "tool_intents", "result_blob_sha256", ct);
+            await DropColumnIfExistsAsync(connection, "tool_intents", "result_blob_content_type", ct);
+            await DropColumnIfExistsAsync(connection, "tool_intents", "result_blob_access_scope", ct);
+            await DropColumnIfExistsAsync(connection, "tool_intents", "result_blob_expires_at", ct);
+            await DropColumnIfExistsAsync(connection, "tool_intents", "error_code", ct);
+            await DropColumnIfExistsAsync(connection, "tool_intents", "result_visible", ct);
         }
 
         if (targetVersion < 7)
         {
-            commands.Add("DROP TABLE agent_snapshots;");
-            commands.Add("DROP TABLE session_selections;");
+            await using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = """
+                    DROP TABLE IF EXISTS agent_snapshots;
+                    DROP TABLE IF EXISTS session_selections;
+                    """;
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
         }
 
         if (targetVersion < 6)
         {
-            commands.Add("ALTER TABLE runs DROP COLUMN terminal_text;");
+            await DropColumnIfExistsAsync(connection, "runs", "terminal_text", ct);
         }
+
         if (targetVersion < 5)
         {
-            commands.Add("ALTER TABLE session_idempotency DROP COLUMN request_hash;");
-            commands.Add("ALTER TABLE run_idempotency DROP COLUMN request_hash;");
+            await DropColumnIfExistsAsync(connection, "session_idempotency", "request_hash", ct);
+            await DropColumnIfExistsAsync(connection, "run_idempotency", "request_hash", ct);
         }
 
         if (targetVersion < 4)
         {
-            commands.Add("DROP TABLE work_steps;");
+            await using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = "DROP TABLE IF EXISTS work_steps;";
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
         }
 
         if (targetVersion < 3)
         {
-            commands.Add("DROP TABLE message_index;");
+            await using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = "DROP TABLE IF EXISTS message_index;";
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
         }
 
         if (targetVersion < 2)
         {
-            commands.Add("DROP TABLE tool_intents;");
+            await using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = "DROP TABLE IF EXISTS tool_intents;";
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
         }
 
-        commands.Add("DELETE FROM schema_versions WHERE version > $targetVersion;");
-        await using var command = connection.CreateCommand();
-        command.CommandText = string.Join(Environment.NewLine, commands);
-        command.Parameters.AddWithValue("$targetVersion", targetVersion);
-        await command.ExecuteNonQueryAsync(ct);
+        await using (var versionCommand = connection.CreateCommand())
+        {
+            versionCommand.CommandText = "DELETE FROM schema_versions WHERE version > $targetVersion;";
+            versionCommand.Parameters.AddWithValue("$targetVersion", targetVersion);
+            await versionCommand.ExecuteNonQueryAsync(ct);
+        }
+    }
+
+    private static async Task DropColumnIfExistsAsync(
+        SqliteConnection connection,
+        string tableName,
+        string columnName,
+        CancellationToken ct)
+    {
+        // Check if column exists using pragma_table_info
+        await using var checkCommand = connection.CreateCommand();
+        checkCommand.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('{tableName}') WHERE name = $columnName;";
+        checkCommand.Parameters.AddWithValue("$columnName", columnName);
+        var result = await checkCommand.ExecuteScalarAsync(ct);
+        var columnExists = Convert.ToInt32(result, CultureInfo.InvariantCulture) > 0;
+
+        if (columnExists)
+        {
+            await using var dropCommand = connection.CreateCommand();
+            dropCommand.CommandText = $"ALTER TABLE {tableName} DROP COLUMN {columnName};";
+            await dropCommand.ExecuteNonQueryAsync(ct);
+        }
     }
 
     private static async Task InsertHistoricalRunAsync(

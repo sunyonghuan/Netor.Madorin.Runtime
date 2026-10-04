@@ -402,7 +402,7 @@ public sealed class SessionResumeRecoveryTests
                 1,
                 mode,
                 new DefaultSelection("resume-provider", "resume-model"),
-                new WorkModeOptions(WorkManager, [WorkWorker], WorkflowPolicy.Default)),
+                new WorkModeOptions(WorkManager, [WorkWorker], supervisor: null, workflowPolicy: WorkflowPolicy.Default)),
             _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, null)
         };
         return new NewSessionRunRequest(
@@ -546,10 +546,10 @@ public sealed class SessionResumeRecoveryTests
             var text = string.Equals(request.AgentId, "work-manager", StringComparison.Ordinal)
                 ? workPlanVersion == 1
                     ? """
-                      {"planVersion":"1","goal":"Resume all modes","steps":[{"stepId":"resume-step","goal":"Produce a work result","targetAgentId":"work-worker","dependsOn":[],"depth":0}]}
+                      {"planVersion":"1","goal":"Resume all modes","steps":[{"stepId":"resume-step","goal":"Produce a work result","targetAgentId":"work-worker","dependsOn":[]}]}
                       """
                     : """
-                      {"planVersion":"2","previousPlanVersion":"1","goal":"Continue all modes","steps":[{"stepId":"resume-step","goal":"Produce the continued work result","targetAgentId":"work-worker","dependsOn":[],"depth":0,"reusesStepId":"resume-step"}]}
+                      {"planVersion":"2","previousPlanVersion":"1","goal":"Continue all modes","steps":[{"stepId":"resume-step","goal":"Produce the continued work result","targetAgentId":"work-worker","dependsOn":[],"reusesStepId":"resume-step"}]}
                       """
                 : $"result:{request.AgentId}";
             yield return new TextDeltaProviderEvent(request.InvocationId, text);

@@ -16,7 +16,6 @@ public sealed record InvocationSnapshot(
     string? WorkPlanVersion = null,
     string? Title = null,
     string? ParentStepId = null,
-    int Depth = 0,
     string? DisplayName = null,
     string? Role = null,
     string? ParticipantId = null,

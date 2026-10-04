@@ -743,7 +743,7 @@ public sealed class SqliteWorkRepository : IWorkRecoveryStore
         command.CommandText = planVersion is null
             ? """
               SELECT step_id, plan_version, session_id, run_id, target_agent_id, status,
-                     step_input_hash, depth, parent_step_id, invocation_id, result_json,
+                     step_input_hash, parent_step_id, invocation_id, result_json,
                      error_message, attempt_count, depends_json, started_at, completed_at, goal,
                      step_message_id, reuses_step_id, replaces_step_id, checkpoint_json
               FROM work_steps
@@ -752,7 +752,7 @@ public sealed class SqliteWorkRepository : IWorkRecoveryStore
               """
             : """
               SELECT step_id, plan_version, session_id, run_id, target_agent_id, status,
-                     step_input_hash, depth, parent_step_id, invocation_id, result_json,
+                     step_input_hash, parent_step_id, invocation_id, result_json,
                      error_message, attempt_count, depends_json, started_at, completed_at, goal,
                      step_message_id, reuses_step_id, replaces_step_id, checkpoint_json
               FROM work_steps
@@ -1415,14 +1415,14 @@ public sealed class SqliteWorkRepository : IWorkRecoveryStore
 
     private static WorkStepSnapshot ReadStep(SqliteDataReader reader)
     {
-        var dependsJson = reader.IsDBNull(13) ? null : reader.GetString(13);
+        var dependsJson = reader.IsDBNull(12) ? null : reader.GetString(12);
         string[]? depends = null;
         if (dependsJson is not null)
         {
             depends = JsonSerializer.Deserialize(dependsJson, RuntimeJsonContext.Default.StringArray);
         }
 
-        var parentStepId = reader.IsDBNull(8) ? null : reader.GetString(8);
+        var parentStepId = reader.IsDBNull(7) ? null : reader.GetString(7);
         var isSubStep = parentStepId is not null;
 
         return new WorkStepSnapshot(
@@ -1431,25 +1431,24 @@ public sealed class SqliteWorkRepository : IWorkRecoveryStore
             reader.GetString(2),                                                           // SessionId
             reader.GetString(3),                                                           // RunId
             reader.IsDBNull(4) ? string.Empty : reader.GetString(4),                      // TargetAgentId
-            reader.IsDBNull(16) ? string.Empty : reader.GetString(16),                    // Goal
+            reader.IsDBNull(15) ? string.Empty : reader.GetString(15),                    // Goal
             ParseStepStatus(reader.IsDBNull(5) ? "pending" : reader.GetString(5)),        // Status
             reader.IsDBNull(6) ? string.Empty : reader.GetString(6),                      // StepInputHash
-            reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetInt64(7), CultureInfo.InvariantCulture), // Depth
             parentStepId,                                                                  // ParentStepId
             isSubStep,                                                                     // IsSubStep
             0,                                                                             // StepIndex (default)
             -1,                                                                            // SubStepIndex (default)
-            reader.IsDBNull(9) ? null : reader.GetString(9),                              // InvocationId
-            reader.IsDBNull(10) ? null : reader.GetString(10),                            // ResultJson
-            reader.IsDBNull(11) ? null : reader.GetString(11),                            // ErrorMessage
-            reader.IsDBNull(12) ? 0 : Convert.ToInt32(reader.GetInt64(12), CultureInfo.InvariantCulture), // AttemptCount
+            reader.IsDBNull(8) ? null : reader.GetString(8),                              // InvocationId
+            reader.IsDBNull(9) ? null : reader.GetString(9),                              // ResultJson
+            reader.IsDBNull(10) ? null : reader.GetString(10),                            // ErrorMessage
+            reader.IsDBNull(11) ? 0 : Convert.ToInt32(reader.GetInt64(11), CultureInfo.InvariantCulture), // AttemptCount
             depends,                                                                       // DependsOn
-            ParseTimestamp(reader.IsDBNull(14) ? null : reader.GetString(14)),            // StartedAt
-            ParseTimestamp(reader.IsDBNull(15) ? null : reader.GetString(15)),            // CompletedAt
-            reader.IsDBNull(17) ? null : reader.GetString(17),                            // StepMessageId
-            reader.IsDBNull(18) ? null : reader.GetString(18),                            // ReusesStepId
-            reader.IsDBNull(19) ? null : reader.GetString(19),                            // ReplacesStepId
-            reader.IsDBNull(20) ? null : reader.GetString(20));                           // CheckpointJson
+            ParseTimestamp(reader.IsDBNull(13) ? null : reader.GetString(13)),            // StartedAt
+            ParseTimestamp(reader.IsDBNull(14) ? null : reader.GetString(14)),            // CompletedAt
+            reader.IsDBNull(16) ? null : reader.GetString(16),                            // StepMessageId
+            reader.IsDBNull(17) ? null : reader.GetString(17),                            // ReusesStepId
+            reader.IsDBNull(18) ? null : reader.GetString(18),                            // ReplacesStepId
+            reader.IsDBNull(19) ? null : reader.GetString(19));                           // CheckpointJson
     }
 
     private async Task InsertPlanStepsAsync(
@@ -1497,12 +1496,12 @@ public sealed class SqliteWorkRepository : IWorkRecoveryStore
                 stepCommand.CommandText = """
                     INSERT INTO work_steps(
                         step_id, plan_version, run_id, session_id, target_agent_id,
-                        status, step_input_hash, created_at, parent_step_id, depth,
+                        status, step_input_hash, created_at, parent_step_id,
                         step_index, attempt_count, title, goal, is_background, depends_json,
                         step_message_id, reuses_step_id, replaces_step_id)
                     VALUES(
                         $stepId, $planVersion, $runId, $sessionId, $agentId,
-                        'pending', $hash, $createdAt, $parent, $depth,
+                        'pending', $hash, $createdAt, $parent,
                         $index, 0, $title, $goal, $background, $depends,
                         $stepMessageId, $reusesStepId, $replacesStepId);
                     """;
@@ -1514,7 +1513,6 @@ public sealed class SqliteWorkRepository : IWorkRecoveryStore
                 stepCommand.Parameters.AddWithValue("$hash", hash);
                 stepCommand.Parameters.AddWithValue("$createdAt", createdAt);
                 stepCommand.Parameters.AddWithValue("$parent", step.StepId);
-                stepCommand.Parameters.AddWithValue("$depth", 1);
                 stepCommand.Parameters.AddWithValue("$index", stepIndex * 1000 + subStepIndex);
                 stepCommand.Parameters.AddWithValue("$title", step.Title);
                 stepCommand.Parameters.AddWithValue("$goal", subStep.Goal);

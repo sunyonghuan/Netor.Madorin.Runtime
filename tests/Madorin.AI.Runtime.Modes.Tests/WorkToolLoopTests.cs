@@ -649,7 +649,8 @@ public sealed class WorkToolLoopTests
                 new WorkModeOptions(
                     manager,
                     [worker],
-                    WorkflowPolicy.Default),
+                    supervisor: null,
+                    workflowPolicy: WorkflowPolicy.Default),
                 ToolCatalogVersion: "tools-v1"),
             [new TextContentBlock("Prepare the release notes.")]);
     }
@@ -680,7 +681,8 @@ public sealed class WorkToolLoopTests
                 new WorkModeOptions(
                     manager,
                     [worker],
-                    WorkflowPolicy.Default with { MaxConcurrentSteps = 2 }),
+                    supervisor: null,
+                    workflowPolicy: WorkflowPolicy.Default with { MaxConcurrentSteps = 2 }),
                 ToolCatalogVersion: "tools-v1"),
             [new TextContentBlock("Prepare A and B in parallel.")]);
     }

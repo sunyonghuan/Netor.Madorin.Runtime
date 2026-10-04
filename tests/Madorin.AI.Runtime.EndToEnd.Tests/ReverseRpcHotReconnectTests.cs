@@ -674,7 +674,7 @@ public sealed class ReverseRpcHotReconnectTests
                 1,
                 RuntimeMode.Work,
                 new DefaultSelection("offline-work-provider", "offline-work-model"),
-                new WorkModeOptions(manager, [worker], WorkflowPolicy.Default)),
+                new WorkModeOptions(manager, [worker], supervisor: null, workflowPolicy: WorkflowPolicy.Default)),
             [new TextContentBlock("Complete the local task while the Host is offline.")]);
     }
 
@@ -701,7 +701,7 @@ public sealed class ReverseRpcHotReconnectTests
                 1,
                 RuntimeMode.Work,
                 new DefaultSelection("work-reconnect-provider", "work-reconnect-model"),
-                new WorkModeOptions(manager, [worker], WorkflowPolicy.Default),
+                new WorkModeOptions(manager, [worker], supervisor: null, workflowPolicy: WorkflowPolicy.Default),
                 ToolCatalogVersion: "host-v1"),
             [new TextContentBlock("Create one order.")]);
     }
@@ -993,11 +993,10 @@ public sealed class ReverseRpcHotReconnectTests
                 Interlocked.Increment(ref _managerCallCount);
                 _managerStarted.TrySetResult();
                 await _releaseManager.Task.WaitAsync(ct);
+                // 返回新格式的工作计划（二级步骤结构）
                 yield return new TextDeltaProviderEvent(
                     request.InvocationId,
-                    """
-                    {"planVersion":"1","goal":"Finish locally","steps":[{"stepId":"offline-step","goal":"Produce the local result","targetAgentId":"offline-worker","dependsOn":[],"depth":0}]}
-                    """);
+                    """{"planVersion":"1","goal":"Finish locally","steps":[{"stepId":"offline-step","title":"Local Work","description":"Produce the local result","subSteps":[{"subStepId":"offline-step.1","goal":"Produce the local result","instruction":"Execute the local work","targetAgentId":"offline-worker","expectedOutput":"Local result"}]}]}""");
                 yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
                 yield break;
             }
@@ -1154,10 +1153,10 @@ public sealed class ReverseRpcHotReconnectTests
                 Interlocked.Increment(ref _managerCallCount);
                 _managerStarted.TrySetResult();
                 await _releaseManager.Task.WaitAsync(ct);
+                // 返回新格式的工作计划（二级步骤结构）
                 yield return new TextDeltaProviderEvent(
                     request.InvocationId,
-                    "{\"planVersion\":\"1\",\"goal\":\"Create order\",\"steps\":["
-                    + "{\"stepId\":\"run-1:step-1\",\"goal\":\"Create order\",\"targetAgentId\":\"worker\",\"title\":\"Execute\"}]}");
+                    """{"planVersion":"1","goal":"Create order","steps":[{"stepId":"run-1:step-1","title":"Execute","description":"Create order","subSteps":[{"subStepId":"run-1:step-1.1","goal":"Create order","instruction":"Execute the work order","targetAgentId":"worker","expectedOutput":"Order created"}]}]}""");
                 yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
                 yield break;
             }

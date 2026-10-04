@@ -16,7 +16,7 @@ public sealed class WorkStepSchedulerTests
         WorkStepSnapshot[] steps =
         [
             Step("root", WorkStepLifecycleStatus.Completed),
-            Step("step-b", WorkStepLifecycleStatus.Pending, depth: 1, dependsOn: ["root"]),
+            Step("step-b", WorkStepLifecycleStatus.Pending, dependsOn: ["root"]),
             Step("step-a", WorkStepLifecycleStatus.Pending),
             Step("blocked", WorkStepLifecycleStatus.Pending, dependsOn: ["missing"]),
             Step("running", WorkStepLifecycleStatus.Running)
@@ -56,8 +56,8 @@ public sealed class WorkStepSchedulerTests
         WorkStepSnapshot[] steps =
         [
             Step("root", WorkStepLifecycleStatus.Completed),
-            Step("child-a", WorkStepLifecycleStatus.Pending, depth: 1, dependsOn: ["root"]),
-            Step("child-b", WorkStepLifecycleStatus.Pending, depth: 1, dependsOn: ["root"])
+            Step("child-a", WorkStepLifecycleStatus.Pending, dependsOn: ["root"]),
+            Step("child-b", WorkStepLifecycleStatus.Pending, dependsOn: ["root"])
         ];
 
         var ready = WorkStepScheduler.SelectReadySteps(steps, policy);
@@ -120,7 +120,6 @@ public sealed class WorkStepSchedulerTests
     private static WorkStepSnapshot Step(
         string stepId,
         WorkStepLifecycleStatus status,
-        int depth = 0,
         string? parentStepId = null,
         string[]? dependsOn = null) =>
         new(
@@ -132,7 +131,6 @@ public sealed class WorkStepSchedulerTests
             $"Goal for {stepId}",
             status,
             $"hash-{stepId}",
-            depth,
-            parentStepId,
+            ParentStepId: parentStepId,
             DependsOn: dependsOn);
 }

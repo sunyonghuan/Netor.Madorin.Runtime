@@ -213,7 +213,8 @@ public sealed class SessionListStage7Tests(TestContext testContext)
             RuntimeMode.Work => new WorkModeOptions(
                 WorkManager,
                 [WorkWorker],
-                WorkflowPolicy.Default),
+                supervisor: null,
+                workflowPolicy: WorkflowPolicy.Default),
             _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, null)
         };
         return new NextTurnSelection(
@@ -367,7 +368,7 @@ public sealed class SessionListStage7Tests(TestContext testContext)
                 WorkManager.AgentId,
                 StringComparison.Ordinal)
                 ? """
-                  {"planVersion":"1","goal":"List sessions","steps":[{"stepId":"list-step","goal":"Produce a deterministic result","targetAgentId":"session-list-work-worker","dependsOn":[],"depth":0}]}
+                  {"planVersion":"1","goal":"List sessions","steps":[{"stepId":"list-step","goal":"Produce a deterministic result","targetAgentId":"session-list-work-worker","dependsOn":[]}]}
                   """
                 : $"result:{request.AgentId}";
             yield return new TextDeltaProviderEvent(request.InvocationId, text);
