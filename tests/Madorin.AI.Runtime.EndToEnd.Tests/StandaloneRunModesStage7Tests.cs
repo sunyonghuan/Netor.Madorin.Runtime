@@ -21,8 +21,9 @@ public sealed class StandaloneRunModesStage7Tests
     private const string WorkerModelId = "worker-model";
     private const string WorkPlanJson =
         "{\"planVersion\":\"1\",\"goal\":\"CLI work mode\",\"steps\":["
-        + "{\"stepId\":\"cli-step\",\"goal\":\"Produce a deterministic result\","
-        + "\"targetAgentId\":\"worker\",\"dependsOn\":[],\"depth\":0}]}";
+        + "{\"stepId\":\"cli-step\",\"title\":\"Main Step\",\"description\":\"Produce a deterministic result\","
+        + "\"subSteps\":[{\"subStepId\":\"cli-step.1\",\"goal\":\"Produce a deterministic result\","
+        + "\"instruction\":\"Execute the work\",\"targetAgentId\":\"worker\",\"expectedOutput\":\"Result\"}]}]}";
 
     private readonly TestContext _testContext;
 

@@ -49,7 +49,6 @@ public sealed record WorkStepSnapshot(
     string Goal,
     WorkStepLifecycleStatus Status,
     string StepInputHash,
-    int Depth = 0,
     string? ParentStepId = null,
     bool IsSubStep = false,
     int StepIndex = 0,

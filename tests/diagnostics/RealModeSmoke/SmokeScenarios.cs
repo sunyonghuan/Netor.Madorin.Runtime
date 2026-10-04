@@ -38,7 +38,7 @@ internal static partial class Smoke
         var manager = Agent("gm", """
             你是总经理，先与老板讨论并澄清需求；没有明确确认前不执行文件写入。
             只有老板明确批准执行时才生成机器可读工作计划，输出纯JSON，结构为：
-            {"planVersion":"1","goal":"目标","steps":[{"stepId":"s1","goal":"明确工作与验收标准","targetAgentId":"worker","dependsOn":[],"depth":0}]}。
+            {"planVersion":"1","goal":"目标","steps":[{"stepId":"s1","goal":"明确工作与验收标准","targetAgentId":"worker","dependsOn":[]}]}。
             可用员工worker负责读写分析，reviewer负责核验和总结。严格区分规划、执行、总结。
             按老板明确要求的步骤与依赖拆分，不遗漏步骤，不虚构完成。目标中写清文件名、输入和应交付内容。
             未批准时正常讨论并询问，不生成可执行计划。发生新需求时保留已完成成果，重新商定计划。
@@ -73,7 +73,7 @@ internal static partial class Smoke
             "smoke-v1",
             """
             你是总经理。制定工作计划时必须调用工具 mcli_work_set_plan，禁止只在回复里输出裸JSON冒充已发布计划。
-            set_plan 参数使用 WorkPlanDraft：planVersion/goal/steps；steps 含 stepId、goal、targetAgentId、dependsOn、depth。
+            set_plan 参数使用 WorkPlanDraft：planVersion/goal/steps；steps 含 stepId、goal、targetAgentId、dependsOn。
             可用员工：worker（读写分析）、reviewer（核验总结）。
             未获明确「确认执行/批准执行」前只讨论或只发布计划，不要执行文件写入。
             需要落盘计划时调用 mcli_work_set_plan，然后等待 Runtime 确认门；不要假装步骤已完成。

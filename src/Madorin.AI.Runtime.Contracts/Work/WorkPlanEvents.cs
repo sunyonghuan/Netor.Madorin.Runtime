@@ -18,7 +18,6 @@ public sealed record WorkPlanStepSnapshot(
     string Goal,
     string TargetAgentId,
     string? ParentStepId,
-    int Depth,
     string[] DependsOn,
     WorkStepStatus Status);
 

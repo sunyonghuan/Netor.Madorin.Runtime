@@ -153,6 +153,13 @@ public sealed record WorkModeOptions : ModeOptions
 {
     public AgentRef GeneralManager { get; init; }
 
+    /// <summary>
+    /// Optional supervisor/project-lead agent responsible for step verification and summarization.
+    /// When null, falls back to searching AvailableAgents for "project-lead",
+    /// then to GeneralManager as last resort.
+    /// </summary>
+    public AgentRef? Supervisor { get; init; }
+
     public AgentRef[] AvailableAgents { get; init; }
 
     public WorkflowPolicy? WorkflowPolicy { get; init; }
@@ -171,10 +178,12 @@ public sealed record WorkModeOptions : ModeOptions
     public WorkModeOptions(
         AgentRef generalManager,
         AgentRef[] availableAgents,
+        AgentRef? supervisor = null,
         WorkflowPolicy? workflowPolicy = null,
         WorkContextPolicy? contextPolicy = null)
     {
         GeneralManager = generalManager;
+        Supervisor = supervisor;
         AvailableAgents = availableAgents;
         WorkflowPolicy = workflowPolicy;
         ContextPolicy = contextPolicy;

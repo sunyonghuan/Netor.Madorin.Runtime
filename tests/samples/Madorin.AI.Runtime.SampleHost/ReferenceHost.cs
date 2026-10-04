@@ -527,7 +527,8 @@ internal static class ReferenceHost
                             ProviderId,
                             ModelId)
                     ],
-                    WorkflowPolicy.Default),
+                    supervisor: null,
+                    workflowPolicy: WorkflowPolicy.Default),
                 ToolCatalogVersion: "reference-v1"),
             _ => throw new ArgumentOutOfRangeException(nameof(index), index, null)
         };

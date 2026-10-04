@@ -21,7 +21,7 @@ public sealed class ReferenceHostProcessTests
     private const string WorkPlanJson =
         "{\"planVersion\":\"1\",\"goal\":\"Reference host work\",\"steps\":["
         + "{\"stepId\":\"reference-step\",\"goal\":\"Complete the reference task\","
-        + "\"targetAgentId\":\"reference-worker\",\"dependsOn\":[],\"depth\":0}]}";
+        + "\"targetAgentId\":\"reference-worker\",\"dependsOn\":[]}]}";
     private static readonly string[] ExpectedProjectReferences =
     [
         "Madorin.AI.Runtime.Client",

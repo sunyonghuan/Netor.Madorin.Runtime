@@ -2,11 +2,9 @@
 
 /// <summary>
 /// Workflow limits and failure behavior for Work mode.
-/// Defaults use lenient loop detection (depth 5/hard 10, steps 50/hard 500).
+/// Defaults use lenient loop detection (steps 50/hard 500).
 /// </summary>
 public sealed record WorkflowPolicy(
-    int MaxAgentDepth = 5,
-    int HardMaxAgentDepth = 10,
     int MaxStepsPerRun = 50,
     int HardMaxStepsPerRun = 500,
     int MaxSubAgentJobs = 20,
@@ -26,27 +24,6 @@ public sealed record WorkflowPolicy(
 
     public void Validate()
     {
-        if (MaxAgentDepth < 1)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(MaxAgentDepth),
-                "MaxAgentDepth must be at least 1.");
-        }
-
-        if (HardMaxAgentDepth < MaxAgentDepth)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(HardMaxAgentDepth),
-                "HardMaxAgentDepth must be greater than or equal to MaxAgentDepth.");
-        }
-
-        if (HardMaxAgentDepth > 10)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(HardMaxAgentDepth),
-                "HardMaxAgentDepth cannot exceed 10.");
-        }
-
         if (MaxStepsPerRun < 1)
         {
             throw new ArgumentOutOfRangeException(

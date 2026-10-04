@@ -282,21 +282,29 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
 
         WorkPlanDraft plan;
         string? parentInvocationId = null;
-        var skipManagerPlanning = policy.RequirePlanConfirmation
+
+        // 检查是否应该跳过总经理调用
+        // 1. 用户已确认计划（等待计划确认状态）
+        // 2. 或者计划已发布且步骤未完成（重连场景）
+        var skipManagerPlanning = (policy.RequirePlanConfirmation
             && waitingForPlanConfirmation
             && userConfirmsPlan
             && !userRequestsRevision
-            && pendingTexts.Length == 0;
+            && pendingTexts.Length == 0)
+            || ShouldKeepPublishedPlan(publishedPlanVersion, priorResume, userRequestsRevision);
 
         if (skipManagerPlanning)
         {
             plan = await _workRepo.GetCurrentPlanDraftAsync(sessionId, ct).ConfigureAwait(false)
                 ?? throw new InvalidOperationException(
-                    $"Session '{sessionId}' is waiting for plan confirmation but has no published plan.");
-            await _workRepo.UpdateSessionStatusAsync(
-                sessionId,
-                WorkSessionStatus.Executing,
-                ct).ConfigureAwait(false);
+                    $"Session '{sessionId}' has a published plan but no current plan draft.");
+            if (priorResume?.Status == WorkSessionStatus.WaitingForPlanConfirmation)
+            {
+                await _workRepo.UpdateSessionStatusAsync(
+                    sessionId,
+                    WorkSessionStatus.Executing,
+                    ct).ConfigureAwait(false);
+            }
             yield return await CreateStatusEnvelopeAsync(
                 runtimeInstanceId,
                 runId,
@@ -523,6 +531,15 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         var approvedLoopRisks = new HashSet<string>(StringComparer.Ordinal);
         var stoppedForPendingInput = false;
 
+        // 解析 Supervisor Agent：优先使用 options.Supervisor，
+        // 否则从 AvailableAgents 中查找 "project-lead"
+        // 注意：不回退到 GeneralManager，因为汇总功能应该由专门的 Supervisor 执行
+        var supervisorAgent = options.Supervisor
+            ?? options.AvailableAgents.FirstOrDefault(a => a.AgentId == "project-lead");
+
+        // 只有明确配置了 Supervisor 时才启用汇总功能
+        var enableSummarization = supervisorAgent != null;
+
         // 创建 WorkSupervisor 实例用于执行一级步骤（包含验证、重试、汇总）
         var supervisor = new WorkSupervisor(
             workerDispatcher: async (subStep, ct) =>
@@ -543,11 +560,17 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             },
             supervisorInvoker: async (prompt, ct) =>
             {
-                // 调用项目组长 Agent（使用总经理 Agent）
+                // 调用项目组长 Agent（Supervisor）
+                // 如果未配置 Supervisor，此方法不会被调用（enableSummarization = false）
+                if (supervisorAgent == null)
+                {
+                    throw new InvalidOperationException(
+                        "Supervisor agent is not configured but summarization was attempted.");
+                }
                 return await InvokeSupervisorAgentAsync(
                     sessionId,
                     runId,
-                    options.GeneralManager,
+                    supervisorAgent,
                     prompt,
                     request,
                     ct).ConfigureAwait(false);
@@ -1059,15 +1082,14 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                     ct).ConfigureAwait(false);
                 completedCount++;
 
-                // 检查是否需要生成一级步骤汇总
-                // readyStep 是二级步骤，需要传入其父步骤 ID
-                if (!string.IsNullOrEmpty(readyStep.ParentStepId))
+                // 只有启用汇总功能时才生成步骤汇总
+                if (enableSummarization && !string.IsNullOrEmpty(readyStep.ParentStepId))
                 {
                     var stepSummary = await TryGenerateStepSummaryAsync(
                         sessionId,
                         readyStep.ParentStepId,
                         plan,
-                        options.GeneralManager,
+                        supervisorAgent!,  // enableSummarization = true 时 supervisorAgent 不为 null
                         request,
                         ct).ConfigureAwait(false);
 
@@ -1096,24 +1118,27 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             await _workRepo.UpdateSessionStatusAsync(
                 sessionId, WorkSessionStatus.Completed, ct).ConfigureAwait(false);
 
-            // 生成总经理最终总结
-            var finalSummary = await GenerateFinalSummaryAsync(
-                sessionId,
-                runId,
-                runtimeInstanceId,
-                plan,
-                options.GeneralManager,
-                request,
-                ct).ConfigureAwait(false);
+            // 只有启用汇总功能时才生成总经理最终总结
+            if (enableSummarization)
+            {
+                var finalSummary = await GenerateFinalSummaryAsync(
+                    sessionId,
+                    runId,
+                    runtimeInstanceId,
+                    plan,
+                    options.GeneralManager,  // 总经理生成最终总结
+                    request,
+                    ct).ConfigureAwait(false);
 
-            // 将总结作为文本增量发送给用户
-            yield return await CreateTextDeltaEnvelopeAsync(
-                runId,
-                runtimeInstanceId,
-                parentInvocationId ?? runId,
-                finalSummary,
-                sequence.Take(),
-                ct).ConfigureAwait(false);
+                // 将总结作为文本增量发送给用户
+                yield return await CreateTextDeltaEnvelopeAsync(
+                    runId,
+                    runtimeInstanceId,
+                    parentInvocationId ?? runId,
+                    finalSummary,
+                    sequence.Take(),
+                    ct).ConfigureAwait(false);
+            }
         }
 
         await CompleteRunAsync(runId, ct).ConfigureAwait(false);
@@ -1662,15 +1687,21 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         WorkResumeState? priorResume,
         bool userRequestsRevision)
     {
-        if (userRequestsRevision || string.IsNullOrWhiteSpace(publishedPlanVersion))
+        // 用户明确要求修订计划，需要重新调用总经理
+        if (userRequestsRevision)
         {
             return false;
         }
 
-        var steps = priorResume?.Steps;
-        return steps is { Length: > 0 }
-            && steps.All(static step => step.Status is WorkStepLifecycleStatus.Pending
-                or WorkStepLifecycleStatus.Interrupted);
+        // 没有已发布的计划版本，需要调用总经理生成计划
+        if (string.IsNullOrWhiteSpace(publishedPlanVersion))
+        {
+            return false;
+        }
+
+        // 有已发布的计划版本，保留计划（避免重复生成）
+        // 即使没有 priorResume 或步骤信息，只要有计划版本就保留
+        return true;
     }
 
     private async Task AppendPlainDialogueAsync(
@@ -1982,13 +2013,6 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             || !policy.RequireHumanConfirmationOnLoop)
         {
             return null;
-        }
-
-        if (current.Depth >= policy.MaxAgentDepth)
-        {
-            return new WorkLoopRisk(
-                $"depth:{current.StepId}:{current.PlanVersion}",
-                $"Step '{current.StepId}' reached the configured Agent depth threshold {policy.MaxAgentDepth}.");
         }
 
         var repeatedGoal = allSteps
@@ -3007,7 +3031,6 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             workPlanVersion,
             Title: stepDraft?.Title,
             ParentStepId: null,
-            Depth: 0,
             DisplayName: agent.AgentId,
             Role: null,
             ParticipantId: null,
@@ -3168,7 +3191,9 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 && !ContainsPlanJson(goal)
                 && priorResume?.Steps is { Length: > 0 } openSteps
                 && openSteps.All(static step => step.Status is WorkStepLifecycleStatus.Pending
-                    or WorkStepLifecycleStatus.Interrupted);
+                    or WorkStepLifecycleStatus.Interrupted
+                    or WorkStepLifecycleStatus.WaitingForApproval
+                    or WorkStepLifecycleStatus.WaitingForCredentials);
             if (keepPublishedPlan)
             {
                 builder.AppendLine(
@@ -3668,7 +3693,6 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                     subStep.Goal,
                     subStep.TargetAgentId,
                     step.StepId,  // ParentStepId is the parent step's StepId
-                    1,  // Depth is always 1 for substeps
                     Array.Empty<string>(),  // SubSteps don't have DependsOn, only top-level steps do
                     Contracts.Work.WorkStepStatus.Pending
                 ));
@@ -4059,7 +4083,7 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
         string sessionId,
         string stepId,
         WorkPlanDraft plan,
-        AgentRef generalManager,
+        AgentRef supervisor,
         NewSessionRunRequest request,
         CancellationToken ct)
     {
@@ -4114,19 +4138,19 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
             3. 是否达到了步骤目标
             """;
 
-        // 创建临时会话调用总经理生成汇总
+        // 创建临时会话调用项目组长生成汇总
         var summaryInvocation = await CreateInvocationRequestAsync(
             Guid.NewGuid().ToString(),
             sessionId,
             request,
-            generalManager,
+            supervisor,
             "work-summary-v1",
             ct).ConfigureAwait(false);
 
         await AppendPlainDialogueAsync(
             sessionId,
             summaryInvocation.InvocationId,
-            generalManager.AgentId,
+            supervisor.AgentId,
             "user",
             prompt,
             ct).ConfigureAwait(false);

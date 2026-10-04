@@ -5115,6 +5115,7 @@ public sealed class RuntimeServer : IAsyncDisposable
             WorkModeOptions work => new WorkModeOptions(
                 RehydrateAgent(work.GeneralManager),
                 [.. work.AvailableAgents.Select(RehydrateAgent)],
+                work.Supervisor != null ? RehydrateAgent(work.Supervisor) : null,
                 work.WorkflowPolicy,
                 work.ContextPolicy),
             _ => throw new InvalidOperationException(

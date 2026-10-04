@@ -229,7 +229,7 @@ public sealed class WorkDispatchStepTests
                 1,
                 RuntimeMode.Work,
                 new DefaultSelection("fake", "test-model"),
-                new WorkModeOptions(manager, [worker], policy),
+                new WorkModeOptions(manager, [worker], supervisor: null, workflowPolicy: policy),
                 ToolCatalogVersion: "tools-v1"),
             [new TextContentBlock("Prepare the release notes.")]);
     }

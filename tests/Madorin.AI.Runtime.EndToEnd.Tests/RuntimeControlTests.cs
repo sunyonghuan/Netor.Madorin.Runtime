@@ -1418,6 +1418,27 @@ public sealed class RuntimeControlTests
         {
             await Task.Yield();
             ct.ThrowIfCancellationRequested();
+
+            // 支持工作模式：总经理返回计划，Worker 返回结果
+            if (string.Equals(request.AgentId, "gm-agent", StringComparison.Ordinal))
+            {
+                // 总经理生成计划（新格式：二级步骤结构）
+                yield return new TextDeltaProviderEvent(
+                    request.InvocationId,
+                    """{"planVersion":"1","goal":"Complete the work","steps":[{"stepId":"step-1","title":"Main Step","description":"Execute the task","subSteps":[{"subStepId":"step-1.1","goal":"Execute the task","instruction":"Complete the work","targetAgentId":"worker-agent","expectedOutput":"Task result"}]}]}""");
+                yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
+                yield break;
+            }
+
+            if (string.Equals(request.AgentId, "worker-agent", StringComparison.Ordinal))
+            {
+                // Worker Agent 执行步骤
+                yield return new TextDeltaProviderEvent(request.InvocationId, "Task completed successfully.");
+                yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
+                yield break;
+            }
+
+            // 默认行为（用于非工作模式）
             yield return new TextDeltaProviderEvent(request.InvocationId, "The answer is ");
             yield return new TextDeltaProviderEvent(request.InvocationId, "42.");
             yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");

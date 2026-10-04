@@ -54,6 +54,7 @@ internal static class RuntimeRunMetadata
             WorkModeOptions work => new WorkModeOptions(
                 RemovePromptContent(work.GeneralManager),
                 [.. work.AvailableAgents.Select(RemovePromptContent)],
+                work.Supervisor != null ? RemovePromptContent(work.Supervisor) : null,
                 work.WorkflowPolicy,
                 work.ContextPolicy),
             _ => throw new InvalidOperationException(

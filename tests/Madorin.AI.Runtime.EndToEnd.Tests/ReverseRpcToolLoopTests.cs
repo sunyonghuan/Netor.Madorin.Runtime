@@ -568,7 +568,10 @@ public sealed class ReverseRpcToolLoopTests
                     yield break;
                 }
 
-                yield return new TextDeltaProviderEvent(request.InvocationId, "Create the process step.");
+                // 返回有效的工作计划（新格式：二级步骤结构）
+                yield return new TextDeltaProviderEvent(
+                    request.InvocationId,
+                    """{"planVersion":"1","goal":"Run process tool","steps":[{"stepId":"step-1","title":"Execute process","description":"Run the process tool","subSteps":[{"subStepId":"step-1.1","goal":"Execute process tool","instruction":"Run the process tool","targetAgentId":"worker","expectedOutput":"Process result"}]}]}""");
                 yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
                 yield break;
             }
