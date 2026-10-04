@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Threading.Channels;
 using System.Text.Json.Serialization.Metadata;
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Contracts.Serialization;
@@ -1289,42 +1290,141 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 completedResult));
         }
 
+        // 使用 Channel 实现实时事件流转发（方案A）
+        var eventChannel = Channel.CreateUnbounded<RuntimeEventEnvelope>(new UnboundedChannelOptions
+        {
+            SingleReader = true,
+            SingleWriter = false
+        });
+        
         var providerResults = new ConcurrentDictionary<string, ConcurrentStepProviderResult>(
             StringComparer.Ordinal);
-        await Task.WhenAll(prepared.Select(async item =>
+        var stepResultBuilders = new ConcurrentDictionary<string, StringBuilder>(
+            StringComparer.Ordinal);
+
+        // 启动并发执行任务
+        var executionTask = Task.Run(async () =>
         {
-            if (item.CompletedResultJson is not null)
+            try
             {
-                providerResults[item.Step.StepId] = new ConcurrentStepProviderResult(
-                    item.CompletedResultJson,
-                    Failed: false,
-                    Error: null,
-                    ProviderEvents: []);
-                return;
-            }
-
-            var events = new List<RuntimeProviderEvent>();
-            RuntimeError? error = null;
-            await foreach (var providerEvent in ExecuteInvocationAsync(item.Invocation, ct)
-                .ConfigureAwait(false))
-            {
-                events.Add(providerEvent);
-                if (providerEvent is InvocationFailedProviderEvent failed)
+                await Task.WhenAll(prepared.Select(async item =>
                 {
-                    error = failed.Error;
-                }
+                    if (item.CompletedResultJson is not null)
+                    {
+                        providerResults[item.Step.StepId] = new ConcurrentStepProviderResult(
+                            item.CompletedResultJson,
+                            Failed: false,
+                            Error: null,
+                            ProviderEvents: []);
+                        return;
+                    }
+
+                    var resultBuilder = new StringBuilder();
+                    stepResultBuilders[item.Step.StepId] = resultBuilder;
+                    RuntimeError? error = null;
+
+                    await foreach (var providerEvent in ExecuteInvocationAsync(item.Invocation, ct)
+                        .ConfigureAwait(false))
+                    {
+                        // 立即转换并发送事件
+                        RuntimeEventEnvelope? envelope = providerEvent switch
+                        {
+                            TextDeltaProviderEvent td => await CreateTextDeltaEnvelopeAsync(
+                                runId,
+                                runtimeInstanceId,
+                                td.InvocationId,
+                                td.Delta,
+                                Interlocked.Increment(ref runSequence),
+                                ct).ConfigureAwait(false),
+                            
+                            ReasoningDeltaProviderEvent rd => await CreateReasoningDeltaEnvelopeAsync(
+                                runId,
+                                runtimeInstanceId,
+                                rd.InvocationId,
+                                rd.Delta,
+                                Interlocked.Increment(ref runSequence),
+                                ct).ConfigureAwait(false),
+                            
+                            ReasoningCompletedProviderEvent rc => await CreateReasoningCompletedEnvelopeAsync(
+                                runId,
+                                runtimeInstanceId,
+                                rc.InvocationId,
+                                Interlocked.Increment(ref runSequence),
+                                ct).ConfigureAwait(false),
+                            
+                            ToolCallDeltaProviderEvent tcd => await CreateToolCallDeltaEnvelopeAsync(
+                                runId,
+                                runtimeInstanceId,
+                                tcd.InvocationId,
+                                tcd.CallId,
+                                tcd.Name,
+                                tcd.ArgumentsDelta,
+                                Interlocked.Increment(ref runSequence),
+                                ct).ConfigureAwait(false),
+                            
+                            UsageUpdatedProviderEvent usg => await CreateUsageUpdatedEnvelopeAsync(
+                                runId,
+                                runtimeInstanceId,
+                                usg.InvocationId,
+                                usg.InputTokens,
+                                usg.OutputTokens,
+                                Interlocked.Increment(ref runSequence),
+                                ct).ConfigureAwait(false),
+                            
+                            WorkRunStatusProviderEvent sc => await CreateStatusEnvelopeAsync(
+                                runtimeInstanceId,
+                                runId,
+                                Interlocked.Increment(ref runSequence),
+                                sc.Status,
+                                ct,
+                                workPhase: "executing",
+                                currentStep: item.Step.StepId).ConfigureAwait(false),
+                            
+                            InvocationFailedProviderEvent failed => (error = failed.Error) is null ? null : null,
+                            
+                            _ => null
+                        };
+
+                        if (envelope is not null)
+                        {
+                            await eventChannel.Writer.WriteAsync(envelope, ct).ConfigureAwait(false);
+                        }
+
+                        // 累积文本结果
+                        if (providerEvent is TextDeltaProviderEvent textDelta)
+                        {
+                            resultBuilder.Append(textDelta.Delta);
+                        }
+                    }
+
+                    providerResults[item.Step.StepId] = new ConcurrentStepProviderResult(
+                        CompletedResultJson: null,
+                        Failed: error is not null,
+                        Error: error,
+                        ProviderEvents: []); // 不再需要缓存事件
+                })).ConfigureAwait(false);
             }
+            finally
+            {
+                eventChannel.Writer.Complete();
+            }
+        }, ct);
 
-            providerResults[item.Step.StepId] = new ConcurrentStepProviderResult(
-                CompletedResultJson: null,
-                Failed: error is not null,
-                Error: error,
-                ProviderEvents: events);
-        })).ConfigureAwait(false);
+        // 实时转发事件到调用方
+        await foreach (var envelope in eventChannel.Reader.ReadAllAsync(ct).ConfigureAwait(false))
+        {
+            yield return envelope;
+        }
 
+        // 等待所有并发任务完成
+        await executionTask.ConfigureAwait(false);
+
+        // 处理完成阶段：发送 InvocationCompleted 事件并持久化结果
         foreach (var item in prepared)
         {
             var providerResult = providerResults[item.Step.StepId];
+            
+            // 处理缓存命中的步骤
             if (providerResult.CompletedResultJson is not null)
             {
                 var cached = JsonSerializer.Deserialize(
@@ -1358,71 +1458,10 @@ public sealed class WorkModeOrchestrator : IModeOrchestrator
                 continue;
             }
 
-            var resultBuilder = new StringBuilder();
-            foreach (var providerEvent in providerResult.ProviderEvents)
-            {
-                switch (providerEvent)
-                {
-                    case TextDeltaProviderEvent textDelta:
-                        resultBuilder.Append(textDelta.Delta);
-                        yield return await CreateTextDeltaEnvelopeAsync(
-                            runId,
-                            runtimeInstanceId,
-                            textDelta.InvocationId,
-                            textDelta.Delta,
-                            runSequence++,
-                            ct).ConfigureAwait(false);
-                        break;
-                    case ReasoningDeltaProviderEvent reasoningDelta:
-                        yield return await CreateReasoningDeltaEnvelopeAsync(
-                            runId,
-                            runtimeInstanceId,
-                            reasoningDelta.InvocationId,
-                            reasoningDelta.Delta,
-                            runSequence++,
-                            ct).ConfigureAwait(false);
-                        break;
-                    case ReasoningCompletedProviderEvent reasoningCompleted:
-                        yield return await CreateReasoningCompletedEnvelopeAsync(
-                            runId,
-                            runtimeInstanceId,
-                            reasoningCompleted.InvocationId,
-                            runSequence++,
-                            ct).ConfigureAwait(false);
-                        break;
-                    case ToolCallDeltaProviderEvent toolCallDelta:
-                        yield return await CreateToolCallDeltaEnvelopeAsync(
-                            runId,
-                            runtimeInstanceId,
-                            toolCallDelta.InvocationId,
-                            toolCallDelta.CallId,
-                            toolCallDelta.Name,
-                            toolCallDelta.ArgumentsDelta,
-                            runSequence++,
-                            ct).ConfigureAwait(false);
-                        break;
-                    case UsageUpdatedProviderEvent usage:
-                        yield return await CreateUsageUpdatedEnvelopeAsync(
-                            runId,
-                            runtimeInstanceId,
-                            usage.InvocationId,
-                            usage.InputTokens,
-                            usage.OutputTokens,
-                            runSequence++,
-                            ct).ConfigureAwait(false);
-                        break;
-                    case WorkRunStatusProviderEvent statusChanged:
-                        yield return await CreateStatusEnvelopeAsync(
-                            runtimeInstanceId,
-                            runId,
-                            runSequence++,
-                            statusChanged.Status,
-                            ct,
-                            workPhase: "executing",
-                            currentStep: item.Step.StepId).ConfigureAwait(false);
-                        break;
-                }
-            }
+            // 获取已累积的文本结果（并发执行时已实时流式发送了事件）
+            var resultBuilder = stepResultBuilders.TryGetValue(item.Step.StepId, out var builder)
+                ? builder
+                : new StringBuilder();
 
             if (providerResult.Failed)
             {
