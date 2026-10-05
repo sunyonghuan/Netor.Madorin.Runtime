@@ -63,8 +63,8 @@ public sealed class MadorinLocator(ProcessRunner processRunner)
             if (Directory.Exists(cliOutput))
             {
                 var executableNames = OperatingSystem.IsWindows()
-                    ? new[] { "madorin.exe", "madorin" }
-                    : new[] { "madorin", "madorin.exe" };
+                    ? new[] { "madorin-cli.exe", "madorin.exe", "madorin" }
+                    : new[] { "madorin-cli", "madorin", "madorin.exe", "madorin-cli.exe" };
 
                 foreach (var executableName in executableNames)
                 {
@@ -91,8 +91,8 @@ public sealed class MadorinLocator(ProcessRunner processRunner)
         }
 
         var names = OperatingSystem.IsWindows()
-            ? new[] { "madorin.exe", "madorin" }
-            : new[] { "madorin", "madorin.exe" };
+            ? new[] { "madorin-cli.exe", "madorin.exe", "madorin" }
+            : new[] { "madorin-cli", "madorin", "madorin.exe", "madorin-cli.exe" };
         foreach (var directory in path.Split(System.IO.Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
         {
             foreach (var name in names)

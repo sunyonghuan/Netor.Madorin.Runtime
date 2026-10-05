@@ -11,6 +11,7 @@ using Madorin.AI.Runtime.Persistence.Sqlite;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Server.ProviderWorkers;
 using Madorin.AI.Runtime.Server.Auth;
+using Madorin.AI.Runtime.Server.Http;
 using Madorin.AI.Runtime.Services;
 using Madorin.AI.Runtime.Services.Memory;
 using Madorin.AI.Runtime.Services.Skills;
@@ -20,13 +21,13 @@ using Madorin.AI.Runtime.Tools.Builtin;
 using Madorin.AI.Runtime.Transport.Abstractions;
 using Madorin.AI.Runtime.Transport.NamedPipes;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Madorin.AI.Runtime.Server;
 
 public sealed class RuntimeServer : IAsyncDisposable
 {
-    private const string MeetingHitlTimeoutReason = "HITL approval timed out";
-
     private readonly WorkspaceWriteLock _instanceLock;
     private readonly FileStream _instanceNameLock;
     private readonly string _dataDirectory;
@@ -64,6 +65,7 @@ public sealed class RuntimeServer : IAsyncDisposable
     private readonly CancellationTokenSource _shutdown = new();
     private readonly TaskCompletionSource<object?> _fatalSignal =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly RuntimeHttpServer? _httpServer;
     private Exception? _fatalFailure;
     private int _startupToolRecoveryPending;
     private int _connectionId;
@@ -138,6 +140,18 @@ public sealed class RuntimeServer : IAsyncDisposable
         WorkspaceRoot = options.WorkspaceRoot;
         PipeName = $"{options.PipePrefix}.{InstanceId[..Math.Min(8, InstanceId.Length)]}";
         EventPipeName = $"{PipeName}.events";
+
+        if (options.HttpPort is > 0)
+        {
+            var loggerFactory = NullLoggerFactory.Instance;
+            _httpServer = new RuntimeHttpServer(
+                options.HttpHost,
+                options.HttpPort.Value,
+                PipeName,
+                InstanceId,
+                _handshakeSecret,
+                loggerFactory);
+        }
     }
 
     public string InstanceId { get; }
@@ -378,10 +392,14 @@ public sealed class RuntimeServer : IAsyncDisposable
                     HandleEventConnectionAsync,
                     stoppingToken),
                 MonitorHostLeasesAsync(stoppingToken),
-                RecoverPersistedMeetingApprovalsAsync(stoppingToken),
                 ReconcilePendingTerminalRunsAsync(stoppingToken),
                 _fatalSignal.Task
             };
+
+            if (_httpServer is not null)
+            {
+                await _httpServer.StartAsync(stoppingToken).ConfigureAwait(false);
+            }
 
             var pending = new HashSet<Task>(rootTasks);
             Exception? rootFailure = null;
@@ -472,6 +490,11 @@ public sealed class RuntimeServer : IAsyncDisposable
         _sessions.Clear();
         await _workerSupervisor.DisposeAsync().ConfigureAwait(false);
         await _blobStore.DisposeAsync().ConfigureAwait(false);
+        if (_httpServer is not null)
+        {
+            await _httpServer.DisposeAsync().ConfigureAwait(false);
+        }
+
         await _instanceLock.DisposeAsync().ConfigureAwait(false);
         await _instanceNameLock.DisposeAsync().ConfigureAwait(false);
         _compactionService.Dispose();
@@ -548,7 +571,6 @@ public sealed class RuntimeServer : IAsyncDisposable
                 await using var repositoryConnection = await OpenDatabaseConnectionAsync(ct)
                     .ConfigureAwait(false);
                 var repository = new SqliteSessionRepository(repositoryConnection);
-                var meetingRepository = new SqliteMeetingRepository(repositoryConnection);
                 await using var outboxConnection = await OpenDatabaseConnectionAsync(ct)
                     .ConfigureAwait(false);
                 using var outbox = CreateEventOutbox(outboxConnection);
@@ -575,7 +597,6 @@ public sealed class RuntimeServer : IAsyncDisposable
                             request,
                             session,
                             repository,
-                            meetingRepository,
                             outbox,
                             authorizationService,
                             toolStateStore,
@@ -818,7 +839,7 @@ public sealed class RuntimeServer : IAsyncDisposable
             toolStateStore,
             toolGateway,
             toolCatalogSnapshot,
-            new SqliteWorkRepository(repository.Connection));
+            workRecoveryStore: null);
         try
         {
             await recoveryService.RecoverSentToolIntentsAsync(ct).ConfigureAwait(false);
@@ -842,7 +863,6 @@ public sealed class RuntimeServer : IAsyncDisposable
         JsonRpcRequest request,
         AuthenticatedSession session,
         SqliteSessionRepository repository,
-        SqliteMeetingRepository meetingRepository,
         SqliteEventOutbox outbox,
         ToolAuthorizationService authorizationService,
         SqliteToolIntentRepository toolStateStore,
@@ -1195,7 +1215,7 @@ public sealed class RuntimeServer : IAsyncDisposable
 
         if (string.Equals(request.Method, MessageTypes.SessionResume, StringComparison.Ordinal))
         {
-            return await CreateSessionResumeResponseAsync(request, repository, meetingRepository, ct)
+            return await CreateSessionResumeResponseAsync(request, repository, ct)
                 .ConfigureAwait(false);
         }
 
@@ -1229,7 +1249,6 @@ public sealed class RuntimeServer : IAsyncDisposable
                 request,
                 session,
                 repository,
-                meetingRepository,
                 outbox,
                 ct)
                 .ConfigureAwait(false);
@@ -1260,324 +1279,6 @@ public sealed class RuntimeServer : IAsyncDisposable
                 _timeProvider.GetUtcNow().ToUnixTimeMilliseconds(),
                 RuntimeJsonContext.Default.Int64);
             return new JsonRpcResponse("2.0", request.Id, result);
-        }
-
-        if (string.Equals(request.Method, MessageTypes.MeetingHitlResponse, StringComparison.Ordinal))
-        {
-            var response = request.Params is { } hitlParams
-                ? JsonSerializer.Deserialize(
-                    hitlParams,
-                    RuntimeJsonContext.Default.MeetingHitlResponse)
-                : null;
-            if (response is null
-                || string.IsNullOrWhiteSpace(response.ApprovalRequestId)
-                || !Enum.IsDefined(response.Action))
-            {
-                return Error(request.Id, -32602, "The meeting.hitl.response parameters are invalid.");
-            }
-
-            if (response.Action == MeetingHitlAction.Supplement
-                && string.IsNullOrWhiteSpace(response.Supplement))
-            {
-                return Error(request.Id, -32602, "Supplement action requires a nonblank Supplement.");
-            }
-
-            var approval = await meetingRepository.FindApprovalByRequestIdAsync(
-                    response.ApprovalRequestId, ct)
-                .ConfigureAwait(false);
-            if (approval is null)
-            {
-                return Error(request.Id, -32004, "The approval request was not found.");
-            }
-
-            var isDuplicate = IsSameMeetingHitlResponse(approval.ApprovalJson, response);
-            if (string.Equals(approval.Status, "Decided", StringComparison.Ordinal))
-            {
-                if (!isDuplicate)
-                {
-                    return Error(request.Id, -32009, "The approval request has already been decided.");
-                }
-            }
-
-            if (!_activeRuns.TryGetValue(approval.RunId, out var hitlRun))
-            {
-                try
-                {
-                    await ResumePersistedMeetingHitlAsync(
-                        approval,
-                        response,
-                        session,
-                        meetingRepository,
-                        outbox,
-                        ct).ConfigureAwait(false);
-                }
-                catch (InvalidOperationException ex)
-                {
-                    return Error(request.Id, -32006, ex.Message);
-                }
-
-                var resumedResult = JsonSerializer.SerializeToElement(
-                    true, RuntimeJsonContext.Default.Boolean);
-                return new JsonRpcResponse("2.0", request.Id, resumedResult);
-            }
-
-            if (!string.Equals(
-                    hitlRun.OwnerHostInstanceId,
-                    session.HostInstanceId,
-                    StringComparison.Ordinal))
-            {
-                return Error(request.Id, -32004, "The Run is not owned by this Host session.");
-            }
-
-            if (string.Equals(approval.Status, "Decided", StringComparison.Ordinal))
-            {
-                var duplicateResult = JsonSerializer.SerializeToElement(
-                    true, RuntimeJsonContext.Default.Boolean);
-                return new JsonRpcResponse("2.0", request.Id, duplicateResult);
-            }
-
-            if (!hitlRun.HasMeetingHitlWaiter(response.ApprovalRequestId))
-            {
-                return Error(request.Id, -32010, "No active waiter for this approval request.");
-            }
-
-            var responseJson = JsonSerializer.Serialize(
-                response,
-                RuntimeJsonContext.Default.MeetingHitlResponse);
-            await meetingRepository.ResolvePendingApprovalAsync(
-                approval.SessionId,
-                response.ApprovalRequestId,
-                responseJson,
-                "Decided",
-                ct).ConfigureAwait(false);
-
-            var responseRunSequence = await outbox.GetNextRunSequenceAsync(
-                approval.RunId,
-                ct).ConfigureAwait(false);
-            await outbox.AppendAsync(
-                approval.RunId,
-                responseRunSequence,
-                MessageTypes.MeetingHitlResponse,
-                responseJson,
-                ct).ConfigureAwait(false);
-            await DispatchPendingEventsAsync(session, outbox, ct).ConfigureAwait(false);
-
-            if (!hitlRun.TryCompleteMeetingHitl(response))
-            {
-                return Error(request.Id, -32010, "No active waiter for this approval request.");
-            }
-
-            var hitlResult = JsonSerializer.SerializeToElement(
-                true, RuntimeJsonContext.Default.Boolean);
-            return new JsonRpcResponse("2.0", request.Id, hitlResult);
-        }
-
-        if (string.Equals(request.Method, MessageTypes.MeetingInputEnqueue, StringComparison.Ordinal))
-        {
-            var enqueue = request.Params is { } enqueueParams
-                ? JsonSerializer.Deserialize(
-                    enqueueParams,
-                    RuntimeJsonContext.Default.MeetingInputEnqueueRequest)
-                : null;
-            if (enqueue is null
-                || string.IsNullOrWhiteSpace(enqueue.SessionId)
-                || string.IsNullOrWhiteSpace(enqueue.RequestId)
-                || enqueue.Content is not { Length: > 0 })
-            {
-                return Error(request.Id, -32602, "The meeting.input.enqueue parameters are invalid.");
-            }
-
-            var meetingSnapshot = await meetingRepository.GetMeetingSnapshotAsync(enqueue.SessionId, ct)
-                .ConfigureAwait(false);
-            if (meetingSnapshot is null)
-            {
-                return Error(request.Id, -32004, $"Meeting session '{enqueue.SessionId}' was not found.");
-            }
-
-            var contentJson = JsonSerializer.Serialize(
-                enqueue.Content,
-                RuntimeJsonContext.Default.ContentBlockArray);
-            var accepted = await meetingRepository.EnqueuePendingInputAsync(
-                enqueue.SessionId,
-                enqueue.RequestId,
-                contentJson,
-                enqueue.RunId ?? meetingSnapshot.Session.RunId,
-                ct).ConfigureAwait(false);
-            var enqueueResult = new MeetingInputEnqueueResult(
-                enqueue.SessionId,
-                enqueue.RequestId,
-                accepted,
-                accepted ? "Pending" : "Duplicate",
-                accepted
-                    ? "Input accepted and will be consumed at the next Meeting safe point."
-                    : "An identical requestId was already enqueued.");
-            return new JsonRpcResponse(
-                "2.0",
-                request.Id,
-                JsonSerializer.SerializeToElement(
-                    enqueueResult,
-                    RuntimeJsonContext.Default.MeetingInputEnqueueResult));
-        }
-
-        if (string.Equals(request.Method, MessageTypes.WorkInputEnqueue, StringComparison.Ordinal))
-        {
-            var enqueue = request.Params is { } enqueueParams
-                ? JsonSerializer.Deserialize(
-                    enqueueParams,
-                    RuntimeJsonContext.Default.WorkInputEnqueueRequest)
-                : null;
-            if (enqueue is null
-                || string.IsNullOrWhiteSpace(enqueue.SessionId)
-                || string.IsNullOrWhiteSpace(enqueue.RequestId)
-                || string.IsNullOrWhiteSpace(enqueue.Text))
-            {
-                return Error(request.Id, -32602, "The work.input.enqueue parameters are invalid.");
-            }
-
-            var workRepository = new SqliteWorkRepository(repository.Connection);
-            var pending = await workRepository.EnqueuePendingUserInputAsync(
-                enqueue.SessionId,
-                enqueue.Text,
-                "user",
-                enqueue.RequestId,
-                ct).ConfigureAwait(false);
-            var enqueueResult = new WorkInputEnqueueResult(
-                enqueue.SessionId,
-                pending.InputId,
-                true,
-                "Pending");
-            return new JsonRpcResponse(
-                "2.0",
-                request.Id,
-                JsonSerializer.SerializeToElement(
-                    enqueueResult,
-                    RuntimeJsonContext.Default.WorkInputEnqueueResult));
-        }
-
-        if (string.Equals(request.Method, MessageTypes.MeetingPause, StringComparison.Ordinal))
-        {
-            var pause = request.Params is { } pauseParams
-                ? JsonSerializer.Deserialize(
-                    pauseParams,
-                    RuntimeJsonContext.Default.MeetingPauseRequest)
-                : null;
-            if (pause is null
-                || string.IsNullOrWhiteSpace(pause.SessionId)
-                || string.IsNullOrWhiteSpace(pause.RequestId))
-            {
-                return Error(request.Id, -32602, "The meeting.pause parameters are invalid.");
-            }
-
-            try
-            {
-                await meetingRepository.RequestPauseAsync(
-                    pause.SessionId,
-                    pause.RequestId,
-                    pause.Reason,
-                    ct).ConfigureAwait(false);
-            }
-            catch (InvalidOperationException ex)
-            {
-                return Error(request.Id, -32006, ex.Message);
-            }
-
-            var pauseResult = new MeetingPauseResult(
-                pause.SessionId,
-                pause.RequestId,
-                true,
-                "PauseRequested",
-                "Pause will take effect at the next Meeting safe point.");
-            return new JsonRpcResponse(
-                "2.0",
-                request.Id,
-                JsonSerializer.SerializeToElement(
-                    pauseResult,
-                    RuntimeJsonContext.Default.MeetingPauseResult));
-        }
-
-        if (string.Equals(request.Method, MessageTypes.MeetingResume, StringComparison.Ordinal))
-        {
-            var resume = request.Params is { } resumeParams
-                ? JsonSerializer.Deserialize(
-                    resumeParams,
-                    RuntimeJsonContext.Default.MeetingResumeRequest)
-                : null;
-            if (resume is null
-                || string.IsNullOrWhiteSpace(resume.SessionId)
-                || string.IsNullOrWhiteSpace(resume.RequestId))
-            {
-                return Error(request.Id, -32602, "The meeting.resume parameters are invalid.");
-            }
-
-            var meetingSnapshot = await meetingRepository.GetMeetingSnapshotAsync(resume.SessionId, ct)
-                .ConfigureAwait(false);
-            if (meetingSnapshot is null)
-            {
-                return Error(request.Id, -32004, $"Meeting session '{resume.SessionId}' was not found.");
-            }
-
-            if (!string.Equals(meetingSnapshot.Session.Status, "Paused", StringComparison.Ordinal))
-            {
-                return Error(
-                    request.Id,
-                    -32006,
-                    $"Meeting session '{resume.SessionId}' is '{meetingSnapshot.Session.Status}' and cannot be resumed. "
-                    + "Only Paused meetings accept meeting.resume.");
-            }
-
-            if (!string.IsNullOrWhiteSpace(resume.PreviousRunId)
-                && !string.Equals(
-                    meetingSnapshot.Session.RunId,
-                    resume.PreviousRunId,
-                    StringComparison.Ordinal))
-            {
-                return Error(
-                    request.Id,
-                    -32006,
-                    $"PreviousRunId '{resume.PreviousRunId}' does not match the paused meeting run "
-                    + $"'{meetingSnapshot.Session.RunId}'.");
-            }
-
-            var sessionSnapshot = await repository.GetSessionSnapshotAsync(resume.SessionId, ct)
-                .ConfigureAwait(false);
-            if (sessionSnapshot is null)
-            {
-                return Error(request.Id, -32004, $"Session '{resume.SessionId}' was not found.");
-            }
-
-            NextTurnSelection? selection = null;
-            _ = _sessionSelections.TryGetValue(resume.SessionId, out selection);
-            var diagnostics = new List<string>();
-            var resumeState = BuildMeetingResumeState(
-                meetingSnapshot,
-                sessionSnapshot,
-                selection,
-                diagnostics);
-            var nextRound = checked(meetingSnapshot.Session.CurrentRound + 1);
-            var resumeResult = new MeetingResumeResult(
-                resume.SessionId,
-                resume.RequestId,
-                Accepted: true,
-                Status: "ReadyForContinuation",
-                State: resumeState,
-                NextRoundIndex: nextRound,
-                Message: "Meeting is paused and ready. Start a continuation Run with run.existing_session "
-                    + "(Interrupted is terminal; do not reopen the paused Run). "
-                    + "The orchestrator claims Paused→Running and begins with a Host recovery turn.");
-            if (diagnostics.Count > 0)
-            {
-                resumeResult = resumeResult with
-                {
-                    Message = resumeResult.Message + " Diagnostics: " + string.Join("; ", diagnostics)
-                };
-            }
-
-            return new JsonRpcResponse(
-                "2.0",
-                request.Id,
-                JsonSerializer.SerializeToElement(
-                    resumeResult,
-                    RuntimeJsonContext.Default.MeetingResumeResult));
         }
 
         if (string.Equals(request.Method, MessageTypes.RunCancel, StringComparison.Ordinal))
@@ -1956,7 +1657,6 @@ public sealed class RuntimeServer : IAsyncDisposable
     private async Task<JsonRpcResponse> CreateSessionResumeResponseAsync(
         JsonRpcRequest request,
         SqliteSessionRepository repository,
-        SqliteMeetingRepository meetingRepository,
         CancellationToken ct)
     {
         var parameters = request.Params is { } json
@@ -1987,45 +1687,6 @@ public sealed class RuntimeServer : IAsyncDisposable
         await ValidateResumeBlobReferencesAsync(historyMeta.BlobIds, diagnostics, ct)
             .ConfigureAwait(false);
 
-        MeetingResumeState? meetingState = null;
-        if (snapshot.Mode == RuntimeMode.Meeting)
-        {
-            var meetingSnapshot = await meetingRepository.GetMeetingSnapshotAsync(
-                parameters.SessionId, ct).ConfigureAwait(false);
-            if (meetingSnapshot is not null)
-            {
-                meetingState = BuildMeetingResumeState(
-                    meetingSnapshot,
-                    snapshot,
-                    selection,
-                    diagnostics);
-            }
-            else
-            {
-                diagnostics.Add(
-                    "The Meeting session structure does not exist yet; meeting state is unavailable.");
-            }
-        }
-
-        WorkResumeState? workState = null;
-        if (snapshot.Mode == RuntimeMode.Work)
-        {
-            workState = await new SqliteWorkRepository(repository.Connection)
-                .GetResumeStateAsync(parameters.SessionId, ct).ConfigureAwait(false);
-            if (workState is null)
-            {
-                diagnostics.Add(
-                    "The Work session structure does not exist yet; work state is unavailable.");
-            }
-        }
-
-        var lastCheckpoint = workState?.Steps
-            .Where(static step => !string.IsNullOrWhiteSpace(step.CheckpointJson))
-            .OrderByDescending(static step => step.StartedAt ?? DateTimeOffset.MinValue)
-            .ThenByDescending(static step => step.StepId, StringComparer.Ordinal)
-            .Select(static step => step.CheckpointJson)
-            .FirstOrDefault();
-
         var result = new SessionResumeResult(
             snapshot.SessionId,
             snapshot.Mode,
@@ -2036,7 +1697,7 @@ public sealed class RuntimeServer : IAsyncDisposable
                 snapshot.LatestRun,
                 snapshot.LatestRun is null ? null : GetQueryableRunStatus(snapshot.LatestRun)),
             snapshot.LastGsn,
-            LastCheckpoint: lastCheckpoint,
+            LastCheckpoint: null,
             IsFullyRecoverable: diagnostics.Count == 0,
             [.. diagnostics],
             historyMeta.MessageCount,
@@ -2044,9 +1705,7 @@ public sealed class RuntimeServer : IAsyncDisposable
             historyMeta.LastMessageId,
             snapshot.AgentSnapshots,
             historyMeta.BlobReferenceCount,
-            historyMeta.BlobIds,
-            meetingState,
-            workState);
+            historyMeta.BlobIds);
         var payload = JsonSerializer.SerializeToElement(
             result,
             RuntimeJsonContext.Default.SessionResumeResult);
@@ -2244,13 +1903,11 @@ public sealed class RuntimeServer : IAsyncDisposable
         var parameters = request.Params is { } json
             ? json.Deserialize(RuntimeJsonContext.Default.SessionSelectionUpdateParameters)
             : null;
-        var hasSelection = parameters?.Selection is not null;
-        var hasPatches = parameters?.MeetingPatches is { Length: > 0 };
         if (parameters is null
             || string.IsNullOrWhiteSpace(parameters.SessionId)
             || parameters.ExpectedSelectionVersion < 0
-            || hasSelection == hasPatches
-            || (hasSelection && parameters.Selection!.SelectionVersion <= parameters.ExpectedSelectionVersion))
+            || parameters.Selection is null
+            || parameters.Selection.SelectionVersion <= parameters.ExpectedSelectionVersion)
         {
             return Error(request.Id, -32602, "The session.selection.update parameters are invalid.");
         }
@@ -2276,231 +1933,22 @@ public sealed class RuntimeServer : IAsyncDisposable
                 "The session has no persisted selection to patch.");
         }
 
-        NextTurnSelection selection;
-        if (hasSelection)
+        var selection = parameters.Selection;
+        if (selection.Mode != snapshot.Mode)
         {
-            selection = parameters.Selection!;
-            if (selection.Mode != snapshot.Mode)
-            {
-                return Error(request.Id, -32602, "A Session's mode cannot be changed.");
-            }
-
-            if (_hostProviderRegistry is not null)
-            {
-                var hostError = HostModeSelectionValidator.ValidateForRun(
-                    selection,
-                    snapshot.Mode,
-                    _hostProviderRegistry);
-                if (hostError is not null)
-                {
-                    return Error(request.Id, -32602, hostError);
-                }
-            }
+            return Error(request.Id, -32602, "A Session's mode cannot be changed.");
         }
-        else
+
+        if (_hostProviderRegistry is not null)
         {
-            if (snapshot.Mode != RuntimeMode.Meeting)
+            var hostError = HostModeSelectionValidator.ValidateForRun(
+                selection,
+                snapshot.Mode,
+                _hostProviderRegistry);
+            if (hostError is not null)
             {
-                return Error(
-                    request.Id,
-                    -32602,
-                    "Meeting patches are only supported for Meeting sessions.");
+                return Error(request.Id, -32602, hostError);
             }
-
-            var diagnostics = new List<string>();
-            var baseSelection = DeserializePersistedSelection(snapshot, diagnostics);
-            if (baseSelection is null || baseSelection.ModeOptions is not MeetingModeOptions baseMeeting)
-            {
-                return Error(
-                    request.Id,
-                    -32602,
-                    "The session has no valid Meeting selection to patch.");
-            }
-
-            var patchedParticipants = new List<MeetingParticipant>(baseMeeting.Participants);
-            foreach (var patch in parameters.MeetingPatches!)
-            {
-                switch (patch)
-                {
-                    case AddParticipantPatch add:
-                        if (patchedParticipants.Any(
-                                p => string.Equals(p.ParticipantId, add.Participant.ParticipantId, StringComparison.Ordinal)))
-                        {
-                            return Error(
-                                request.Id,
-                                -32602,
-                                $"Participant '{add.Participant.ParticipantId}' already exists.");
-                        }
-                        patchedParticipants.Add(add.Participant);
-                        break;
-
-                    case RemoveParticipantPatch remove:
-                        var removeIdx = patchedParticipants.FindIndex(
-                            p => string.Equals(p.ParticipantId, remove.ParticipantId, StringComparison.Ordinal));
-                        if (removeIdx < 0)
-                        {
-                            return Error(
-                                request.Id,
-                                -32602,
-                                $"Participant '{remove.ParticipantId}' was not found.");
-                        }
-                        patchedParticipants.RemoveAt(removeIdx);
-                        break;
-
-                    case UpdateParticipantPatch update:
-                        var updateIdx = patchedParticipants.FindIndex(
-                            p => string.Equals(p.ParticipantId, update.Participant.ParticipantId, StringComparison.Ordinal));
-                        if (updateIdx < 0)
-                        {
-                            return Error(
-                                request.Id,
-                                -32602,
-                                $"Participant '{update.Participant.ParticipantId}' was not found.");
-                        }
-                        patchedParticipants[updateIdx] = update.Participant;
-                        break;
-
-                    case UpdateParticipantStatusPatch updateStatus:
-                        var statusIdx = patchedParticipants.FindIndex(
-                            p => string.Equals(p.ParticipantId, updateStatus.ParticipantId, StringComparison.Ordinal));
-                        if (statusIdx < 0)
-                        {
-                            return Error(
-                                request.Id,
-                                -32602,
-                                $"Participant '{updateStatus.ParticipantId}' was not found.");
-                        }
-                        if (updateStatus.Status != ParticipantStatus.Active
-                            && updateStatus.Status != ParticipantStatus.Standby)
-                        {
-                            return Error(
-                                request.Id,
-                                -32602,
-                                "Participant status can only be Active or Standby.");
-                        }
-                        patchedParticipants[statusIdx] = patchedParticipants[statusIdx] with
-                        {
-                            Status = updateStatus.Status
-                        };
-                        break;
-
-                    case ReorderParticipantsPatch reorder:
-                        if (reorder.Orders.Length == 0)
-                        {
-                            return Error(
-                                request.Id,
-                                -32602,
-                                "Reorder requires at least one entry.");
-                        }
-                        if (reorder.Orders.GroupBy(o => o.ParticipantId, StringComparer.Ordinal)
-                                .Any(g => g.Count() > 1))
-                        {
-                            return Error(
-                                request.Id,
-                                -32602,
-                                "Reorder entries must not contain duplicate participant IDs.");
-                        }
-                        if (reorder.Orders.GroupBy(o => o.JoinOrder).Any(g => g.Count() > 1))
-                        {
-                            return Error(
-                                request.Id,
-                                -32602,
-                                "Reorder entries must not contain duplicate join orders.");
-                        }
-                        if (reorder.Orders.Any(o => o.JoinOrder < 0))
-                        {
-                            return Error(
-                                request.Id,
-                                -32602,
-                                "Join order must not be negative.");
-                        }
-                        foreach (var order in reorder.Orders)
-                        {
-                            if (!patchedParticipants.Any(
-                                    p => string.Equals(p.ParticipantId, order.ParticipantId, StringComparison.Ordinal)))
-                            {
-                                return Error(
-                                    request.Id,
-                                    -32602,
-                                    $"Participant '{order.ParticipantId}' was not found.");
-                            }
-                        }
-                        var reorderMap = reorder.Orders.ToDictionary(
-                            o => o.ParticipantId,
-                            o => o.JoinOrder,
-                            StringComparer.Ordinal);
-                        for (var i = 0; i < patchedParticipants.Count; i++)
-                        {
-                            if (reorderMap.TryGetValue(patchedParticipants[i].ParticipantId, out var newOrder))
-                            {
-                                patchedParticipants[i] = patchedParticipants[i] with { JoinOrder = newOrder };
-                            }
-                        }
-                        break;
-                }
-            }
-
-            if (patchedParticipants.Any(p => p.Status == ParticipantStatus.Removed))
-            {
-                return Error(
-                    request.Id,
-                    -32602,
-                    "Participants with Removed status cannot be persisted; use the remove patch instead.");
-            }
-
-            var activeCount = patchedParticipants.Count(
-                p => p.Status == ParticipantStatus.Active);
-            if (patchedParticipants.Count < MeetingParticipant.MinCount
-                || patchedParticipants.Count > MeetingParticipant.HardMaxCount)
-            {
-                return Error(
-                    request.Id,
-                    -32602,
-                    $"A Meeting requires {MeetingParticipant.MinCount} to {MeetingParticipant.HardMaxCount} participants.");
-            }
-
-            if (activeCount < 1)
-            {
-                return Error(
-                    request.Id,
-                    -32602,
-                    "At least one participant must be Active.");
-            }
-
-            if (patchedParticipants.Any(p => string.IsNullOrWhiteSpace(p.Agent.AgentId)))
-            {
-                return Error(
-                    request.Id,
-                    -32602,
-                    "A participant AgentId must not be empty.");
-            }
-
-            if (patchedParticipants.GroupBy(p => p.ParticipantId, StringComparer.Ordinal)
-                    .Any(g => g.Count() > 1))
-            {
-                return Error(
-                    request.Id,
-                    -32602,
-                    "Participant IDs must be unique.");
-            }
-
-            if (patchedParticipants.GroupBy(p => p.JoinOrder).Any(g => g.Count() > 1))
-            {
-                return Error(
-                    request.Id,
-                    -32602,
-                    "Join orders must be unique.");
-            }
-
-            var newParticipants = patchedParticipants
-                .OrderBy(p => p.JoinOrder)
-                .ToArray();
-            var newMeeting = baseMeeting with { Participants = newParticipants };
-            selection = baseSelection with
-            {
-                SelectionVersion = parameters.ExpectedSelectionVersion + 1,
-                ModeOptions = newMeeting
-            };
         }
 
         var persistedSelection = RuntimeRunMetadata.RemovePromptContent(selection);
@@ -2509,43 +1957,13 @@ public sealed class RuntimeServer : IAsyncDisposable
             RuntimeJsonContext.Default.NextTurnSelection);
         var agentSnapshots = RuntimeRunMetadata.CreateAgentSnapshots(selection);
 
-        bool saved;
-        if (selection.ModeOptions is MeetingModeOptions meetingOptions)
-        {
-            var meetingInputs = meetingOptions.Participants
-                .Select(p => new MeetingParticipantInput(
-                    p.ParticipantId,
-                    p.Agent.AgentId,
-                    JsonSerializer.Serialize(p.Agent, RuntimeJsonContext.Default.AgentRef),
-                    p.DisplayName,
-                    p.JoinOrder,
-                    p.Status == ParticipantStatus.Removed ? "Removed" : p.Status.ToString().ToLowerInvariant()))
-                .ToArray();
-            var policyJson = JsonSerializer.Serialize(
-                meetingOptions.EffectivePolicy,
-                RuntimeJsonContext.Default.MeetingPolicy);
-            var policyHash = RuntimeRunMetadata.ComputePromptHash(policyJson);
-            saved = await repository.TrySaveSessionSelectionWithMeetingAsync(
-                parameters.SessionId,
-                parameters.ExpectedSelectionVersion,
-                selection.SelectionVersion,
-                newSelectionJson,
-                agentSnapshots,
-                meetingInputs,
-                policyJson,
-                policyHash,
-                ct).ConfigureAwait(false);
-        }
-        else
-        {
-            saved = await repository.TrySaveSessionSelectionAsync(
-                parameters.SessionId,
-                parameters.ExpectedSelectionVersion,
-                selection.SelectionVersion,
-                newSelectionJson,
-                agentSnapshots,
-                ct).ConfigureAwait(false);
-        }
+        var saved = await repository.TrySaveSessionSelectionAsync(
+            parameters.SessionId,
+            parameters.ExpectedSelectionVersion,
+            selection.SelectionVersion,
+            newSelectionJson,
+            agentSnapshots,
+            ct).ConfigureAwait(false);
 
         if (!saved)
         {
@@ -2566,7 +1984,6 @@ public sealed class RuntimeServer : IAsyncDisposable
         JsonRpcRequest request,
         AuthenticatedSession session,
         SqliteSessionRepository repository,
-        SqliteMeetingRepository meetingRepository,
         SqliteEventOutbox outbox,
         CancellationToken ct)
     {
@@ -2645,15 +2062,6 @@ public sealed class RuntimeServer : IAsyncDisposable
             _sessionSelections[snapshot.SessionId] = RehydrateSelection(
                 persistedSelection,
                 definitions);
-            if (snapshot.Mode == RuntimeMode.Meeting)
-            {
-                await ResumeRehydratedMeetingInvocationAsync(
-                    snapshot.SessionId,
-                    session,
-                    meetingRepository,
-                    outbox,
-                    ct).ConfigureAwait(false);
-            }
         }
 
         var result = new SessionRehydrateResult(snapshot.SessionId, status, [.. mismatched]);
@@ -2693,33 +2101,6 @@ public sealed class RuntimeServer : IAsyncDisposable
                 {
                     return Error(request.Id, -32602, "Expert mode requires ExpertModeOptions.");
                 }
-                break;
-            case RuntimeMode.Meeting:
-                if (runRequest.Selection.ModeOptions is not MeetingModeOptions)
-                {
-                    return Error(request.Id, -32602, "Meeting mode requires MeetingModeOptions.");
-                }
-                break;
-            case RuntimeMode.Work:
-                if (runRequest.Selection.ModeOptions is not WorkModeOptions workOptions)
-                {
-                    return Error(request.Id, -32602, "Work mode requires WorkModeOptions.");
-                }
-
-                if (workOptions.AvailableAgents is null || workOptions.AvailableAgents.Length == 0)
-                {
-                    return Error(request.Id, -32602, "Work mode requires at least one available child Agent.");
-                }
-
-                try
-                {
-                    workOptions.EffectiveWorkflowPolicy.Validate();
-                }
-                catch (ArgumentException ex)
-                {
-                    return Error(request.Id, -32602, ex.Message);
-                }
-
                 break;
             default:
                 return Error(request.Id, -32602, $"Run mode '{runRequest.Mode}' is not supported.");
@@ -2840,20 +2221,6 @@ public sealed class RuntimeServer : IAsyncDisposable
                     {
                         return Error(request.Id, -32006, promptValidation);
                     }
-                }
-                break;
-
-            case RuntimeMode.Meeting:
-                if (effectiveSelection.ModeOptions is not MeetingModeOptions)
-                {
-                    return Error(request.Id, -32602, "run.existing_session Meeting mode requires MeetingModeOptions.");
-                }
-                break;
-
-            case RuntimeMode.Work:
-                if (effectiveSelection.ModeOptions is not WorkModeOptions)
-                {
-                    return Error(request.Id, -32602, "run.existing_session Work mode requires WorkModeOptions.");
                 }
                 break;
 
@@ -2999,9 +2366,6 @@ public sealed class RuntimeServer : IAsyncDisposable
             : runRequest.Selection.ModeOptions switch
             {
                 ExpertModeOptions expert => expert.Agent.ProviderId
-                    ?? runRequest.Selection.DefaultSelection.ProviderId,
-                MeetingModeOptions => runRequest.Selection.DefaultSelection.ProviderId,
-                WorkModeOptions work => work.GeneralManager.ProviderId
                     ?? runRequest.Selection.DefaultSelection.ProviderId,
                 _ => throw new NotSupportedException(
                     $"Mode '{runRequest.Selection.ModeOptions.GetType().Name}' is not supported.")
@@ -3202,12 +2566,7 @@ public sealed class RuntimeServer : IAsyncDisposable
         AuthenticatedSession session,
         ActiveRun activeRun,
         ToolCatalogSnapshot toolCatalogSnapshot,
-        IDuplexRpcPeer? controlPeer,
-        long meetingStartRunSequence = 1,
-        MeetingHitlResponse? resumedMeetingHitlResponse = null,
-        MeetingInvocationRecord? resumedMeetingInvocation = null,
-        ConversationRecordV1? resumedCanonicalMessage = null,
-        RuntimeError? resumedMeetingFailure = null)
+        IDuplexRpcPeer? controlPeer)
     {
         var ct = activeRun.CancellationToken;
         try
@@ -3216,20 +2575,6 @@ public sealed class RuntimeServer : IAsyncDisposable
                 .ConfigureAwait(false);
             var runRepository = new SqliteSessionRepository(dispatchConnection);
             using var dispatchOutbox = CreateEventOutbox(dispatchConnection);
-            var meetingRepository = new SqliteMeetingRepository(dispatchConnection);
-            var isExpertRun = runRequest.Selection.ModeOptions is ExpertModeOptions;
-            Func<MeetingHitlRequest, CancellationToken, Task<MeetingHitlResponse>>? meetingHitlHandler =
-                isExpertRun || resumedMeetingHitlResponse is not null
-                    ? null
-                    : (request, hitlCt) => RequestMeetingHitlAsync(
-                        request,
-                        sessionId,
-                        runId,
-                        meetingRepository,
-                        dispatchOutbox,
-                        activeRun,
-                        session,
-                        hitlCt);
             await foreach (var envelope in _executionCore.RunAsync(
                 runId,
                 sessionId,
@@ -3246,12 +2591,6 @@ public sealed class RuntimeServer : IAsyncDisposable
                     refreshCt),
                 () => activeRun.IsTimedOut,
                 providerFactory: providerFactory,
-                meetingHitlHandler: meetingHitlHandler,
-                meetingStartRunSequence: meetingStartRunSequence,
-                resumedMeetingHitlResponse: resumedMeetingHitlResponse,
-                resumedMeetingInvocation: resumedMeetingInvocation,
-                resumedCanonicalMessage: resumedCanonicalMessage,
-                resumedMeetingFailure: resumedMeetingFailure,
                 skillCatalog: session.SkillCatalog,
                 isHostModeSkills: _hostProviderRegistry is not null,
                 ct: ct).ConfigureAwait(false))
@@ -3402,815 +2741,6 @@ public sealed class RuntimeServer : IAsyncDisposable
         }
     }
 
-    private async Task RecoverPersistedMeetingApprovalsAsync(CancellationToken ct)
-    {
-        try
-        {
-            IReadOnlyList<MeetingApprovalRecord> approvals;
-            await using (var connection = await OpenDatabaseConnectionAsync(ct).ConfigureAwait(false))
-            {
-                var meetingRepository = new SqliteMeetingRepository(connection);
-                approvals = await meetingRepository.ListRecoverableApprovalsAsync(ct)
-                    .ConfigureAwait(false);
-            }
-
-            var recoveries = new List<(string ApprovalRequestId, DateTimeOffset DueAt)>();
-
-            foreach (var approval in approvals)
-            {
-                if (string.Equals(approval.Status, "Pending", StringComparison.Ordinal))
-                {
-                    var request = DeserializeMeetingHitlRequest(approval.ApprovalJson);
-                    if (request?.ExpiresAt is { } expiresAt
-                        && string.Equals(
-                            request.ApprovalRequestId,
-                            approval.ApprovalRequestId,
-                            StringComparison.Ordinal))
-                    {
-                        recoveries.Add((approval.ApprovalRequestId, expiresAt));
-                    }
-
-                    continue;
-                }
-
-                var response = DeserializeMeetingHitlResponse(approval.ApprovalJson);
-                if (IsMeetingHitlTimeoutResponse(response, approval.ApprovalRequestId))
-                {
-                    recoveries.Add((approval.ApprovalRequestId, DateTimeOffset.MinValue));
-                }
-            }
-
-            foreach (var recovery in recoveries.OrderBy(static item => item.DueAt))
-            {
-                var delay = recovery.DueAt - _timeProvider.GetUtcNow();
-                if (delay > TimeSpan.Zero)
-                {
-                    await Task.Delay(delay, _timeProvider, ct).ConfigureAwait(false);
-                }
-
-                await FinalizeRecoveredMeetingApprovalTimeoutAsync(
-                    recovery.ApprovalRequestId,
-                    ct).ConfigureAwait(false);
-            }
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            return;
-        }
-    }
-
-    private async Task FinalizeRecoveredMeetingApprovalTimeoutAsync(
-        string approvalRequestId,
-        CancellationToken ct)
-    {
-        if (_activeRuns.Values.Any(run => run.HasMeetingHitlWaiter(approvalRequestId)))
-        {
-            return;
-        }
-
-        await _meetingResumeGate.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
-            if (_activeRuns.Values.Any(run => run.HasMeetingHitlWaiter(approvalRequestId)))
-            {
-                return;
-            }
-
-            await using var connection = await OpenDatabaseConnectionAsync(ct)
-                .ConfigureAwait(false);
-            var meetingRepository = new SqliteMeetingRepository(connection);
-            var approval = await meetingRepository.FindApprovalByRequestIdAsync(
-                    approvalRequestId,
-                    ct)
-                .ConfigureAwait(false);
-            if (approval is null)
-            {
-                return;
-            }
-
-            MeetingHitlResponse timeoutResponse;
-            string timeoutJson;
-            if (string.Equals(approval.Status, "Pending", StringComparison.Ordinal))
-            {
-                var pendingRequest = DeserializeMeetingHitlRequest(approval.ApprovalJson);
-                if (pendingRequest?.ExpiresAt is not { } expiresAt
-                    || expiresAt > _timeProvider.GetUtcNow()
-                    || !string.Equals(
-                        pendingRequest.ApprovalRequestId,
-                        approvalRequestId,
-                        StringComparison.Ordinal))
-                {
-                    return;
-                }
-
-                timeoutResponse = new MeetingHitlResponse(
-                    approvalRequestId,
-                    MeetingHitlAction.Cancel,
-                    Supplement: null,
-                    Reason: MeetingHitlTimeoutReason,
-                    RespondedAt: _timeProvider.GetUtcNow());
-                timeoutJson = JsonSerializer.Serialize(
-                    timeoutResponse,
-                    RuntimeJsonContext.Default.MeetingHitlResponse);
-                await meetingRepository.ResolvePendingApprovalAsync(
-                    approval.SessionId,
-                    approvalRequestId,
-                    timeoutJson,
-                    "Decided",
-                    ct).ConfigureAwait(false);
-            }
-            else
-            {
-                timeoutResponse = DeserializeMeetingHitlResponse(approval.ApprovalJson)
-                    ?? throw new InvalidDataException(
-                        $"Meeting approval '{approvalRequestId}' has an invalid persisted response.");
-                if (!IsMeetingHitlTimeoutResponse(timeoutResponse, approvalRequestId))
-                {
-                    return;
-                }
-
-                timeoutJson = approval.ApprovalJson
-                    ?? throw new InvalidDataException(
-                        $"Meeting approval '{approvalRequestId}' has no persisted response.");
-            }
-
-            using var outbox = new SqliteEventOutbox(connection);
-            if (!await outbox.ContainsAsync(
-                    approval.RunId,
-                    MessageTypes.MeetingHitlResponse,
-                    timeoutJson,
-                    ct).ConfigureAwait(false))
-            {
-                var responseRunSequence = await outbox.GetNextRunSequenceAsync(
-                    approval.RunId,
-                    ct).ConfigureAwait(false);
-                await outbox.AppendAsync(
-                    approval.RunId,
-                    responseRunSequence,
-                    MessageTypes.MeetingHitlResponse,
-                    timeoutJson,
-                    ct).ConfigureAwait(false);
-            }
-
-            var cancelledJson = JsonSerializer.Serialize(
-                new RunCancelledEvent(approval.RunId, approval.SessionId),
-                RuntimeJsonContext.Default.RunCancelledEvent);
-            if (!await outbox.ContainsAsync(
-                    approval.RunId,
-                    MessageTypes.RunCancelled,
-                    cancelledJson,
-                    ct).ConfigureAwait(false))
-            {
-                var cancelledRunSequence = await outbox.GetNextRunSequenceAsync(
-                    approval.RunId,
-                    ct).ConfigureAwait(false);
-                await outbox.AppendAsync(
-                    approval.RunId,
-                    cancelledRunSequence,
-                    MessageTypes.RunCancelled,
-                    cancelledJson,
-                    ct).ConfigureAwait(false);
-            }
-
-            var runRepository = new SqliteSessionRepository(connection);
-            var runStatus = await runRepository.GetRunStatusAsync(approval.RunId, ct)
-                .ConfigureAwait(false);
-            if (runStatus == RunStatus.WaitingForApproval)
-            {
-                await runRepository.TransitionRunToTerminalAsync(
-                    approval.RunId,
-                    RunStatus.WaitingForApproval,
-                    RunStatus.Cancelled,
-                    MeetingHitlTimeoutReason,
-                    ct).ConfigureAwait(false);
-            }
-            else if (runStatus != RunStatus.Cancelled)
-            {
-                throw new InvalidOperationException(
-                    $"Run '{approval.RunId}' is in state '{runStatus}' and cannot finalize a recovered HITL timeout.");
-            }
-
-            var meetingCancelled = await meetingRepository.TryTransitionMeetingStatusAsync(
-                approval.SessionId,
-                "WaitingForApproval",
-                "Cancelled",
-                ct).ConfigureAwait(false);
-            if (!meetingCancelled)
-            {
-                var snapshot = await meetingRepository.GetMeetingSnapshotAsync(
-                        approval.SessionId,
-                        ct)
-                    .ConfigureAwait(false);
-                if (!string.Equals(snapshot?.Session.Status, "Cancelled", StringComparison.Ordinal))
-                {
-                    throw new InvalidOperationException(
-                        $"Meeting session '{approval.SessionId}' could not finalize a recovered HITL timeout.");
-                }
-            }
-
-            foreach (var authenticatedSession in _sessions.Values)
-            {
-                await DispatchPendingEventsAsync(authenticatedSession, outbox, ct)
-                    .ConfigureAwait(false);
-            }
-        }
-        finally
-        {
-            _meetingResumeGate.Release();
-        }
-    }
-
-    private static MeetingHitlRequest? DeserializeMeetingHitlRequest(string? json)
-    {
-        if (string.IsNullOrWhiteSpace(json))
-        {
-            return null;
-        }
-
-        try
-        {
-            return JsonSerializer.Deserialize(
-                json,
-                RuntimeJsonContext.Default.MeetingHitlRequest);
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-    }
-
-    private static MeetingHitlResponse? DeserializeMeetingHitlResponse(string? json)
-    {
-        if (string.IsNullOrWhiteSpace(json))
-        {
-            return null;
-        }
-
-        try
-        {
-            return JsonSerializer.Deserialize(
-                json,
-                RuntimeJsonContext.Default.MeetingHitlResponse);
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-    }
-
-    private static bool IsMeetingHitlTimeoutResponse(
-        MeetingHitlResponse? response,
-        string approvalRequestId) =>
-        response is
-        {
-            Action: MeetingHitlAction.Cancel,
-            Reason: MeetingHitlTimeoutReason
-        }
-        && string.Equals(
-            response.ApprovalRequestId,
-            approvalRequestId,
-            StringComparison.Ordinal);
-
-    private async Task<MeetingHitlResponse> RequestMeetingHitlAsync(
-        MeetingHitlRequest request,
-        string sessionId,
-        string runId,
-        SqliteMeetingRepository meetingRepository,
-        SqliteEventOutbox outbox,
-        ActiveRun activeRun,
-        AuthenticatedSession session,
-        CancellationToken ct)
-    {
-        var json = JsonSerializer.Serialize(
-            request,
-            RuntimeJsonContext.Default.MeetingHitlRequest);
-
-        await meetingRepository.SavePendingApprovalAsync(
-            sessionId,
-            request.ApprovalRequestId,
-            json,
-            "Pending",
-            ct).ConfigureAwait(false);
-
-        await meetingRepository.TryTransitionMeetingStatusAsync(
-            sessionId,
-            "Running",
-            "WaitingForApproval",
-            ct).ConfigureAwait(false);
-
-        await using var runConnection = await OpenDatabaseConnectionAsync(ct)
-            .ConfigureAwait(false);
-        var runRepository = new SqliteSessionRepository(runConnection);
-        var runStatus = await runRepository.GetRunStatusAsync(runId, ct).ConfigureAwait(false);
-        if (runStatus == RunStatus.Running)
-        {
-            await runRepository.TransitionRunStatusAsync(
-                runId,
-                RunStatus.Running,
-                RunStatus.WaitingForApproval,
-                ct).ConfigureAwait(false);
-        }
-        else if (runStatus != RunStatus.WaitingForApproval)
-        {
-            throw new InvalidOperationException(
-                $"Run '{runId}' is in state '{runStatus}' and cannot wait for HITL approval.");
-        }
-
-        var waitTask = activeRun.WaitForMeetingHitlAsync(request, ct);
-
-        var runSequence = await outbox.GetNextRunSequenceAsync(runId, ct)
-            .ConfigureAwait(false);
-        await outbox.AppendAsync(
-            runId,
-            runSequence,
-            MessageTypes.MeetingHitlRequest,
-            json,
-            ct).ConfigureAwait(false);
-        await DispatchPendingEventsAsync(session, outbox, ct).ConfigureAwait(false);
-
-        try
-        {
-            var response = await waitTask.ConfigureAwait(false);
-            await meetingRepository.TryTransitionMeetingStatusAsync(
-                sessionId,
-                "WaitingForApproval",
-                "Running",
-                ct).ConfigureAwait(false);
-            await runRepository.TransitionRunStatusAsync(
-                runId,
-                RunStatus.WaitingForApproval,
-                RunStatus.Running,
-                ct).ConfigureAwait(false);
-            return response;
-        }
-        catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            var persistedApproval = await meetingRepository.FindApprovalByRequestIdAsync(
-                request.ApprovalRequestId,
-                CancellationToken.None).ConfigureAwait(false);
-            if (string.Equals(persistedApproval?.Status, "Pending", StringComparison.Ordinal))
-            {
-                var cancelledResponse = new MeetingHitlResponse(
-                    request.ApprovalRequestId,
-                    MeetingHitlAction.Cancel,
-                    Supplement: null,
-                    Reason: "Run cancelled while waiting for HITL approval.",
-                    RespondedAt: DateTimeOffset.UtcNow);
-                var cancelledJson = JsonSerializer.Serialize(
-                    cancelledResponse,
-                    RuntimeJsonContext.Default.MeetingHitlResponse);
-                await meetingRepository.ResolvePendingApprovalAsync(
-                    sessionId,
-                    request.ApprovalRequestId,
-                    cancelledJson,
-                    "Decided",
-                    CancellationToken.None).ConfigureAwait(false);
-                var responseRunSequence = await outbox.GetNextRunSequenceAsync(
-                    runId,
-                    CancellationToken.None).ConfigureAwait(false);
-                await outbox.AppendAsync(
-                    runId,
-                    responseRunSequence,
-                    MessageTypes.MeetingHitlResponse,
-                    cancelledJson,
-                    CancellationToken.None).ConfigureAwait(false);
-            }
-
-            throw;
-        }
-        catch (TimeoutException)
-        {
-            var timeoutResponse = new MeetingHitlResponse(
-                request.ApprovalRequestId,
-                MeetingHitlAction.Cancel,
-                Supplement: null,
-                Reason: MeetingHitlTimeoutReason,
-                RespondedAt: DateTimeOffset.UtcNow);
-            var timeoutJson = JsonSerializer.Serialize(
-                timeoutResponse,
-                RuntimeJsonContext.Default.MeetingHitlResponse);
-            await meetingRepository.ResolvePendingApprovalAsync(
-                sessionId,
-                request.ApprovalRequestId,
-                timeoutJson,
-                "Decided",
-                ct).ConfigureAwait(false);
-            var responseRunSequence = await outbox.GetNextRunSequenceAsync(runId, ct)
-                .ConfigureAwait(false);
-            await outbox.AppendAsync(
-                runId,
-                responseRunSequence,
-                MessageTypes.MeetingHitlResponse,
-                timeoutJson,
-                ct).ConfigureAwait(false);
-            await DispatchPendingEventsAsync(session, outbox, ct).ConfigureAwait(false);
-            await meetingRepository.TryTransitionMeetingStatusAsync(
-                sessionId,
-                "WaitingForApproval",
-                "Running",
-                ct).ConfigureAwait(false);
-            await runRepository.TransitionRunStatusAsync(
-                runId,
-                RunStatus.WaitingForApproval,
-                RunStatus.Running,
-                ct).ConfigureAwait(false);
-            return timeoutResponse;
-        }
-        finally
-        {
-            if (!waitTask.IsCompletedSuccessfully)
-            {
-                activeRun.CancelMeetingHitlWait();
-            }
-        }
-    }
-
-    private async Task ResumePersistedMeetingHitlAsync(
-        MeetingApprovalRecord approval,
-        MeetingHitlResponse response,
-        AuthenticatedSession session,
-        SqliteMeetingRepository meetingRepository,
-        SqliteEventOutbox outbox,
-        CancellationToken ct)
-    {
-        await _meetingResumeGate.WaitAsync(ct).ConfigureAwait(false);
-        RecoveredMeetingRunStart? start = null;
-        try
-        {
-            if (_activeRuns.ContainsKey(approval.RunId))
-            {
-                return;
-            }
-
-            var current = await meetingRepository.FindApprovalByRequestIdAsync(
-                    approval.ApprovalRequestId,
-                    ct)
-                .ConfigureAwait(false)
-                ?? throw new InvalidOperationException(
-                    $"Meeting approval '{approval.ApprovalRequestId}' no longer exists.");
-            if (string.Equals(current.Status, "Decided", StringComparison.Ordinal))
-            {
-                if (!IsSameMeetingHitlResponse(current.ApprovalJson, response))
-                {
-                    throw new InvalidOperationException(
-                        $"Meeting approval '{approval.ApprovalRequestId}' was decided with a different response.");
-                }
-            }
-            else if (!string.Equals(current.Status, "Pending", StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException(
-                    $"Meeting approval '{approval.ApprovalRequestId}' is in unsupported state '{current.Status}'.");
-            }
-
-            start = await PrepareRecoveredMeetingRunAsync(
-                current.SessionId,
-                current.RunId,
-                session,
-                ct)
-                .ConfigureAwait(false);
-
-            if (string.Equals(current.Status, "Pending", StringComparison.Ordinal))
-            {
-                var responseJson = JsonSerializer.Serialize(
-                    response,
-                    RuntimeJsonContext.Default.MeetingHitlResponse);
-                await meetingRepository.ResolvePendingApprovalAsync(
-                    current.SessionId,
-                    current.ApprovalRequestId,
-                    responseJson,
-                    "Decided",
-                    ct).ConfigureAwait(false);
-                var responseRunSequence = await outbox.GetNextRunSequenceAsync(
-                    current.RunId,
-                    ct).ConfigureAwait(false);
-                await outbox.AppendAsync(
-                    current.RunId,
-                    responseRunSequence,
-                    MessageTypes.MeetingHitlResponse,
-                    responseJson,
-                    ct).ConfigureAwait(false);
-                await DispatchPendingEventsAsync(session, outbox, ct).ConfigureAwait(false);
-            }
-
-            var executionRunSequence = await outbox.GetNextRunSequenceAsync(current.RunId, ct)
-                .ConfigureAwait(false);
-            LaunchRecoveredMeetingRun(start, response, session, executionRunSequence);
-            start = null;
-        }
-        finally
-        {
-            start?.Lease.Dispose();
-            _meetingResumeGate.Release();
-        }
-    }
-
-    private async Task ResumeRehydratedMeetingInvocationAsync(
-        string sessionId,
-        AuthenticatedSession session,
-        SqliteMeetingRepository meetingRepository,
-        SqliteEventOutbox outbox,
-        CancellationToken ct)
-    {
-        await _meetingResumeGate.WaitAsync(ct).ConfigureAwait(false);
-        RecoveredMeetingRunStart? start = null;
-        try
-        {
-            var meeting = await meetingRepository.GetMeetingSnapshotAsync(sessionId, ct)
-                .ConfigureAwait(false);
-            if (meeting is null
-                || !string.Equals(meeting.Session.Status, "Running", StringComparison.Ordinal))
-            {
-                return;
-            }
-
-            var recoverable = await meetingRepository.QueryRecoverableInvocationsAsync(sessionId, ct)
-                .ConfigureAwait(false);
-            if (recoverable.Count == 0)
-            {
-                return;
-            }
-
-            if (recoverable.Count != 1)
-            {
-                throw new InvalidOperationException(
-                    $"Meeting session '{sessionId}' has {recoverable.Count} recoverable Invocations; expected exactly one.");
-            }
-
-            var invocation = recoverable[0];
-            if (_activeRuns.ContainsKey(invocation.RunId))
-            {
-                return;
-            }
-
-            var canonicalMessages = await new ConversationStore(_dataDirectory)
-                .FindMessagesByInvocationIdAsync(
-                    sessionId,
-                    invocation.InvocationId,
-                    ct).ConfigureAwait(false);
-            var canonicalMessage = ValidateRecoverableCanonicalMessage(
-                invocation,
-                canonicalMessages);
-
-            start = await PrepareRecoveredMeetingRunAsync(
-                sessionId,
-                invocation.RunId,
-                session,
-                ct).ConfigureAwait(false);
-            var meetingOptions = (MeetingModeOptions)start.Request.Selection.ModeOptions;
-            var retryExhausted = canonicalMessage is null
-                && string.Equals(invocation.Status, "Interrupted", StringComparison.Ordinal)
-                && invocation.RetryCount >= meetingOptions.EffectivePolicy.MaxRetriesPerInvocation;
-            var resumedFailure = retryExhausted
-                ? new RuntimeError(
-                    "meeting_recovery_retry_exhausted",
-                    "orchestration",
-                    $"Invocation '{invocation.InvocationId}' exhausted its recovery retry limit of "
-                    + $"{meetingOptions.EffectivePolicy.MaxRetriesPerInvocation}.",
-                    IsRetryable: false,
-                    ProviderDetails: null,
-                    Guid.NewGuid().ToString("N"))
-                : null;
-            var resumed = await meetingRepository.ResumeRecoverableInvocationAsync(
-                invocation.InvocationId,
-                meetingOptions.EffectivePolicy.MaxRetriesPerInvocation,
-                resumeWithoutProvider: canonicalMessage is not null || resumedFailure is not null,
-                ct).ConfigureAwait(false);
-            start = start with
-            {
-                ResumedInvocation = resumed,
-                ResumedCanonicalMessage = canonicalMessage,
-                ResumedFailure = resumedFailure
-            };
-
-            var executionRunSequence = await outbox.GetNextRunSequenceAsync(
-                invocation.RunId,
-                ct).ConfigureAwait(false);
-            LaunchRecoveredMeetingRun(
-                start,
-                response: null,
-                session,
-                executionRunSequence);
-            start = null;
-        }
-        finally
-        {
-            start?.Lease.Dispose();
-            _meetingResumeGate.Release();
-        }
-    }
-
-    private async Task<RecoveredMeetingRunStart> PrepareRecoveredMeetingRunAsync(
-        string sessionId,
-        string runId,
-        AuthenticatedSession session,
-        CancellationToken ct)
-    {
-        if (!_sessionSelections.TryGetValue(sessionId, out var selection))
-        {
-            throw new InvalidOperationException(
-                $"Session '{sessionId}' requires session.rehydrate before its meeting Run can resume.");
-        }
-
-        if (selection.Mode != RuntimeMode.Meeting
-            || selection.ModeOptions is not MeetingModeOptions)
-        {
-            throw new InvalidOperationException(
-                $"Session '{sessionId}' does not contain a rehydrated Meeting Selection.");
-        }
-
-        var initialInput = await LoadMeetingInitialInputAsync(sessionId, ct)
-            .ConfigureAwait(false);
-        var primaryProviderId = selection.DefaultSelection.ProviderId;
-        var provider = ResolveProviderAdapter(selection, primaryProviderId);
-        var providerCache = new ConcurrentDictionary<string, Lazy<IRuntimeProviderAdapter>>(
-            StringComparer.Ordinal)
-        {
-            [primaryProviderId] = new(
-                () => provider,
-                LazyThreadSafetyMode.ExecutionAndPublication)
-        };
-
-        IRuntimeProviderAdapter ResolveRunProvider(string providerId)
-        {
-            return providerCache.GetOrAdd(
-                providerId,
-                key => new Lazy<IRuntimeProviderAdapter>(
-                    () => ResolveProviderAdapter(selection, key),
-                    LazyThreadSafetyMode.ExecutionAndPublication)).Value;
-        }
-
-        var lease = _runRegistry.TryAcquire(provider.ProviderId, out var capacityResult)
-            ?? throw new InvalidOperationException(
-                capacityResult is RunCapacityResult.ProviderCapacityReached
-                    ? $"The Provider '{provider.ProviderId}' has reached its Run capacity."
-                    : "The Runtime has reached its Run capacity.");
-        if (!lease.TryBindSession(sessionId))
-        {
-            lease.Dispose();
-            throw new InvalidOperationException(
-                $"Session '{sessionId}' has reached its Run capacity.");
-        }
-
-        var request = new NewSessionRunRequest(
-            $"meeting-recovery:{sessionId}",
-            $"meeting-recovery:{runId}",
-            RuntimeMode.Meeting,
-            selection,
-            initialInput);
-        return new RecoveredMeetingRunStart(
-            sessionId,
-            runId,
-            request,
-            provider,
-            ResolveRunProvider,
-            lease,
-            ResumedInvocation: null);
-    }
-
-    private void LaunchRecoveredMeetingRun(
-        RecoveredMeetingRunStart start,
-        MeetingHitlResponse? response,
-        AuthenticatedSession session,
-        long startRunSequence)
-    {
-        var activeRun = new ActiveRun(
-            start.Lease,
-            session.HostInstanceId,
-            start.SessionId,
-            _timeProvider.GetUtcNow(),
-            start.Provider);
-        if (!_activeRuns.TryAdd(start.RunId, activeRun))
-        {
-            activeRun.Dispose();
-            return;
-        }
-
-        try
-        {
-            var toolCatalogSnapshot = session.ToolCatalogStore.CaptureSnapshot();
-            var controlPeer = session.SupportsReverseRpc
-                ? new ReconnectableDuplexRpcPeer(
-                    () => ResolveReverseRpcPeer(session.HostInstanceId))
-                : null;
-            var executionTask = Task.Run(
-                () => ExecuteRunAsync(
-                    start.RunId,
-                    start.SessionId,
-                    start.Request,
-                    start.Provider,
-                    start.ProviderFactory,
-                    session,
-                    activeRun,
-                    toolCatalogSnapshot,
-                    controlPeer,
-                    startRunSequence,
-                    response,
-                    start.ResumedInvocation,
-                    start.ResumedCanonicalMessage,
-                    start.ResumedFailure),
-                CancellationToken.None);
-            activeRun.Attach(executionTask);
-        }
-        catch
-        {
-            _activeRuns.TryRemove(start.RunId, out _);
-            activeRun.Dispose();
-            throw;
-        }
-    }
-
-    private async Task<ContentBlock[]> LoadMeetingInitialInputAsync(
-        string sessionId,
-        CancellationToken ct)
-    {
-        var history = await new ConversationStore(_dataDirectory)
-            .ReadAllAsync(sessionId, ct).ConfigureAwait(false);
-        var initial = history
-            .Where(static record =>
-                string.Equals(record.Role, "user", StringComparison.Ordinal)
-                && string.Equals(record.AgentId, "meeting.user", StringComparison.Ordinal))
-            .OrderBy(static record => record.Sequence)
-            .FirstOrDefault()
-            ?? throw new InvalidOperationException(
-                $"Meeting session '{sessionId}' has no recoverable initial input in canonical history.");
-        return JsonSerializer.Deserialize(
-                initial.Content,
-                RuntimeJsonContext.Default.ContentBlockArray)
-            ?? throw new InvalidOperationException(
-                $"Meeting session '{sessionId}' has invalid initial input in canonical history.");
-    }
-
-    private static ConversationRecordV1? ValidateRecoverableCanonicalMessage(
-        MeetingInvocationRecoveryItem invocation,
-        IReadOnlyList<ConversationRecordV1> messages)
-    {
-        if (messages.Count == 0)
-        {
-            return null;
-        }
-
-        if (messages.Count != 1)
-        {
-            throw new InvalidDataException(
-                $"Invocation '{invocation.InvocationId}' has {messages.Count} canonical messages; expected exactly one.");
-        }
-
-        var message = messages[0];
-        var isParticipant = string.Equals(
-            invocation.Role,
-            "participant",
-            StringComparison.OrdinalIgnoreCase);
-        var isSummarizer = string.Equals(
-            invocation.Role,
-            "summarizer",
-            StringComparison.OrdinalIgnoreCase);
-        if ((!isParticipant && !isSummarizer)
-            || !string.Equals(message.InvocationId, invocation.InvocationId, StringComparison.Ordinal)
-            || !string.Equals(message.AgentId, invocation.AgentId, StringComparison.Ordinal)
-            || !string.Equals(message.Role, "assistant", StringComparison.Ordinal)
-            || (isParticipant && message.SummaryMetadata is not null)
-            || (isSummarizer && message.SummaryMetadata is null))
-        {
-            throw new InvalidDataException(
-                $"Invocation '{invocation.InvocationId}' has an invalid canonical recovery record.");
-        }
-
-        return message;
-    }
-
-    private static bool IsSameMeetingHitlResponse(
-        string? persistedJson,
-        MeetingHitlResponse response)
-    {
-        if (string.IsNullOrWhiteSpace(persistedJson))
-        {
-            return false;
-        }
-
-        try
-        {
-            var stored = JsonSerializer.Deserialize(
-                persistedJson,
-                RuntimeJsonContext.Default.MeetingHitlResponse);
-            return stored is not null
-                && string.Equals(
-                    stored.ApprovalRequestId,
-                    response.ApprovalRequestId,
-                    StringComparison.Ordinal)
-                && stored.Action == response.Action
-                && string.Equals(stored.Supplement, response.Supplement, StringComparison.Ordinal)
-                && string.Equals(stored.Reason, response.Reason, StringComparison.Ordinal);
-        }
-        catch (JsonException)
-        {
-            return false;
-        }
-    }
-
     private Task<TerminalCommitResult> CompleteCancelledRunAsync(
         string runId,
         string sessionId,
@@ -4307,13 +2837,6 @@ public sealed class RuntimeServer : IAsyncDisposable
         {
             await using var repositoryConnection = await OpenDatabaseConnectionAsync(CancellationToken.None)
                 .ConfigureAwait(false);
-            if (pending.InterruptWorkSession)
-            {
-                await new SqliteWorkRepository(repositoryConnection).MarkSessionInterruptedAsync(
-                    pending.SessionId,
-                    "The parent Run was cancelled.",
-                    CancellationToken.None).ConfigureAwait(false);
-            }
 
             await TryTransitionMeetingToTerminalAsync(
                 repositoryConnection,
@@ -4407,21 +2930,8 @@ public sealed class RuntimeServer : IAsyncDisposable
         string sessionId,
         string targetStatus)
     {
-        var meetingRepository = new SqliteMeetingRepository(connection);
-        var snapshot = await meetingRepository.GetMeetingSnapshotAsync(
-            sessionId,
-            CancellationToken.None).ConfigureAwait(false);
-        if (snapshot is null
-            || snapshot.Session.Status is "Completed" or "Failed" or "Cancelled")
-        {
-            return;
-        }
-
-        await meetingRepository.TryTransitionMeetingStatusAsync(
-            sessionId,
-            snapshot.Session.Status,
-            targetStatus,
-            CancellationToken.None).ConfigureAwait(false);
+        // Meeting mode removed - no-op
+        await Task.CompletedTask;
     }
 
     private async Task AppendTerminalEventAsync(
@@ -4854,197 +3364,6 @@ public sealed class RuntimeServer : IAsyncDisposable
         }
     }
 
-    internal static MeetingResumeState? BuildMeetingResumeState(
-        MeetingSnapshot meetingSnapshot,
-        PersistedSessionSnapshot sessionSnapshot,
-        NextTurnSelection? selection,
-        List<string> diagnostics)
-    {
-        var sessionRecord = meetingSnapshot.Session;
-
-        if (!Enum.TryParse<MeetingSessionStatus>(
-                sessionRecord.Status,
-                ignoreCase: true,
-                out var meetingStatus))
-        {
-            diagnostics.Add(
-                $"The meeting session status '{sessionRecord.Status}' is not a recognized value.");
-            return null;
-        }
-
-        var selectionParticipants = selection?.ModeOptions is MeetingModeOptions meeting
-            ? meeting.Participants
-            : [];
-
-        var participants = new MeetingParticipant[meetingSnapshot.Participants.Count];
-        for (var i = 0; i < meetingSnapshot.Participants.Count; i++)
-        {
-            var record = meetingSnapshot.Participants[i];
-
-            if (!Enum.TryParse<ParticipantStatus>(
-                    record.Status,
-                    ignoreCase: true,
-                    out var participantStatus))
-            {
-                diagnostics.Add(
-                    $"The participant '{record.ParticipantId}' has an unrecognized status '{record.Status}'.");
-                return null;
-            }
-
-            AgentRef? agentRef = null;
-            if (!string.IsNullOrWhiteSpace(record.AgentRefJson))
-            {
-                try
-                {
-                    var deserialized = JsonSerializer.Deserialize(
-                        record.AgentRefJson,
-                        RuntimeJsonContext.Default.AgentRef);
-                    if (deserialized is not null)
-                    {
-                        agentRef = deserialized with { SystemPrompt = string.Empty };
-                    }
-                }
-                catch (JsonException)
-                {
-                    // Fall through to selection fallback below.
-                }
-            }
-
-            if (agentRef is null)
-            {
-                var fallback = selectionParticipants.FirstOrDefault(
-                    p => string.Equals(p.ParticipantId, record.ParticipantId, StringComparison.Ordinal));
-                if (fallback is not null)
-                {
-                    agentRef = fallback.Agent with { SystemPrompt = string.Empty };
-                }
-                else
-                {
-                    diagnostics.Add(
-                        $"The participant '{record.ParticipantId}' has no recoverable AgentRef.");
-                    return null;
-                }
-            }
-
-            participants[i] = new MeetingParticipant(
-                record.ParticipantId,
-                agentRef,
-                record.DisplayName ?? record.ParticipantId,
-                record.JoinOrder,
-                participantStatus);
-        }
-
-        var persistedVersion = sessionRecord.SelectionVersion;
-        if (sessionSnapshot.SelectionVersion.HasValue
-            && persistedVersion != sessionSnapshot.SelectionVersion.Value)
-        {
-            diagnostics.Add(
-                $"The meeting SelectionVersion ({persistedVersion}) does not match the session SelectionVersion ({sessionSnapshot.SelectionVersion.Value}).");
-        }
-
-        MeetingScheduledInvocation? nextInvocation = null;
-        if (meetingSnapshot.NextScheduledInvocation is { } inv)
-        {
-            var invocationValid = true;
-
-            if (!Enum.TryParse<MeetingInvocationRole>(
-                    inv.Role,
-                    ignoreCase: true,
-                    out var invocationRole))
-            {
-                diagnostics.Add(
-                    $"The next scheduled invocation '{inv.InvocationId}' has an unrecognized role '{inv.Role}'.");
-                invocationValid = false;
-            }
-
-            if (!Enum.TryParse<MeetingInvocationStatus>(
-                    inv.Status,
-                    ignoreCase: true,
-                    out var invocationStatus))
-            {
-                diagnostics.Add(
-                    $"The next scheduled invocation '{inv.InvocationId}' has an unrecognized status '{inv.Status}'.");
-                invocationValid = false;
-            }
-
-            if (invocationValid)
-            {
-                nextInvocation = new MeetingScheduledInvocation(
-                    inv.InvocationId,
-                    inv.RoundIndex,
-                    invocationRole,
-                    inv.ParticipantId,
-                    inv.AgentId ?? string.Empty,
-                    inv.SelectionVersion,
-                    invocationStatus);
-            }
-        }
-
-        MeetingHitlRequest? pendingApproval = null;
-        if (string.Equals(
-                meetingSnapshot.PendingApprovalStatus,
-                "Pending",
-                StringComparison.Ordinal))
-        {
-            if (string.IsNullOrWhiteSpace(meetingSnapshot.PendingApprovalJson))
-            {
-                diagnostics.Add(
-                    "The pending meeting approval status is Pending but the approval JSON is empty.");
-            }
-            else
-            {
-                try
-                {
-                    pendingApproval = JsonSerializer.Deserialize(
-                        meetingSnapshot.PendingApprovalJson,
-                        RuntimeJsonContext.Default.MeetingHitlRequest);
-                    if (pendingApproval is null)
-                    {
-                        diagnostics.Add(
-                            "The pending meeting approval JSON deserialized to null.");
-                    }
-                }
-                catch (JsonException)
-                {
-                    diagnostics.Add(
-                        "The pending meeting approval JSON is not valid.");
-                }
-            }
-        }
-
-        MeetingSummary? recentSummary = null;
-        if (meetingSnapshot.LatestSummary is { } summary)
-        {
-            if (!string.IsNullOrWhiteSpace(summary.SummaryMessageId)
-                && summary.SummarizesThroughSeq.HasValue
-                && !string.IsNullOrWhiteSpace(summary.SummaryPolicyHash)
-                && !string.IsNullOrWhiteSpace(summary.SummaryAgentId)
-                && !string.IsNullOrWhiteSpace(summary.SummaryInvocationId))
-            {
-                recentSummary = new MeetingSummary(
-                    summary.SummaryMessageId,
-                    summary.RoundIndex,
-                    summary.SummarizesThroughSeq.Value,
-                    summary.SummaryPolicyHash,
-                    summary.SummaryAgentId,
-                    summary.SummaryInvocationId);
-            }
-            else
-            {
-                diagnostics.Add(
-                    "The latest meeting summary is incomplete.");
-            }
-        }
-
-        return new MeetingResumeState(
-            meetingStatus,
-            sessionRecord.CurrentRound,
-            participants,
-            persistedVersion,
-            nextInvocation,
-            pendingApproval,
-            recentSummary);
-    }
 
     internal static NeededAgentDefinition[] CreateNeededDefinitions(
         PersistedSessionSnapshot snapshot,
@@ -5065,36 +3384,6 @@ public sealed class RuntimeServer : IAsyncDisposable
                 }
 
                 break;
-            case MeetingModeOptions meeting:
-                foreach (var participant in meeting.Participants)
-                {
-                    roles.TryAdd(participant.Agent.AgentId, ("MeetingParticipant", participant.ParticipantId));
-                }
-
-                if (meeting.HostAgent is not null)
-                {
-                    roles.TryAdd(meeting.HostAgent.AgentId, ("MeetingHost", null));
-                }
-
-                if (meeting.SelectorPolicy?.SelectorAgent is not null)
-                {
-                    roles.TryAdd(meeting.SelectorPolicy.SelectorAgent.AgentId, ("MeetingSelector", null));
-                }
-
-                if (meeting.Policy?.Summarizer is not null)
-                {
-                    roles.TryAdd(meeting.Policy.Summarizer.AgentId, ("MeetingSummarizer", null));
-                }
-
-                break;
-            case WorkModeOptions work:
-                roles[work.GeneralManager.AgentId] = ("WorkGeneralManager", null);
-                foreach (var agent in work.AvailableAgents)
-                {
-                    roles[agent.AgentId] = ("WorkSubAgent", null);
-                }
-
-                break;
         }
 
         return
@@ -5106,8 +3395,6 @@ public sealed class RuntimeServer : IAsyncDisposable
                     snapshot.Mode switch
                     {
                         RuntimeMode.Expert => ("SingleAgent", null),
-                        RuntimeMode.Meeting => ("MeetingParticipant", agent.AgentId),
-                        RuntimeMode.Work => ("WorkSubAgent", null),
                         _ => ("Agent", null)
                     });
                 return new NeededAgentDefinition(
@@ -5137,24 +3424,6 @@ public sealed class RuntimeServer : IAsyncDisposable
                 expert.AvailableAgents is null
                     ? null
                     : [.. expert.AvailableAgents.Select(RehydrateAgent)]),
-            MeetingModeOptions meeting => meeting with
-            {
-                Participants = [.. meeting.Participants.Select(
-                    participant => participant with { Agent = RehydrateAgent(participant.Agent) })],
-                HostAgent = meeting.HostAgent is not null ? RehydrateAgent(meeting.HostAgent) : null,
-                SelectorPolicy = meeting.SelectorPolicy is { SelectorAgent: not null }
-                    ? meeting.SelectorPolicy with { SelectorAgent = RehydrateAgent(meeting.SelectorPolicy.SelectorAgent) }
-                    : meeting.SelectorPolicy,
-                Policy = meeting.Policy is { Summarizer: not null }
-                    ? meeting.Policy with { Summarizer = RehydrateAgent(meeting.Policy.Summarizer) }
-                    : meeting.Policy,
-            },
-            WorkModeOptions work => new WorkModeOptions(
-                RehydrateAgent(work.GeneralManager),
-                [.. work.AvailableAgents.Select(RehydrateAgent)],
-                work.Supervisor != null ? RehydrateAgent(work.Supervisor) : null,
-                work.WorkflowPolicy,
-                work.ContextPolicy),
             _ => throw new InvalidOperationException(
                 $"Mode options '{selection.ModeOptions.GetType().Name}' are not supported.")
         };
@@ -5393,9 +3662,6 @@ public sealed class RuntimeServer : IAsyncDisposable
             ?? throw new ArgumentNullException(nameof(provider));
         private readonly object _credentialGate = new();
         private TaskCompletionSource<bool>? _credentialWaiter;
-        private readonly object _meetingHitlGate = new();
-        private string? _meetingHitlApprovalRequestId;
-        private TaskCompletionSource<MeetingHitlResponse>? _meetingHitlWaiter;
 
         private static readonly TimeSpan CredentialWaitTimeout = TimeSpan.FromSeconds(30);
 
@@ -5495,103 +3761,9 @@ public sealed class RuntimeServer : IAsyncDisposable
             }
         }
 
-        public async Task<MeetingHitlResponse> WaitForMeetingHitlAsync(
-            MeetingHitlRequest request,
-            CancellationToken ct)
-        {
-            ArgumentNullException.ThrowIfNull(request);
-            var waiter = new TaskCompletionSource<MeetingHitlResponse>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            lock (_meetingHitlGate)
-            {
-                if (_meetingHitlWaiter is not null)
-                {
-                    throw new InvalidOperationException(
-                        "A meeting HITL waiter is already registered for this Run.");
-                }
-
-                _meetingHitlApprovalRequestId = request.ApprovalRequestId;
-                _meetingHitlWaiter = waiter;
-            }
-
-            try
-            {
-                if (request.ExpiresAt is { } expiresAt)
-                {
-                    var remaining = expiresAt - DateTimeOffset.UtcNow;
-                    if (remaining <= TimeSpan.Zero)
-                    {
-                        throw new TimeoutException();
-                    }
-
-                    return await waiter.Task.WaitAsync(remaining, ct)
-                        .ConfigureAwait(false);
-                }
-
-                return await waiter.Task.WaitAsync(ct).ConfigureAwait(false);
-            }
-            catch (TimeoutException)
-            {
-                CancelMeetingHitlWait();
-                throw;
-            }
-        }
-
-        public bool TryCompleteMeetingHitl(MeetingHitlResponse response)
-        {
-            ArgumentNullException.ThrowIfNull(response);
-            TaskCompletionSource<MeetingHitlResponse>? waiter;
-            string? expectedId;
-            lock (_meetingHitlGate)
-            {
-                waiter = _meetingHitlWaiter;
-                expectedId = _meetingHitlApprovalRequestId;
-                if (waiter is null)
-                {
-                    return false;
-                }
-
-                if (!string.Equals(
-                    expectedId,
-                    response.ApprovalRequestId,
-                    StringComparison.Ordinal))
-                {
-                    return false;
-                }
-
-                _meetingHitlWaiter = null;
-                _meetingHitlApprovalRequestId = null;
-            }
-
-            return waiter.TrySetResult(response);
-        }
-
-        public bool HasMeetingHitlWaiter(string approvalRequestId)
-        {
-            lock (_meetingHitlGate)
-            {
-                return _meetingHitlWaiter is not null
-                    && string.Equals(
-                        _meetingHitlApprovalRequestId,
-                        approvalRequestId,
-                        StringComparison.Ordinal);
-            }
-        }
-
-        public void CancelMeetingHitlWait()
-        {
-            lock (_meetingHitlGate)
-            {
-                _meetingHitlWaiter?.TrySetCanceled();
-                _meetingHitlWaiter = null;
-                _meetingHitlApprovalRequestId = null;
-            }
-        }
-
         public void Dispose()
         {
             CancelCredentialWait();
-            CancelMeetingHitlWait();
             _lease.Dispose();
         }
     }
@@ -5609,16 +3781,6 @@ public sealed class RuntimeServer : IAsyncDisposable
         string? SessionIdempotencyKey,
         NextTurnSelection? InitialSelection);
 
-    private sealed record RecoveredMeetingRunStart(
-        string SessionId,
-        string RunId,
-        NewSessionRunRequest Request,
-        IRuntimeProviderAdapter Provider,
-        Func<string, IRuntimeProviderAdapter> ProviderFactory,
-        RunRegistry.RunLease Lease,
-        MeetingInvocationRecord? ResumedInvocation,
-        ConversationRecordV1? ResumedCanonicalMessage = null,
-        RuntimeError? ResumedFailure = null);
 
     private sealed class AuthenticatedSession(
         string hostInstanceId,

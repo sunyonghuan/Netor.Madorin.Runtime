@@ -60,64 +60,6 @@ internal static class HostModeSelectionValidator
                 break;
             }
 
-            case WorkModeOptions work:
-            {
-                var gmError = ValidateCompleteAgent(work.GeneralManager, "Work GeneralManager");
-                if (gmError is not null)
-                {
-                    return gmError;
-                }
-
-                if (work.AvailableAgents is null || work.AvailableAgents.Length == 0)
-                {
-                    return "Work mode requires at least one available child Agent.";
-                }
-
-                for (var i = 0; i < work.AvailableAgents.Length; i++)
-                {
-                    var childError = ValidateCompleteAgent(
-                        work.AvailableAgents[i],
-                        $"Work AvailableAgents[{i}]");
-                    if (childError is not null)
-                    {
-                        return childError;
-                    }
-                }
-
-                var primaryError = ValidatePrimaryAlignment(
-                    work.GeneralManager,
-                    defaultProviderId,
-                    defaultModelId,
-                    "Work GeneralManager");
-                if (primaryError is not null)
-                {
-                    return primaryError;
-                }
-
-                break;
-            }
-
-            case MeetingModeOptions meeting:
-            {
-                if (meeting.Participants is null || meeting.Participants.Length == 0)
-                {
-                    return "Meeting mode requires at least one participant.";
-                }
-
-                for (var i = 0; i < meeting.Participants.Length; i++)
-                {
-                    var participantError = ValidateCompleteAgent(
-                        meeting.Participants[i].Agent,
-                        $"Meeting Participants[{i}].Agent");
-                    if (participantError is not null)
-                    {
-                        return participantError;
-                    }
-                }
-
-                break;
-            }
-
             default:
                 return $"Mode options type '{selection.ModeOptions.GetType().Name}' is not supported.";
         }
@@ -171,44 +113,13 @@ internal static class HostModeSelectionValidator
         {
             case ExpertModeOptions expert:
                 yield return expert.Agent;
-                break;
-
-            case WorkModeOptions work:
-                yield return work.GeneralManager;
-                if (work.AvailableAgents is not null)
+                if (expert.AvailableAgents is not null)
                 {
-                    foreach (var agent in work.AvailableAgents)
+                    foreach (var agent in expert.AvailableAgents)
                     {
                         yield return agent;
                     }
                 }
-
-                break;
-
-            case MeetingModeOptions meeting:
-                if (meeting.Participants is not null)
-                {
-                    foreach (var participant in meeting.Participants)
-                    {
-                        yield return participant.Agent;
-                    }
-                }
-
-                if (meeting.HostAgent is not null)
-                {
-                    yield return meeting.HostAgent;
-                }
-
-                if (meeting.EffectiveSelectorPolicy.SelectorAgent is not null)
-                {
-                    yield return meeting.EffectiveSelectorPolicy.SelectorAgent;
-                }
-
-                if (meeting.EffectivePolicy.Summarizer is not null)
-                {
-                    yield return meeting.EffectivePolicy.Summarizer;
-                }
-
                 break;
         }
     }

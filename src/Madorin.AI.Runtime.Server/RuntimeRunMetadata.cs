@@ -37,26 +37,6 @@ internal static class RuntimeRunMetadata
                     ? null
                     : [.. expert.AvailableAgents.Select(RemovePromptContent)],
                 expert.ContextPolicy),
-            MeetingModeOptions meeting => meeting with
-            {
-                Participants = [.. meeting.Participants.Select(
-                    static p => p with { Agent = RemovePromptContent(p.Agent) })],
-                HostAgent = meeting.HostAgent is { } host
-                    ? RemovePromptContent(host)
-                    : null,
-                SelectorPolicy = meeting.SelectorPolicy is { } sp && sp.SelectorAgent is { } sa
-                    ? sp with { SelectorAgent = RemovePromptContent(sa) }
-                    : meeting.SelectorPolicy,
-                Policy = meeting.Policy is { } pol && pol.Summarizer is { } sum
-                    ? pol with { Summarizer = RemovePromptContent(sum) }
-                    : meeting.Policy,
-            },
-            WorkModeOptions work => new WorkModeOptions(
-                RemovePromptContent(work.GeneralManager),
-                [.. work.AvailableAgents.Select(RemovePromptContent)],
-                work.Supervisor != null ? RemovePromptContent(work.Supervisor) : null,
-                work.WorkflowPolicy,
-                work.ContextPolicy),
             _ => throw new InvalidOperationException(
                 $"Mode options '{selection.ModeOptions.GetType().Name}' are not supported.")
         };
@@ -68,8 +48,6 @@ internal static class RuntimeRunMetadata
         IEnumerable<AgentRef> agents = selection.ModeOptions switch
         {
             ExpertModeOptions expert => [expert.Agent, .. expert.AvailableAgents ?? []],
-            MeetingModeOptions meeting => EnumerateMeetingAgents(meeting),
-            WorkModeOptions work => [work.GeneralManager, .. work.AvailableAgents],
             _ => throw new InvalidOperationException(
                 $"Mode options '{selection.ModeOptions.GetType().Name}' are not supported.")
         };
@@ -93,27 +71,4 @@ internal static class RuntimeRunMetadata
 
     private static AgentRef RemovePromptContent(AgentRef agent) =>
         agent with { SystemPrompt = string.Empty };
-
-    private static IEnumerable<AgentRef> EnumerateMeetingAgents(MeetingModeOptions meeting)
-    {
-        foreach (var p in meeting.Participants)
-        {
-            yield return p.Agent;
-        }
-
-        if (meeting.HostAgent is { } host)
-        {
-            yield return host;
-        }
-
-        if (meeting.SelectorPolicy?.SelectorAgent is { } selector)
-        {
-            yield return selector;
-        }
-
-        if (meeting.Policy?.Summarizer is { } summarizer)
-        {
-            yield return summarizer;
-        }
-    }
 }

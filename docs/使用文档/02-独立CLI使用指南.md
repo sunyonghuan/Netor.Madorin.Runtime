@@ -13,7 +13,7 @@
 - 本地开发和调试
 - CI/CD 流程集成
 
-独立 CLI 不传对话语言。Runtime 使用当前操作系统的界面语言，并在专家、工作、会议三种模式的系统提示词末尾写入操作系统、语言、本地日期、CLI 名称和版本、工作区路径。宿主若已保存语言设置，应在 `run.new_session` / `run.existing_session` 的 `language` 字段传入；不传或 `null` 时同样回退到操作系统界面语言。
+独立 CLI 不传对话语言。Runtime 使用当前操作系统的界面语言，并在 Expert 模式的系统提示词末尾写入操作系统、语言、本地日期、CLI 名称和版本、工作区路径。宿主若已保存语言设置，应在 `run.new_session` / `run.existing_session` 的 `language` 字段传入；不传或 `null` 时同样回退到操作系统界面语言。
 
 ## 安装与环境
 
@@ -194,56 +194,33 @@ madorin run --input "你好" --format jsonl
 
 ### Expert 模式（默认）
 
-深度分析和复杂决策，适合技术问题和深入研究。
+深度分析和复杂决策，适合技术问题和深入研究。支持子 Agent 委派、工具调用和精细化请求参数控制。
 
 ```bash
-madorin run --mode expert --input "分析这个系统的性能瓶颈"
+# 基础对话
+madorin run --input "分析这个系统的性能瓶颈"
+
+# 带请求参数控制（温度、最大Token等）
+madorin run --input "生成创意方案" --temperature 1.5 --max-tokens 4000
+
+# 指定模型和 Provider
+madorin run --provider my-openai --model gpt-4o --input "分析代码"
 ```
 
-### Meeting 模式
+#### ExpertRequestControl 参数
 
-多 Agent 主持会议：主持人（Host）调度发言、工具收口。独立 CLI 默认 `HostDriven` + `FinalOnly`。  
-独立 CLI 当前**未**挂 Meeting HITL 控制台处理器，因此默认 `RequireEndConfirmation=false`；宿主/SDK 可显式打开结束确认并处理 `meeting.hitl.request`。
+Expert 模式支持以下请求控制参数，用于精细化调整模型行为：
 
-```bash
-# 单轮（非交互）
-madorin run --mode meeting --input "讨论跨境推广预算与退款风险"
+| 参数 | 说明 | 有效范围 |
+| --- | --- | --- |
+| `--temperature` | 采样温度，控制创造性 | 0.0-2.0（默认1.0） |
+| `--max-tokens` | 最大输出 Token 数 | 1-模型上限 |
+| `--top-p` | 核采样阈值 | 0.0-1.0（默认1.0） |
+| `--top-k` | Top-K 采样 | ≥1 |
+| `--frequency-penalty` | 频率惩罚，减少重复 | -2.0-2.0（默认0） |
+| `--presence-penalty` | 存在惩罚，鼓励新话题 | -2.0-2.0（默认0） |
 
-# 交互 REPL（推荐联调）
-madorin run --mode meeting
-```
-
-#### Meeting 交互命令与暂停续跑
-
-| 操作 | 说明 |
-| --- | --- |
-| 普通输入 | 新开会或在当前 Session 上续一轮 |
-| `Ctrl+C`（运行中一次） | **协作式暂停**：下一安全点 `Meeting=Paused`，当前 Run=`Interrupted` |
-| `Ctrl+C`（暂停请求后再按） | 硬取消当前 Run |
-| `/pause` | 对当前 Meeting Session 请求协作式暂停 / 查看是否已 Paused |
-| `/interrupt <文本>` | 入队老板插话，下一安全点或续跑 Host 轮吸收 |
-| `/resume <sessionId>` | 切回会话；若 Meeting 已 Paused，校验 `ReadyForContinuation` |
-| 暂停后下一条输入 | 自动 `run.existing_session` Continuation Run（Host 恢复轮优先） |
-
-```text
-开会讨论…
-  → 运行中 Ctrl+C
-  → 提示「会议已在安全点暂停」
-  → /interrupt 预算上限改为 50 元
-  → 输入「请主持人吸收变更后继续」
-  → Continuation Run：Host 先处理插话，再调度参会者
-  → 结束确认 HITL 后归档
-```
-
-配置要求：全局 `~/.madorin/config.json` 至少 2 个可用 Agent（参会者）；可选 `meeting-host` / `summarizer` 角色 id 以拆分 Host 与参会者。
-
-### Work 模式
-
-日常任务执行和流程编排，适合自动化工作流。
-
-```bash
-madorin run --mode work --input "检查代码风格并生成报告"
-```
+这些参数会覆盖 Provider/Agent 默认值，仅对当前请求生效。
 
 ## 会话管理
 

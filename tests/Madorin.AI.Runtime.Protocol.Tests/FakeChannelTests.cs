@@ -23,8 +23,6 @@ public sealed class FakeChannelTests(TestContext testContext)
 
     [TestMethod]
     [DataRow(RuntimeMode.Expert)]
-    [DataRow(RuntimeMode.Meeting)]
-    [DataRow(RuntimeMode.Work)]
     [Timeout(5000, CooperativeCancellation = true)]
     public async Task FakeHostAndRuntime_ModeFlow_CompletesAndReleasesAcknowledgedEvents(
         RuntimeMode mode)
@@ -281,7 +279,7 @@ public sealed class FakeChannelTests(TestContext testContext)
             cancellationToken: testContext.CancellationToken);
         var startedB = await host.StartNewSessionRunAsync(
             runtimeB.RuntimeInstanceId,
-            CreateNewSessionRunRequest(RuntimeMode.Meeting, "runtime-b"),
+            CreateNewSessionRunRequest(RuntimeMode.Expert, "runtime-b"),
             cancellationToken: testContext.CancellationToken);
 
         Assert.IsNotNull(startedA.Value);
@@ -346,7 +344,7 @@ public sealed class FakeChannelTests(TestContext testContext)
             cancellationToken: testContext.CancellationToken);
         var startedB = await host.StartNewSessionRunAsync(
             runtimeB.RuntimeInstanceId,
-            CreateNewSessionRunRequest(RuntimeMode.Work, "runtime-b"),
+            CreateNewSessionRunRequest(RuntimeMode.Expert, "runtime-b"),
             cancellationToken: testContext.CancellationToken);
         Assert.IsNotNull(startedA.Value);
         Assert.IsNotNull(startedB.Value);
@@ -416,15 +414,6 @@ public sealed class FakeChannelTests(TestContext testContext)
         ModeOptions modeOptions = mode switch
         {
             RuntimeMode.Expert => new ExpertModeOptions(primaryAgent),
-            RuntimeMode.Meeting => new MeetingModeOptions(
-                [
-                    primaryAgent,
-                    new AgentRef("meeting-reviewer", "v1", "Review the meeting")
-                ],
-                primaryAgent.AgentId),
-            RuntimeMode.Work => new WorkModeOptions(
-                primaryAgent,
-                [new AgentRef("work-specialist", "v1", "Execute one work step")]),
             _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, null)
         };
 

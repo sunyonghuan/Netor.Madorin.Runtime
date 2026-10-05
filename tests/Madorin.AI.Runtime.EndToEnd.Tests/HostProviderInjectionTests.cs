@@ -198,12 +198,12 @@ public sealed class HostProviderInjectionTests
                 new NewSessionRunRequest(
                     "work-mv-session",
                     "work-mv-run",
-                    RuntimeMode.Work,
+                    RuntimeMode.Expert,
                     new NextTurnSelection(
                         1,
-                        RuntimeMode.Work,
+                        RuntimeMode.Expert,
                         new DefaultSelection("gm-provider", "gpt-5"),
-                        new WorkModeOptions(
+                        new ExpertModeOptions(
                             new AgentRef("gm", "1", "GM prompt"),
                             [
                                 new AgentRef(

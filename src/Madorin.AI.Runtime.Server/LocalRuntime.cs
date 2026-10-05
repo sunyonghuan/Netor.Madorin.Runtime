@@ -910,48 +910,14 @@ public sealed class LocalRuntime : IAsyncDisposable
             persistedSelection,
             RuntimeJsonContext.Default.NextTurnSelection);
         var agentSnapshots = RuntimeRunMetadata.CreateAgentSnapshots(selection);
-        bool saved;
-        if (selection.ModeOptions is MeetingModeOptions meetingOptions)
-        {
-            var meetingInputs = meetingOptions.Participants
-                .Select(static participant => new MeetingParticipantInput(
-                    participant.ParticipantId,
-                    participant.Agent.AgentId,
-                    JsonSerializer.Serialize(
-                        participant.Agent,
-                        RuntimeJsonContext.Default.AgentRef),
-                    participant.DisplayName,
-                    participant.JoinOrder,
-                    participant.Status == ParticipantStatus.Removed
-                        ? "Removed"
-                        : participant.Status.ToString().ToLowerInvariant()))
-                .ToArray();
-            var policyJson = JsonSerializer.Serialize(
-                meetingOptions.EffectivePolicy,
-                RuntimeJsonContext.Default.MeetingPolicy);
-            saved = await repository.TrySaveSessionSelectionWithMeetingAsync(
-                    sessionId,
-                    expectedSelectionVersion,
-                    selection.SelectionVersion,
-                    selectionJson,
-                    agentSnapshots,
-                    meetingInputs,
-                    policyJson,
-                    RuntimeRunMetadata.ComputePromptHash(policyJson),
-                    ct)
-                .ConfigureAwait(false);
-        }
-        else
-        {
-            saved = await repository.TrySaveSessionSelectionAsync(
-                    sessionId,
-                    expectedSelectionVersion,
-                    selection.SelectionVersion,
-                    selectionJson,
-                    agentSnapshots,
-                    ct)
-                .ConfigureAwait(false);
-        }
+        var saved = await repository.TrySaveSessionSelectionAsync(
+                sessionId,
+                expectedSelectionVersion,
+                selection.SelectionVersion,
+                selectionJson,
+                agentSnapshots,
+                ct)
+            .ConfigureAwait(false);
 
         if (!saved)
         {
@@ -992,130 +958,6 @@ public sealed class LocalRuntime : IAsyncDisposable
     {
         ThrowIfDisposed();
         return _skillCatalog.ReadResourceAsync(name, resource, ct);
-    }
-
-    /// <summary>Enqueues mid-meeting user interrupt input for the next safe point.</summary>
-    public async Task<MeetingInputEnqueueResult> EnqueueMeetingInputAsync(
-        MeetingInputEnqueueRequest request,
-        CancellationToken ct = default)
-    {
-        ThrowIfDisposed();
-        ArgumentNullException.ThrowIfNull(request);
-        ArgumentException.ThrowIfNullOrWhiteSpace(request.SessionId);
-        ArgumentException.ThrowIfNullOrWhiteSpace(request.RequestId);
-        ArgumentNullException.ThrowIfNull(request.Content);
-        if (request.Content.Length == 0)
-        {
-            throw new ArgumentException("Meeting interrupt content is required.", nameof(request));
-        }
-
-        await using var connection = await OpenDatabaseConnectionAsync(ct).ConfigureAwait(false);
-        var meetingRepository = new SqliteMeetingRepository(connection);
-        var snapshot = await meetingRepository.GetMeetingSnapshotAsync(request.SessionId, ct)
-            .ConfigureAwait(false)
-            ?? throw new KeyNotFoundException($"Meeting session '{request.SessionId}' was not found.");
-
-        var contentJson = JsonSerializer.Serialize(
-            request.Content,
-            RuntimeJsonContext.Default.ContentBlockArray);
-        var accepted = await meetingRepository.EnqueuePendingInputAsync(
-            request.SessionId,
-            request.RequestId,
-            contentJson,
-            request.RunId ?? snapshot.Session.RunId,
-            ct).ConfigureAwait(false);
-        return new MeetingInputEnqueueResult(
-            request.SessionId,
-            request.RequestId,
-            accepted,
-            accepted ? "Pending" : "Duplicate",
-            accepted
-                ? "Input accepted and will be consumed at the next Meeting safe point."
-                : "An identical requestId was already enqueued.");
-    }
-
-    /// <summary>Requests a cooperative Meeting pause at the next safe point.</summary>
-    public async Task<MeetingPauseResult> PauseMeetingAsync(
-        MeetingPauseRequest request,
-        CancellationToken ct = default)
-    {
-        ThrowIfDisposed();
-        ArgumentNullException.ThrowIfNull(request);
-        ArgumentException.ThrowIfNullOrWhiteSpace(request.SessionId);
-        ArgumentException.ThrowIfNullOrWhiteSpace(request.RequestId);
-
-        await using var connection = await OpenDatabaseConnectionAsync(ct).ConfigureAwait(false);
-        var meetingRepository = new SqliteMeetingRepository(connection);
-        await meetingRepository.RequestPauseAsync(
-            request.SessionId,
-            request.RequestId,
-            request.Reason,
-            ct).ConfigureAwait(false);
-        return new MeetingPauseResult(
-            request.SessionId,
-            request.RequestId,
-            Accepted: true,
-            Status: "PauseRequested",
-            Message: "Pause will take effect at the next Meeting safe point.");
-    }
-
-    /// <summary>
-    /// Validates that a paused Meeting can continue. Start a continuation Run with
-    /// <see cref="RunAsync(ExistingSessionRunRequest, CancellationToken)"/> afterwards.
-    /// </summary>
-    public async Task<MeetingResumeResult> ResumeMeetingAsync(
-        MeetingResumeRequest request,
-        CancellationToken ct = default)
-    {
-        ThrowIfDisposed();
-        ArgumentNullException.ThrowIfNull(request);
-        ArgumentException.ThrowIfNullOrWhiteSpace(request.SessionId);
-        ArgumentException.ThrowIfNullOrWhiteSpace(request.RequestId);
-
-        await using var connection = await OpenDatabaseConnectionAsync(ct).ConfigureAwait(false);
-        var meetingRepository = new SqliteMeetingRepository(connection);
-        var snapshot = await meetingRepository.GetMeetingSnapshotAsync(request.SessionId, ct)
-            .ConfigureAwait(false)
-            ?? throw new KeyNotFoundException($"Meeting session '{request.SessionId}' was not found.");
-
-        if (!string.Equals(snapshot.Session.Status, "Paused", StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException(
-                $"Meeting session '{request.SessionId}' is '{snapshot.Session.Status}' and cannot be resumed. "
-                + "Only Paused meetings accept resume.");
-        }
-
-        if (!string.IsNullOrWhiteSpace(request.PreviousRunId)
-            && !string.Equals(snapshot.Session.RunId, request.PreviousRunId, StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException(
-                $"PreviousRunId '{request.PreviousRunId}' does not match the paused meeting run "
-                + $"'{snapshot.Session.RunId}'.");
-        }
-
-        return new MeetingResumeResult(
-            request.SessionId,
-            request.RequestId,
-            Accepted: true,
-            Status: "ReadyForContinuation",
-            State: null,
-            NextRoundIndex: checked(snapshot.Session.CurrentRound + 1),
-            Message: "Meeting is paused and ready. Submit the next turn to start a Continuation Run. "
-                + "The orchestrator claims Paused→Running and begins with a Host recovery turn.");
-    }
-
-    /// <summary>Returns the durable meeting session status string, or null when no meeting exists.</summary>
-    public async Task<string?> GetMeetingSessionStatusAsync(
-        string sessionId,
-        CancellationToken ct = default)
-    {
-        ThrowIfDisposed();
-        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
-        await using var connection = await OpenDatabaseConnectionAsync(ct).ConfigureAwait(false);
-        var snapshot = await new SqliteMeetingRepository(connection)
-            .GetMeetingSnapshotAsync(sessionId, ct)
-            .ConfigureAwait(false);
-        return snapshot?.Session.Status;
     }
 
     public async ValueTask DisposeAsync()
@@ -2083,8 +1925,6 @@ public sealed class LocalRuntime : IAsyncDisposable
         var hasMatchingOptions = request.Mode switch
         {
             RuntimeMode.Expert => request.Selection.ModeOptions is ExpertModeOptions,
-            RuntimeMode.Meeting => request.Selection.ModeOptions is MeetingModeOptions,
-            RuntimeMode.Work => request.Selection.ModeOptions is WorkModeOptions,
             _ => false
         };
         if (!hasMatchingOptions)

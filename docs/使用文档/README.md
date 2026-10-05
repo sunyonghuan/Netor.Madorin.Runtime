@@ -47,11 +47,8 @@
 # 交互式运行（默认 Expert）
 madorin run
 
-# Meeting 模式交互：Ctrl+C 协作暂停，/interrupt 插话，暂停后下一条输入续开
-madorin run --mode meeting
-
 # 执行单次任务
-madorin run --provider deepseek --model deepseek-v4-pro --mode meeting --input "讨论预算与风险"
+madorin run --provider deepseek --model deepseek-v4-pro --input "分析系统架构"
 
 # 启动常驻服务
 madorin serve --instance main
@@ -93,7 +90,7 @@ await foreach (var evt in client.ReadEventsAsync(0))
 | **Session** | 会话，包含完整的对话历史和上下文 |
 | **Run** | 单次运行，一个 Session 内的一轮执行 |
 | **Provider** | 模型提供商适配器，负责与 AI 服务通信 |
-| **Mode** | 运行模式（Expert/Meeting/Work），决定执行策略 |
+| **Agent** | Agent 定义，包含提示词、模型选择和工具配置 |
 | **Selection** | 选择配置，指定 Provider、Model 和 Agent |
 
 详见 [协议规范总览](./04-协议规范/README.md)。

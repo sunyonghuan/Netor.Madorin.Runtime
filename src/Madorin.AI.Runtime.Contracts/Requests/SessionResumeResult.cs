@@ -18,6 +18,4 @@ public sealed record SessionResumeResult(
     string? LastMessageId = null,
     AgentSnapshot[]? AgentSnapshots = null,
     int BlobReferenceCount = 0,
-    string[]? BlobIds = null,
-    MeetingResumeState? MeetingState = null,
-    WorkResumeState? WorkState = null);
+    string[]? BlobIds = null);

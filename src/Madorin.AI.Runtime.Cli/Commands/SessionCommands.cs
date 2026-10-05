@@ -99,7 +99,7 @@ internal static class SessionCommands
             "Filter active, archived, or all Sessions. Default: active.");
         var modeOption = CommandOptions.Create<string?>(
             "--mode",
-            "Filter by expert, meeting, or work mode.");
+            "Filter by expert mode.");
         var sinceOption = CommandOptions.Create<string?>(
             "--since",
             "Filter by a timezone-qualified ISO 8601 timestamp.");
@@ -844,7 +844,7 @@ internal static class SessionCommands
 
         if (!TryParseMode(parseResult.GetValue(modeOption), out var mode))
         {
-            error = "Mode must be expert, meeting, or work.";
+            error = "Mode must be expert.";
             return false;
         }
 
@@ -908,8 +908,6 @@ internal static class SessionCommands
         mode = value.ToLowerInvariant() switch
         {
             "expert" => RuntimeMode.Expert,
-            "meeting" => RuntimeMode.Meeting,
-            "work" => RuntimeMode.Work,
             _ => null
         };
         return mode is not null;

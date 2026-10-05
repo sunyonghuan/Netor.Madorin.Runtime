@@ -53,8 +53,6 @@ public static class DataDirectoryInitializer
             await SqliteSchema.EnsureCreatedAsync(connection, ct).ConfigureAwait(false);
             var repository = new SqliteSessionRepository(connection);
             await repository.MarkInterruptedAsync(ct).ConfigureAwait(false);
-            var meetingRepository = new SqliteMeetingRepository(connection);
-            await meetingRepository.RecoverRunningInvocationsAsync(ct).ConfigureAwait(false);
             var wal = await CheckpointWalAsync(connection, ct).ConfigureAwait(false);
             var permanentRunningCount = await CountPermanentRunningAsync(connection, ct)
                 .ConfigureAwait(false);

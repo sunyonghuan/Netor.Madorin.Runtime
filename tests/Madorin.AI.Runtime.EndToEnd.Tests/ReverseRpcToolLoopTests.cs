@@ -110,135 +110,6 @@ public sealed class ReverseRpcToolLoopTests
         }
     }
 
-    [TestMethod]
-    [DoNotParallelize]
-    [Timeout(30_000, CooperativeCancellation = true)]
-    public async Task WorkParentRunCancellation_CancelsChildProcessToolAndKeepsOtherRunAlive()
-    {
-        var workspace = CreateTemporaryDirectory();
-        var instanceId = Guid.NewGuid().ToString("N");
-        var secret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
-        var workProvider = new CancellableWorkProvider();
-        var independentProvider = new IndependentBlockingProvider();
-        using var shutdown = CancellationTokenSource.CreateLinkedTokenSource(
-            TestContext.CancellationToken);
-        try
-        {
-            await using var server = await RuntimeServer.StartAsync(
-                new RuntimeServerOptions(workspace)
-                {
-                    InstanceId = instanceId,
-                    PipePrefix = $"madorin.work-cancel.{Guid.NewGuid():N}",
-                    HandshakeSecret = secret,
-                    MaxConcurrentRuns = 2,
-                    MaxConcurrentRunsPerProvider = 1,
-                    MemoryUserHome = Path.Combine(workspace, "home"),
-                    ProviderResolver = selection =>
-                        selection.DefaultSelection.ProviderId == workProvider.ProviderId
-                            ? workProvider
-                            : independentProvider
-                },
-                TestContext.CancellationToken);
-            var serverTask = server.RunAsync(shutdown.Token);
-            await using var client = new RuntimeClient(
-                new RuntimeClientOptions(
-                    server.PipeName,
-                    Guid.NewGuid().ToString("N"),
-                    ExpectedRuntimeInstanceId: instanceId,
-                    HandshakeSecret: secret,
-                    Capabilities: new RuntimeCapabilities(
-                        ReverseRpc: true,
-                        ToolCatalog: true,
-                        ToolPermissions: true)));
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(
-                TestContext.CancellationToken);
-            timeout.CancelAfter(TimeSpan.FromSeconds(15));
-            await client.ConnectAsync(timeout.Token);
-
-            var host = new CancellableProcessToolHost(workspace);
-            client.ControlPeer.SetRequestHandler(host.HandleAsync);
-            await PublishCatalogAsync(client, timeout.Token);
-
-            var workRunId = await client.StartNewSessionRunAsync(
-                CreateCancellableWorkRequest(),
-                timeout.Token);
-            var workTerminalTask = ReadTerminalRunEventAsync(client, workRunId, timeout.Token);
-            var processStartedOrTerminal = await Task.WhenAny(
-                host.ProcessStarted,
-                workTerminalTask);
-            if (ReferenceEquals(processStartedOrTerminal, workTerminalTask))
-            {
-                var earlyTerminal = await workTerminalTask;
-                var detail = earlyTerminal.MessageType == MessageTypes.RunFailed
-                    ? JsonSerializer.Deserialize(
-                        earlyTerminal.Payload,
-                        RuntimeJsonContext.Default.RunFailedEvent)?.Error.Message
-                    : earlyTerminal.Payload.GetRawText();
-                Assert.Fail(
-                    $"The Work run terminated before the process tool started: {earlyTerminal.MessageType}: {detail}");
-            }
-
-            var independentRunId = await client.StartNewSessionRunAsync(
-                CreateIndependentRequest(),
-                timeout.Token);
-            await independentProvider.Started.WaitAsync(timeout.Token);
-
-            await client.CancelRunAsync(workRunId, timeout.Token);
-            var cancelRequest = await host.ProcessCancelled.WaitAsync(timeout.Token);
-            var workTerminal = await workTerminalTask;
-
-            var workFailure = workTerminal.MessageType == MessageTypes.RunFailed
-                ? JsonSerializer.Deserialize(
-                    workTerminal.Payload,
-                    RuntimeJsonContext.Default.RunFailedEvent)?.Error.Message
-                : null;
-            var persistedToolStatus = await ReadToolIntentStatusAsync(
-                workspace,
-                "work-process-call",
-                timeout.Token);
-            Assert.AreEqual(
-                MessageTypes.RunCancelled,
-                workTerminal.MessageType,
-                $"{workFailure}; persisted tool status: {persistedToolStatus}");
-            Assert.AreEqual("work-process-call", cancelRequest.CallId);
-            Assert.AreEqual("runtime-cancelled", cancelRequest.Reason);
-            Assert.AreEqual(1, host.ProcessExecutionCount);
-            var workRun = await client.QueryRunAsync(workRunId, timeout.Token);
-            Assert.AreEqual(RunStatus.Cancelled, workRun.Status);
-            var resumed = await client.ResumeSessionAsync(workRun.SessionId, timeout.Token);
-            Assert.IsNotNull(resumed.WorkState);
-            Assert.AreEqual(WorkSessionStatus.Interrupted, resumed.WorkState.Status);
-            var interruptedStep = Assert.ContainsSingle(resumed.WorkState.Steps);
-            Assert.AreEqual(WorkStepLifecycleStatus.Interrupted, interruptedStep.Status);
-            Assert.IsNotNull(interruptedStep.InvocationId);
-            await AssertLatestAttemptInterruptedAsync(
-                workspace,
-                interruptedStep.InvocationId,
-                timeout.Token);
-
-            var unexpectedCancellation = await Task.WhenAny(
-                independentProvider.CancellationObserved,
-                Task.Delay(TimeSpan.FromMilliseconds(100), timeout.Token));
-            Assert.AreNotSame(independentProvider.CancellationObserved, unexpectedCancellation);
-            var independentRun = await client.QueryRunAsync(independentRunId, timeout.Token);
-            Assert.AreEqual(RunStatus.Running, independentRun.Status);
-
-            await client.CancelRunAsync(independentRunId, timeout.Token);
-            await independentProvider.CancellationObserved.WaitAsync(timeout.Token);
-
-            shutdown.Cancel();
-            await serverTask;
-        }
-        finally
-        {
-            shutdown.Cancel();
-            if (Directory.Exists(workspace))
-            {
-                Directory.Delete(workspace, recursive: true);
-            }
-        }
-    }
-
     private static async Task PublishCatalogAsync(
         RuntimeClient client,
         CancellationToken ct)
@@ -331,14 +202,8 @@ public sealed class ReverseRpcToolLoopTests
 
     private static NewSessionRunRequest CreateCancellableWorkRequest()
     {
-        var manager = new AgentRef(
-            "manager",
-            "v1",
-            "Create a one-step process plan.",
-            "work-provider",
-            "work-model");
-        var worker = new AgentRef(
-            "worker",
+        var agent = new AgentRef(
+            "agent",
             "v1",
             "Run the assigned process tool.",
             "work-provider",
@@ -346,12 +211,12 @@ public sealed class ReverseRpcToolLoopTests
         return new NewSessionRunRequest(
             "work-cancel-session",
             "work-cancel-run",
-            RuntimeMode.Work,
+            RuntimeMode.Expert,
             new NextTurnSelection(
                 1,
-                RuntimeMode.Work,
+                RuntimeMode.Expert,
                 new DefaultSelection("work-provider", "work-model"),
-                new WorkModeOptions(manager, [worker]),
+                new ExpertModeOptions(agent),
                 ToolCatalogVersion: "host-v1"),
             [new TextContentBlock("Run the process until cancelled.")]);
     }

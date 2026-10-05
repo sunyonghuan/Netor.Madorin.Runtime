@@ -1,4 +1,5 @@
 using Madorin.AI.Runtime.MConsole.Configuration;
+using Madorin.AI.Runtime.MConsole.LiveHost;
 using Madorin.AI.Runtime.MConsole.Diagnostics;
 using Madorin.AI.Runtime.MConsole.HostClient;
 using Madorin.AI.Runtime.MConsole.Hosting;
@@ -42,6 +43,9 @@ public sealed class MenuLoop(
                 case "14":
                     await PrintDefaultsAsync();
                     break;
+                case "15":
+                    await DebugSession.RunAsync(options, paths, repositoryRoot, cancellationToken);
+                    break;
                 case "9":
                     await RunHistoryPanelAsync(cancellationToken);
                     break;
@@ -81,6 +85,7 @@ public sealed class MenuLoop(
         await output.WriteLineAsync("12. serve 实时监控看板");
         await output.WriteLineAsync("13. 并发与多实例场景");
         await output.WriteLineAsync("14. 目标二进制与默认参数设置");
+        await output.WriteLineAsync("15. 实时调试台");
         await output.WriteLineAsync("0. 退出");
         await output.WriteAsync("> ");
     }

@@ -25,29 +25,6 @@ public sealed class RunRequestFactoryTests
     }
 
     [TestMethod]
-    public void CreateSelection_MeetingDraft_CreatesAllParticipants()
-    {
-        var draft = new RunRequestDraft(
-            RuntimeMode.Meeting,
-            "discuss",
-            Primary,
-            [new RunAgentDraft("second", "provider", "model")]);
-
-        var selection = RunRequestFactory.CreateSelection(draft);
-        var meeting = (MeetingModeOptions)selection.ModeOptions;
-
-        Assert.HasCount(2, meeting.Participants);
-    }
-
-    [TestMethod]
-    public void CreateSelection_WorkWithoutWorker_ThrowsArgumentException()
-    {
-        var draft = new RunRequestDraft(RuntimeMode.Work, "do work", Primary);
-
-        Assert.ThrowsExactly<ArgumentException>(() => RunRequestFactory.CreateSelection(draft));
-    }
-
-    [TestMethod]
     public void CreateSelection_MissingProvider_ThrowsArgumentException()
     {
         var draft = new RunRequestDraft(

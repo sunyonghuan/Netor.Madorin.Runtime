@@ -75,4 +75,14 @@ public sealed record RuntimeServerOptions
     public Func<NextTurnSelection, IRuntimeProviderAdapter>? ProviderResolver { get; init; }
 
     public IProviderWorkerSupervisor? WorkerSupervisor { get; init; }
+
+    /// <summary>
+    /// Optional HTTP port for REST API endpoint. If null or 0, HTTP server is disabled.
+    /// </summary>
+    public int? HttpPort { get; init; }
+
+    /// <summary>
+    /// Optional HTTP host binding address. Defaults to "localhost" for security.
+    /// </summary>
+    public string HttpHost { get; init; } = "localhost";
 }

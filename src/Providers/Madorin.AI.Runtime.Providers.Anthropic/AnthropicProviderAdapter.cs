@@ -325,7 +325,7 @@ public sealed class AnthropicProviderAdapter :
 
     private static ChatOptions CreateChatOptions(RuntimeProviderRequest request)
     {
-        return new ChatOptions
+        var options = new ChatOptions
         {
             ModelId = request.ModelId,
             Temperature = request.Temperature,
@@ -333,6 +333,71 @@ public sealed class AnthropicProviderAdapter :
             Tools = CreateTools(request.Tools),
             ResponseFormat = CreateResponseFormat(request.StructuredOutput)
         };
+
+        // Apply ExpertRequestControl overrides if present
+        if (request.RequestControl is { } control)
+        {
+            // Temperature: RequestControl overrides request-level, clamp to [0, 2]
+            if (control.Temperature.HasValue)
+            {
+                options.Temperature = (float)Math.Clamp(control.Temperature.Value, 0.0, 2.0);
+            }
+
+            if (control.MaxTokens.HasValue)
+            {
+                options.MaxOutputTokens = Math.Max(1, control.MaxTokens.Value);
+            }
+
+            // TopP: clamp to (0, 1] - ChatOptions may reject 0.0
+            if (control.TopP.HasValue)
+            {
+                options.TopP = (float)Math.Clamp(control.TopP.Value, 0.001, 1.0);
+            }
+
+            if (control.TopK.HasValue)
+            {
+                options.TopK = Math.Max(1, control.TopK.Value);
+            }
+
+            if (control.StopSequences is { Length: > 0 })
+            {
+                // Filter out null/empty sequences defensively
+                var validSequences = control.StopSequences
+                    .Where(s => !string.IsNullOrEmpty(s))
+                    .ToList();
+                if (validSequences.Count > 0)
+                {
+                    options.StopSequences = validSequences;
+                }
+            }
+
+            // Penalties: clamp to [-2, 2]
+            if (control.FrequencyPenalty.HasValue)
+            {
+                options.FrequencyPenalty = (float)Math.Clamp(control.FrequencyPenalty.Value, -2.0, 2.0);
+            }
+
+            if (control.PresencePenalty.HasValue)
+            {
+                options.PresencePenalty = (float)Math.Clamp(control.PresencePenalty.Value, -2.0, 2.0);
+            }
+
+            // Metadata: store in AdditionalProperties for tracking
+            if (control.Metadata is { Count: > 0 })
+            {
+                options.AdditionalProperties ??= new();
+                foreach (var (key, value) in control.Metadata)
+                {
+                    // Sanitize key to avoid injection
+                    if (!string.IsNullOrWhiteSpace(key) && !string.IsNullOrWhiteSpace(value))
+                    {
+                        options.AdditionalProperties[$"metadata.{key}"] = value;
+                    }
+                }
+            }
+        }
+
+        return options;
     }
 
     private static ChatResponseFormatJson? CreateResponseFormat(RuntimeStructuredOutput? structuredOutput)

@@ -1,4 +1,5 @@
 using Madorin.AI.Runtime.MConsole.Configuration;
+using Madorin.AI.Runtime.MConsole.LiveHost;
 using Madorin.AI.Runtime.MConsole.Diagnostics;
 using Madorin.AI.Runtime.MConsole.Menu;
 
@@ -12,6 +13,11 @@ public static class Program
         Console.CancelKeyPress += (_, eventArgs) =>
         {
             eventArgs.Cancel = true;
+            if (DebugInterrupt.TryConsume())
+            {
+                return;
+            }
+
             cancellationSource.Cancel();
         };
 
@@ -150,6 +156,15 @@ public static class Program
                 return report.Passed ? 0 : 1;
             }
 
+            if (args.Contains("--debug", StringComparer.Ordinal))
+            {
+                return await DebugSession.RunAsync(
+                    options,
+                    paths,
+                    repositoryRoot,
+                    cancellationSource.Token);
+            }
+
             return await new MenuLoop(
                     options,
                     paths,
@@ -220,5 +235,6 @@ public static class Program
         Console.WriteLine("  --smoke-p4          Run the standalone command catalog chain");
         Console.WriteLine("  --smoke-p5          Run assertions, history, case, fixture, and monitor chain");
         Console.WriteLine("  --smoke-p6          Run concurrency and multi-instance acceptance chain");
+        Console.WriteLine("  --debug             Open the live host console for mode, provider, model, output, and events");
     }
 }

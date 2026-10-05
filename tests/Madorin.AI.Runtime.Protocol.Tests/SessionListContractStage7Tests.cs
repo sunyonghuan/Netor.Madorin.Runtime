@@ -36,7 +36,7 @@ public sealed class SessionListContractStage7Tests
     {
         var since = new DateTimeOffset(2026, 7, 24, 10, 0, 0, TimeSpan.Zero);
         var parameters = new SessionListParameters(
-            Mode: RuntimeMode.Meeting,
+            Mode: RuntimeMode.Expert,
             Status: SessionStatus.Archived,
             Since: since,
             Search: "alpha",
@@ -51,7 +51,7 @@ public sealed class SessionListContractStage7Tests
             RuntimeJsonContext.Default.SessionListParameters);
 
         Assert.IsNotNull(actual);
-        Assert.AreEqual(RuntimeMode.Meeting, actual.Mode);
+        Assert.AreEqual(RuntimeMode.Expert, actual.Mode);
         Assert.AreEqual(SessionStatus.Archived, actual.Status);
         Assert.AreEqual(since, actual.Since);
         Assert.AreEqual("alpha", actual.Search);
@@ -95,7 +95,7 @@ public sealed class SessionListContractStage7Tests
         var updatedAt = new DateTimeOffset(2026, 7, 24, 12, 0, 0, TimeSpan.Zero);
         var item = new SessionListItem(
             "session-1",
-            RuntimeMode.Work,
+            RuntimeMode.Expert,
             SessionStatus.Active,
             updatedAt,
             "My Session");
@@ -116,7 +116,7 @@ public sealed class SessionListContractStage7Tests
 
         var actualItem = actual.Sessions[0];
         Assert.AreEqual("session-1", actualItem.SessionId);
-        Assert.AreEqual(RuntimeMode.Work, actualItem.Mode);
+        Assert.AreEqual(RuntimeMode.Expert, actualItem.Mode);
         Assert.AreEqual(SessionStatus.Active, actualItem.Status);
         Assert.AreEqual(updatedAt, actualItem.UpdatedAt);
         Assert.AreEqual("My Session", actualItem.Title);

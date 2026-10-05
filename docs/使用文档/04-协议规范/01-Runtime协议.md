@@ -219,7 +219,7 @@ await eventPipeClient.ConnectAsync(timeout: 10000);
 - 独立 CLI 没有语言设置，因此不传该字段。
 - 主程序在用户已保存语言设置时传入该值；未保存时传 `null`。
 
-Runtime 会在专家、工作和会议三种模式的系统提示词末尾追加一段环境信息，供模型知道自己跑在哪：
+Runtime 会在 Expert 模式的系统提示词末尾追加一段环境信息，供模型知道自己跑在哪：
 
 ```text
 ## Environment

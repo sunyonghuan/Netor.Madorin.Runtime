@@ -92,7 +92,7 @@ public sealed class SessionListStage7Tests
         var expertId = await repository.CreateSessionAsync(
             RuntimeMode.Expert, "key-expert-mode", KeyRetention, _testContext.CancellationToken);
         var meetingId = await repository.CreateSessionAsync(
-            RuntimeMode.Meeting, "key-meeting-mode", KeyRetention, _testContext.CancellationToken);
+            RuntimeMode.Expert, "key-meeting-mode", KeyRetention, _testContext.CancellationToken);
 
         var query = new SessionListQuery(Mode: RuntimeMode.Expert, Status: null, Limit: 50);
         var results = await repository.ListSessionsAsync(query, _testContext.CancellationToken);

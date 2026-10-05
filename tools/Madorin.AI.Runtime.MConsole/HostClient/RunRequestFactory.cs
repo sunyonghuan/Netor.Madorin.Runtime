@@ -40,12 +40,6 @@ public static class RunRequestFactory
         ModeOptions modeOptions = draft.Mode switch
         {
             RuntimeMode.Expert => new ExpertModeOptions(primary),
-            RuntimeMode.Meeting => CreateMeetingOptions(primary, additional),
-            RuntimeMode.Work => new WorkModeOptions(
-                primary,
-                additional,
-                supervisor: null,
-                workflowPolicy: WorkflowPolicy.Default),
             _ => throw new ArgumentOutOfRangeException(nameof(draft), draft.Mode, null),
         };
 
@@ -58,19 +52,6 @@ public static class RunRequestFactory
             draft.ToolCatalogVersion);
     }
 
-    private static MeetingModeOptions CreateMeetingOptions(
-        AgentRef primary,
-        IReadOnlyList<AgentRef> additional)
-    {
-        var agents = new[] { primary }.Concat(additional).ToArray();
-        return new MeetingModeOptions(
-            agents.Select((agent, index) => new MeetingParticipant(
-                    agent.AgentId,
-                    agent,
-                    agent.AgentId,
-                    index))
-                .ToArray());
-    }
 
     private static AgentRef CreateAgent(RunAgentDraft draft) => new(
         draft.AgentId,
@@ -94,14 +75,6 @@ public static class RunRequestFactory
             throw new ArgumentOutOfRangeException(
                 nameof(draft),
                 "SelectionVersion must be positive.");
-        }
-
-        if (draft.Mode == RuntimeMode.Work
-            && (draft.AdditionalAgents is null || draft.AdditionalAgents.Count == 0))
-        {
-            throw new ArgumentException(
-                "Work mode requires at least one additional worker agent.",
-                nameof(draft));
         }
     }
 

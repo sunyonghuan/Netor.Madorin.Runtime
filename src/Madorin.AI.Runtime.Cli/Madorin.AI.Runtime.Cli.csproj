@@ -40,4 +40,20 @@
     <AgentFrameworkRootProfile>WithoutAgentsOpenAI</AgentFrameworkRootProfile>
   </PropertyGroup>
 
+  <!-- Runtime 在 CLI 进程目录查找 madorin-provider-*.exe。构建后把各 Worker 输出里尚未存在的文件补进 CLI 目录。 -->
+  <Target Name="CopyProviderWorkerDrivers" AfterTargets="Build">
+    <ItemGroup>
+      <_ProviderWorkerDriver Include="$(MSBuildThisFileDirectory)..\Providers\*.Worker\bin\$(Configuration)\$(TargetFramework)\madorin-provider-*.*" />
+      <_ProviderWorkerDependency Include="$(MSBuildThisFileDirectory)..\Providers\*.Worker\bin\$(Configuration)\$(TargetFramework)\*.dll" />
+      <_ProviderWorkerDependency Include="$(MSBuildThisFileDirectory)..\Providers\*.Worker\bin\$(Configuration)\$(TargetFramework)\*.pdb" />
+      <_ProviderWorkerFile Include="@(_ProviderWorkerDriver)" />
+      <_ProviderWorkerFile Include="@(_ProviderWorkerDependency)"
+                           Condition="!Exists('$(TargetDir)%(Filename)%(Extension)')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_ProviderWorkerFile)"
+          DestinationFolder="$(TargetDir)"
+          SkipUnchangedFiles="true"
+          Condition="'@(_ProviderWorkerFile)' != ''" />
+  </Target>
+
 </Project>

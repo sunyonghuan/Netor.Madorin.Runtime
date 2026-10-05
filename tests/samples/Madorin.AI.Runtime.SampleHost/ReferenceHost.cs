@@ -477,59 +477,6 @@ internal static class ReferenceHost
             0 => CreateExpertSelection(
                 selectionVersion,
                 "Use both reference host tools before answering."),
-            1 => new NextTurnSelection(
-                selectionVersion,
-                RuntimeMode.Meeting,
-                new DefaultSelection(ProviderId, ModelId),
-                new MeetingModeOptions(
-                [
-                    new MeetingParticipant(
-                        "reference-participant-a",
-                        new AgentRef(
-                            "reference-meeting-a",
-                            "v1",
-                            "Represent participant A.",
-                            ProviderId,
-                            ModelId),
-                        "Participant A",
-                        JoinOrder: 0),
-                    new MeetingParticipant(
-                        "reference-participant-b",
-                        new AgentRef(
-                            "reference-meeting-b",
-                            "v1",
-                            "Represent participant B.",
-                            ProviderId,
-                            ModelId),
-                        "Participant B",
-                        JoinOrder: 1)
-                ],
-                selectorPolicy: new MeetingSelectorPolicyOptions(
-                    MeetingSelectorPolicy.RoundRobin,
-                    MaxRounds: 1)),
-                ToolCatalogVersion: "reference-v1"),
-            2 => new NextTurnSelection(
-                selectionVersion,
-                RuntimeMode.Work,
-                new DefaultSelection(ProviderId, ModelId),
-                new WorkModeOptions(
-                    new AgentRef(
-                        "reference-manager",
-                        "v1",
-                        "Create a one-step plan.",
-                        ProviderId,
-                        ModelId),
-                    [
-                        new AgentRef(
-                            "reference-worker",
-                            "v1",
-                            "Complete the assigned step.",
-                            ProviderId,
-                            ModelId)
-                    ],
-                    supervisor: null,
-                    workflowPolicy: WorkflowPolicy.Default),
-                ToolCatalogVersion: "reference-v1"),
             _ => throw new ArgumentOutOfRangeException(nameof(index), index, null)
         };
 
@@ -553,17 +500,6 @@ internal static class ReferenceHost
         selection.ModeOptions switch
         {
             ExpertModeOptions expert => [new AgentDefinition(expert.Agent)],
-            MeetingModeOptions meeting => meeting.Participants
-                .Select(static participant => new AgentDefinition(participant.Agent))
-                .Concat(meeting.HostAgent is null
-                    ? []
-                    : [new AgentDefinition(meeting.HostAgent)])
-                .ToArray(),
-            WorkModeOptions work =>
-            [
-                new AgentDefinition(work.GeneralManager),
-                .. work.AvailableAgents.Select(static agent => new AgentDefinition(agent))
-            ],
             _ => throw new InvalidDataException(
                 $"Unsupported reference-host mode options '{selection.ModeOptions.GetType().Name}'.")
         };

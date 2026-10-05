@@ -132,6 +132,10 @@ public sealed class ExpertModeOrchestrator(
         ArgumentException.ThrowIfNullOrWhiteSpace(runtimeInstanceId);
         ValidateToolCallLimit(_runtimeLimits.MaxToolCallsPerRound);
         var expert = ValidateAndGetOptions(request);
+
+        // Validate RequestControl parameters early to fail fast with clear errors
+        expert.RequestControl?.Validate();
+
         _conversationLanguage = request.Language;
         var providerId = expert.Agent.ProviderId ?? request.Selection.DefaultSelection.ProviderId;
         var modelId = expert.Agent.ModelId ?? request.Selection.DefaultSelection.ModelId;
@@ -528,7 +532,8 @@ public sealed class ExpertModeOrchestrator(
             [.. providerMessages],
             Tools: tools,
             CancellationToken: ct,
-            Skills: CreateSkillsContext(snapshot, runId, sessionId))
+            Skills: CreateSkillsContext(snapshot, runId, sessionId),
+            RequestControl: expert.RequestControl)
         {
             HistoryMessageCount = Math.Max(0, providerMessages.Count - 1)
         };
@@ -3063,7 +3068,8 @@ public sealed class ExpertModeOrchestrator(
                 [.. subAgentMessages],
                 Tools: tools,
                 CancellationToken: ct,
-                Skills: null);
+                Skills: null,
+                RequestControl: null);
 
             // Call provider
             var completed = false;

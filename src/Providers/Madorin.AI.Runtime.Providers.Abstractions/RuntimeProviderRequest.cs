@@ -21,7 +21,8 @@ public sealed record RuntimeProviderRequest(
     bool IsIdempotent = true,
     bool HasIrreversibleToolSideEffects = false,
     [property: JsonIgnore] CancellationToken CancellationToken = default,
-    [property: JsonIgnore] SkillsInvocationContext? Skills = null)
+    [property: JsonIgnore] SkillsInvocationContext? Skills = null,
+    [property: JsonIgnore] ExpertRequestControl? RequestControl = null)
 {
     /// <summary>Gets the number of leading messages that belong to canonical history.</summary>
     [JsonIgnore]

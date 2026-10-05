@@ -8,7 +8,7 @@ namespace Madorin.AI.Runtime.Server;
 /// </summary>
 public static class RuntimeProviderAdapterFactory
 {
-    private static readonly HashSet<string> KnownProtocols = new(StringComparer.Ordinal)
+    private static readonly HashSet<string> KnownProtocols = new(StringComparer.OrdinalIgnoreCase)
     {
         "OpenAI",
         "Anthropic",

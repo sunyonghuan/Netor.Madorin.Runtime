@@ -33,9 +33,9 @@ public sealed class Stage7RunProgressContractTests
             "run-query-result-progress.v1.json",
             new RunQueryResult("run-query", "session-1", RunStatus.Running, null)
             {
-                Mode = RuntimeMode.Work,
+                Mode = RuntimeMode.Expert,
                 Phase = "waiting-for-tool",
-                CurrentStep = "step-2",
+                CurrentStep = null,
                 CompletedUnits = 1,
                 TotalUnits = 3,
                 UpdatedAt = UpdatedAt,
@@ -48,11 +48,11 @@ public sealed class Stage7RunProgressContractTests
             "run-list-item-progress.v1.json",
             new RunListItem("run-list", "session-2", RunStatus.WaitingForApproval, UpdatedAt.AddHours(-1))
             {
-                Mode = RuntimeMode.Meeting,
+                Mode = RuntimeMode.Expert,
                 Phase = "waiting-for-approval",
-                CurrentStep = "round:1:approval",
+                CurrentStep = null,
                 CompletedUnits = 0,
-                TotalUnits = 2,
+                TotalUnits = 1,
                 UpdatedAt = UpdatedAt,
                 LastRunSequence = 4
             },

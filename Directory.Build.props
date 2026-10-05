@@ -12,7 +12,7 @@
     <Deterministic>true</Deterministic>
     <IsAotCompatible>true</IsAotCompatible>
     <AgentFrameworkRootProfile Condition="'$(AgentFrameworkRootProfile)' == ''">Full</AgentFrameworkRootProfile>
-    <MadorinCliVersion>0.1.68</MadorinCliVersion>
+    <MadorinCliVersion>0.1.69</MadorinCliVersion>
     <MadorinProductName>madorin-cli</MadorinProductName>
     <MadorinCompany>©madorin 藏将科技出品</MadorinCompany>
     <MadorinCopyright>Madorin &amp; Streamx</MadorinCopyright>

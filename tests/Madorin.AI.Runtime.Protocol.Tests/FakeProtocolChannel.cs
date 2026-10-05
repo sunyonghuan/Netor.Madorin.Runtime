@@ -817,11 +817,9 @@ internal sealed class FakeRuntime : IAsyncDisposable
     {
         return selection.ModeOptions switch
         {
-            ExpertModeOptions expert => [expert.Agent],
-            MeetingModeOptions meeting => meeting.Participants
-                .Select(static participant => participant.Agent)
-                .ToArray(),
-            WorkModeOptions work => [work.GeneralManager, .. work.AvailableAgents],
+            ExpertModeOptions expert => expert.AvailableAgents is null
+                ? [expert.Agent]
+                : [expert.Agent, .. expert.AvailableAgents],
             _ => throw new InvalidOperationException("The Runtime mode is not supported.")
         };
     }

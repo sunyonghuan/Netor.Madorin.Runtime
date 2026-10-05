@@ -47,7 +47,10 @@ internal static class ServiceCommands
                     "Override the IPC pipe prefix; defaults to madorin.ai.runtime."),
                 CommandOptions.Create<int?>(
                     "--max-runs",
-                    "Set the maximum concurrent Run count; defaults to 4."));
+                    "Set the maximum concurrent Run count; defaults to 4."),
+                CommandOptions.Create<int?>(
+                    "--http-port",
+                    "Enable HTTP REST API on the specified port."));
         command.SetAction(async parseResult =>
         {
             var workspace = parseResult.GetValue(workspaceOption);
@@ -117,6 +120,7 @@ internal static class ServiceCommands
                 MaxConcurrentRuns = parseResult.GetValue<int?>("--max-runs") ?? 4,
                 MinimumLogLevel = minimumLogLevel,
                 HandshakeSecret = handshakeSecret,
+                HttpPort = parseResult.GetValue<int?>("--http-port"),
                 ProviderResolver = null
             };
 
@@ -427,19 +431,7 @@ internal static class ServiceCommands
                         outputFormat,
                         machineOutputRedirected,
                         "InvalidMode",
-                        "Mode must be expert, meeting, work, or standalone.");
-                    return ExitCodes.InvalidArguments;
-                }
-
-                if (mode is RuntimeMode.Work && agents.Count < 2)
-                {
-                    RunOutputWriter.WriteCommandFailure(
-                        output,
-                        error,
-                        outputFormat,
-                        machineOutputRedirected,
-                        "InsufficientWorkAgents",
-                        "Work mode requires at least two configured Agents: one manager and one worker.");
+                        "Mode must be expert or standalone.");
                     return ExitCodes.InvalidArguments;
                 }
 
@@ -657,7 +649,6 @@ internal static class ServiceCommands
         {
             CancellationTokenSource? cancellationTarget = null;
             var shouldExit = false;
-            string? pauseSessionId = null;
             lock (interruptSync)
             {
                 switch (interruptState)
@@ -667,19 +658,8 @@ internal static class ServiceCommands
                         shouldExit = true;
                         break;
                     case ReplInterruptState.Running:
-                        // Meeting: first Ctrl+C requests cooperative pause; second hard-cancels.
-                        if (mode == RuntimeMode.Meeting
-                            && activeMeetingSessionId is not null)
-                        {
-                            interruptState = ReplInterruptState.Pausing;
-                            pauseSessionId = activeMeetingSessionId;
-                        }
-                        else
-                        {
-                            interruptState = ReplInterruptState.Cancelling;
-                            cancellationTarget = activeRunCts;
-                        }
-
+                        interruptState = ReplInterruptState.Cancelling;
+                        cancellationTarget = activeRunCts;
                         break;
                     case ReplInterruptState.Pausing:
                         interruptState = ReplInterruptState.Cancelling;
@@ -691,30 +671,6 @@ internal static class ServiceCommands
                         shouldExit = true;
                         break;
                 }
-            }
-
-            if (pauseSessionId is not null)
-            {
-                _ = Task.Run(async () =>
-                {
-                    try
-                    {
-                        await runtime.PauseMeetingAsync(
-                                new MeetingPauseRequest(
-                                    pauseSessionId,
-                                    $"repl-pause-{Guid.NewGuid():N}",
-                                    "REPL Ctrl+C cooperative pause"),
-                                CancellationToken.None)
-                            .ConfigureAwait(false);
-                    }
-                    catch (Exception exception)
-                    {
-                        Trace.TraceWarning(
-                            "Meeting pause request failed type={0} message={1}",
-                            exception.GetType().FullName,
-                            exception.Message);
-                    }
-                });
             }
 
             TryCancel(cancellationTarget);
@@ -868,24 +824,6 @@ internal static class ServiceCommands
                 if (exitCts.IsCancellationRequested)
                 {
                     return Complete(ExitCodes.UserInterrupted);
-                }
-
-                if (mode == RuntimeMode.Meeting
-                    && sessionId is not null
-                    && result.ExitCode == ExitCodes.UserInterrupted)
-                {
-                    var meetingStatus = await runtime.GetMeetingSessionStatusAsync(sessionId, ct)
-                        .ConfigureAwait(false);
-                    if (string.Equals(meetingStatus, "Paused", StringComparison.Ordinal))
-                    {
-                        await output.WriteLineAsync(
-                                "会议已在安全点暂停（Run=Interrupted）。下一条输入将作为 Continuation Run 续开；")
-                            .ConfigureAwait(false);
-                        await output.WriteLineAsync(
-                                "可用 /interrupt <文本> 先入队插话，或 /pause 查看状态。")
-                            .ConfigureAwait(false);
-                        continue;
-                    }
                 }
 
                 if (result.ExitCode == ExitCodes.UserInterrupted
@@ -1198,100 +1136,15 @@ internal static class ServiceCommands
 
                 case "/PAUSE":
                 {
-                    if (argument is not null)
-                    {
-                        await error.WriteLineAsync("Usage: /pause").ConfigureAwait(false);
-                        return Current();
-                    }
-
-                    if (mode is not RuntimeMode.Meeting)
-                    {
-                        await error.WriteLineAsync("/pause is only available in Meeting mode.")
-                            .ConfigureAwait(false);
-                        return Current();
-                    }
-
-                    if (sessionId is null)
-                    {
-                        await error.WriteLineAsync(
-                                "No active Meeting Session. Start a turn first, then press Ctrl+C during the run to pause.")
-                            .ConfigureAwait(false);
-                        return Current();
-                    }
-
-                    var pauseStatus = await runtime.GetMeetingSessionStatusAsync(sessionId, ct)
+                    await error.WriteLineAsync("/pause command has been removed (Meeting mode discontinued).")
                         .ConfigureAwait(false);
-                    if (string.Equals(pauseStatus, "Paused", StringComparison.Ordinal))
-                    {
-                        await output.WriteLineAsync(
-                                $"Meeting '{sessionId}' is already Paused. Submit the next message to continue, or use /interrupt <text>.")
-                            .ConfigureAwait(false);
-                        return Current();
-                    }
-
-                    try
-                    {
-                        var pauseResult = await runtime.PauseMeetingAsync(
-                                new MeetingPauseRequest(
-                                    sessionId,
-                                    $"repl-pause-cmd-{Guid.NewGuid():N}",
-                                    "REPL /pause"),
-                                ct)
-                            .ConfigureAwait(false);
-                        await output.WriteLineAsync(
-                                $"Pause requested ({pauseResult.Status}). If a Meeting is running, it will stop at the next safe point. "
-                                + "During a run, prefer Ctrl+C once for cooperative pause.")
-                            .ConfigureAwait(false);
-                    }
-                    catch (Exception ex)
-                    {
-                        await error.WriteLineAsync($"Pause failed: {ex.Message}").ConfigureAwait(false);
-                    }
-
                     return Current();
                 }
 
                 case "/INTERRUPT":
                 {
-                    if (string.IsNullOrWhiteSpace(argument))
-                    {
-                        await error.WriteLineAsync("Usage: /interrupt <text>").ConfigureAwait(false);
-                        return Current();
-                    }
-
-                    if (mode is not RuntimeMode.Meeting)
-                    {
-                        await error.WriteLineAsync("/interrupt is only available in Meeting mode.")
-                            .ConfigureAwait(false);
-                        return Current();
-                    }
-
-                    if (sessionId is null)
-                    {
-                        await error.WriteLineAsync(
-                                "No active Meeting Session. Start a meeting turn before enqueuing interrupts.")
-                            .ConfigureAwait(false);
-                        return Current();
-                    }
-
-                    try
-                    {
-                        var enqueue = await runtime.EnqueueMeetingInputAsync(
-                                new MeetingInputEnqueueRequest(
-                                    sessionId,
-                                    $"repl-interrupt-{Guid.NewGuid():N}",
-                                    [new TextContentBlock(argument)]),
-                                ct)
-                            .ConfigureAwait(false);
-                        await output.WriteLineAsync(
-                                $"Interrupt queued ({enqueue.Status}): will be absorbed at the next Meeting safe point / continuation Host turn.")
-                            .ConfigureAwait(false);
-                    }
-                    catch (Exception ex)
-                    {
-                        await error.WriteLineAsync($"Interrupt failed: {ex.Message}").ConfigureAwait(false);
-                    }
-
+                    await error.WriteLineAsync("/interrupt command has been removed (Meeting mode discontinued).")
+                        .ConfigureAwait(false);
                     return Current();
                 }
 
@@ -1351,41 +1204,6 @@ internal static class ServiceCommands
                                 $"Session '{argument}' references an Agent, Provider, or model that is not available locally.")
                             .ConfigureAwait(false);
                         return Current();
-                    }
-
-                    if (mode == RuntimeMode.Meeting)
-                    {
-                        try
-                        {
-                            var meetingStatus = await runtime.GetMeetingSessionStatusAsync(argument, ct)
-                                .ConfigureAwait(false);
-                            if (string.Equals(meetingStatus, "Paused", StringComparison.Ordinal))
-                            {
-                                var ready = await runtime.ResumeMeetingAsync(
-                                        new MeetingResumeRequest(
-                                            argument,
-                                            $"repl-resume-{Guid.NewGuid():N}"),
-                                        ct)
-                                    .ConfigureAwait(false);
-                                await output.WriteLineAsync(
-                                        $"Resumed Session: {argument} (Meeting {ready.Status}, nextRound={ready.NextRoundIndex})")
-                                    .ConfigureAwait(false);
-                                await output.WriteLineAsync(
-                                        "Submit the next message to start the Continuation Run (Host recovery first).")
-                                    .ConfigureAwait(false);
-                                return new ReplCommandResult(
-                                    argument,
-                                    resumedSelection,
-                                    resumeSnapshot.SelectionVersion ?? savedSelection.SelectionVersion,
-                                    ExitCode: null);
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            await error.WriteLineAsync($"Meeting resume check failed: {ex.Message}")
-                                .ConfigureAwait(false);
-                            return Current();
-                        }
                     }
 
                     await output.WriteLineAsync($"Resumed Session: {argument}")
@@ -1881,11 +1699,6 @@ internal static class ServiceCommands
     private static string? GetPrimaryAgentId(ModeOptions modeOptions) => modeOptions switch
     {
         ExpertModeOptions expert => expert.Agent.AgentId,
-        MeetingModeOptions meeting => meeting.Participants
-            .OrderBy(static participant => participant.JoinOrder)
-            .Select(static participant => participant.Agent.AgentId)
-            .FirstOrDefault(),
-        WorkModeOptions work => work.GeneralManager.AgentId,
         _ => null
     };
 
@@ -2113,15 +1926,6 @@ internal static class ServiceCommands
         ModeOptions modeOptions = mode switch
         {
             RuntimeMode.Expert => new ExpertModeOptions(selectedAgent),
-            RuntimeMode.Meeting => BuildCliMeetingModeOptions(agentRefs, selectedAgent),
-            RuntimeMode.Work => new WorkModeOptions(
-                selectedAgent,
-                agentRefs.Where(agent => !agent.AgentId.Equals(
-                        selectedAgent.AgentId,
-                        StringComparison.Ordinal))
-                    .ToArray(),
-                supervisor: null,
-                workflowPolicy: WorkflowPolicy.Default with { RequirePlanConfirmation = true }),
             _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, null)
         };
         return new NextTurnSelection(
@@ -2163,96 +1967,6 @@ internal static class ServiceCommands
     /// CLI Meeting defaults follow the product plan: HostDriven host, FinalOnly summarizer,
     /// participants are non-host/non-summarizer agents (at least two when available).
     /// </summary>
-    private static MeetingModeOptions BuildCliMeetingModeOptions(
-        AgentRef[] agentRefs,
-        AgentRef selectedAgent)
-    {
-        ArgumentNullException.ThrowIfNull(agentRefs);
-        if (agentRefs.Length == 0)
-        {
-            throw new InvalidOperationException(
-                "Meeting mode requires at least one configured agent.");
-        }
-
-        static bool IsHostCandidate(AgentRef agent) =>
-            agent.AgentId.Contains("meeting-host", StringComparison.OrdinalIgnoreCase)
-            || agent.AgentId.Equals("meeting.host", StringComparison.OrdinalIgnoreCase)
-            || agent.AgentId.EndsWith(".host", StringComparison.OrdinalIgnoreCase)
-            || agent.AgentId.Equals("host", StringComparison.OrdinalIgnoreCase);
-
-        static bool IsSummarizerCandidate(AgentRef agent) =>
-            agent.AgentId.Contains("summarizer", StringComparison.OrdinalIgnoreCase)
-            || agent.AgentId.Contains("meeting-summarizer", StringComparison.OrdinalIgnoreCase);
-
-        var hostAgent = agentRefs.FirstOrDefault(IsHostCandidate)
-            ?? selectedAgent with { AgentId = "meeting-host" };
-        // Host scheduling should not depend on filesystem tools; empty allowlist keeps the
-        // decision turn free of tool/reasoning capability conflicts in standalone CLI.
-        hostAgent = hostAgent with { AllowedToolIds = [] };
-        var summarizerAgent = agentRefs.FirstOrDefault(IsSummarizerCandidate)
-            ?? new AgentRef(
-                "meeting-summarizer",
-                hostAgent.PromptTemplateVersion,
-                "Summarize only the supplied public meeting history. Preserve decisions, disagreements, and open actions.",
-                ProviderId: hostAgent.ProviderId,
-                ModelId: hostAgent.ModelId,
-                AllowedToolIds: []);
-
-        var participantAgents = agentRefs
-            .Where(agent =>
-                !string.Equals(agent.AgentId, hostAgent.AgentId, StringComparison.Ordinal)
-                && !IsHostCandidate(agent)
-                && !IsSummarizerCandidate(agent))
-            .ToArray();
-
-        // Keep a valid 2+ participant set even when the config only has a few agents.
-        if (participantAgents.Length < 2)
-        {
-            participantAgents = agentRefs
-                .Where(agent => !IsSummarizerCandidate(agent))
-                .Take(Math.Max(2, Math.Min(agentRefs.Length, 8)))
-                .ToArray();
-            if (participantAgents.Length < 2 && agentRefs.Length >= 1)
-            {
-                // Duplicate display identities only when the user configured a single agent.
-                participantAgents =
-                [
-                    agentRefs[0],
-                    agentRefs.Length > 1 ? agentRefs[1] : agentRefs[0] with
-                    {
-                        AgentId = agentRefs[0].AgentId + "-b"
-                    }
-                ];
-            }
-        }
-
-        var participants = participantAgents
-            .Select((agent, index) => new MeetingParticipant(
-                $"cli-{agent.AgentId}-{index}",
-                agent,
-                agent.AgentId,
-                JoinOrder: index))
-            .ToArray();
-
-        var maxRounds = Math.Max(participants.Length + 1, 3);
-        return new MeetingModeOptions(
-            participants,
-            hostAgent: hostAgent,
-            selectorPolicy: new MeetingSelectorPolicyOptions(
-                MeetingSelectorPolicy.HostDriven,
-                MaxRounds: maxRounds),
-            policy: new MeetingPolicy(
-                SummaryMode: MeetingSummaryMode.FinalOnly,
-                Summarizer: summarizerAgent,
-                HitlEnabled: false,
-                // Standalone CLI currently has no Meeting HITL console handler.
-                // Host/SDK can enable RequireEndConfirmation explicitly.
-                RequireEndConfirmation: false,
-                InvocationTimeoutSeconds: 180,
-                MaxRetriesPerInvocation: 0,
-                HostFailure: MeetingHostFailurePolicy.Pause,
-                SummarizerFailure: MeetingSummarizerFailurePolicy.FallbackTailWindow));
-    }
 
     private static bool TryResolveMode(string? value, out RuntimeMode mode)
     {
@@ -2263,12 +1977,6 @@ internal static class ServiceCommands
             case "EXPERT":
             case "STANDALONE":
                 mode = RuntimeMode.Expert;
-                return true;
-            case "MEETING":
-                mode = RuntimeMode.Meeting;
-                return true;
-            case "WORK":
-                mode = RuntimeMode.Work;
                 return true;
             default:
                 mode = default;

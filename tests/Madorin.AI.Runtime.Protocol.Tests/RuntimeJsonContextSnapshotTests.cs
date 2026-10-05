@@ -66,8 +66,6 @@ public sealed class RuntimeJsonContextSnapshotTests
             "initialize-request.v1.json" => CreateInitializeRequest(),
             "initialize-response.v1.json" => CreateInitializeResponse(),
             "new-session-run-expert.v1.json" => CreateNewSessionRun(RuntimeMode.Expert),
-            "new-session-run-meeting.v1.json" => CreateNewSessionRun(RuntimeMode.Meeting),
-            "new-session-run-work.v1.json" => CreateNewSessionRun(RuntimeMode.Work),
             "existing-session-run.v1.json" => CreateExistingSessionRun(),
             "runtime-event-envelope.v1.json" => CreateRuntimeEventEnvelope(),
             "json-rpc-request.v1.json" => CreateJsonRpcRequest(),
@@ -195,17 +193,9 @@ public sealed class RuntimeJsonContextSnapshotTests
         ModeOptions modeOptions = mode switch
         {
             RuntimeMode.Expert => new ExpertModeOptions(primaryAgent),
-            RuntimeMode.Meeting => new MeetingModeOptions(
-                [primaryAgent, new AgentRef("reviewer", "v2", "Review")],
-                primaryAgent.AgentId),
-            RuntimeMode.Work => new WorkModeOptions(
-                primaryAgent,
-                [new AgentRef("worker", "v3", "Execute")]),
             _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, null)
         };
-        var content = mode == RuntimeMode.Expert
-            ? CreateAllContentBlocks()
-            : [new TextContentBlock($"Start {mode}")];
+        var content = CreateAllContentBlocks();
         var request = new NewSessionRunRequest(
             $"session-key-{mode.ToString().ToLowerInvariant()}",
             $"run-key-{mode.ToString().ToLowerInvariant()}",

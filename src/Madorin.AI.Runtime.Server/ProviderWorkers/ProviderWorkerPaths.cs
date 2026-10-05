@@ -23,9 +23,10 @@ public static class ProviderWorkerPaths
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
         ArgumentException.ThrowIfNullOrWhiteSpace(slug);
+        var normalized = slug.Trim().ToLowerInvariant();
         var fileName = OperatingSystem.IsWindows()
-            ? $"madorin-provider-{slug}.exe"
-            : $"madorin-provider-{slug}";
+            ? $"madorin-provider-{normalized}.exe"
+            : $"madorin-provider-{normalized}";
         return Path.GetFullPath(Path.Combine(directory, fileName));
     }
 }

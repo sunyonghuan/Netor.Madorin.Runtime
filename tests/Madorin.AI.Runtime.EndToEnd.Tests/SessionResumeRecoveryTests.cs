@@ -76,8 +76,8 @@ public sealed class SessionResumeRecoveryTests
                 foreach (var mode in new[]
                          {
                              RuntimeMode.Expert,
-                             RuntimeMode.Meeting,
-                             RuntimeMode.Work
+                             RuntimeMode.Expert,
+                             RuntimeMode.Expert
                          })
                 {
                     captures.Add(await StartAndCompleteAsync(
@@ -145,19 +145,6 @@ public sealed class SessionResumeRecoveryTests
                     .OrderBy(static id => id, StringComparer.Ordinal)
                     .ToArray();
                 CollectionAssert.AreEqual(expectedDefinitionIds, actualDefinitionIds);
-                if (capture.Mode == RuntimeMode.Meeting)
-                {
-                    Assert.IsNotNull(resume.MeetingState);
-                }
-                else if (capture.Mode == RuntimeMode.Work)
-                {
-                    Assert.IsNotNull(resume.WorkState);
-                    Assert.IsNotNull(resume.LastCheckpoint);
-                    Assert.IsNotEmpty(resume.LastCheckpoint);
-                    var revisions = resume.WorkState.PlanRevisions
-                        ?? throw new InvalidDataException("Work Resume did not return plan revisions.");
-                    Assert.IsNotEmpty(revisions);
-                }
 
                 var blocked = await Assert.ThrowsExactlyAsync<InvalidOperationException>(
                     async () => await secondClient.StartExistingSessionRunAsync(
@@ -389,20 +376,6 @@ public sealed class SessionResumeRecoveryTests
                 mode,
                 new DefaultSelection("resume-provider", "resume-model"),
                 new ExpertModeOptions(ExpertAgent)),
-            RuntimeMode.Meeting => new NextTurnSelection(
-                1,
-                mode,
-                new DefaultSelection("resume-provider", "resume-model"),
-                new MeetingModeOptions(
-                [
-                    new MeetingParticipant("participant-a", MeetingAgentA, "A", JoinOrder: 0),
-                    new MeetingParticipant("participant-b", MeetingAgentB, "B", JoinOrder: 1)
-                ])),
-            RuntimeMode.Work => new NextTurnSelection(
-                1,
-                mode,
-                new DefaultSelection("resume-provider", "resume-model"),
-                new WorkModeOptions(WorkManager, [WorkWorker], supervisor: null, workflowPolicy: WorkflowPolicy.Default)),
             _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, null)
         };
         return new NewSessionRunRequest(
@@ -416,16 +389,6 @@ public sealed class SessionResumeRecoveryTests
     private static AgentDefinition[] GetDefinitions(RuntimeMode mode) => mode switch
     {
         RuntimeMode.Expert => [new AgentDefinition(ExpertAgent)],
-        RuntimeMode.Meeting =>
-        [
-            new AgentDefinition(MeetingAgentA),
-            new AgentDefinition(MeetingAgentB)
-        ],
-        RuntimeMode.Work =>
-        [
-            new AgentDefinition(WorkManager),
-            new AgentDefinition(WorkWorker)
-        ],
         _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, null)
     };
 

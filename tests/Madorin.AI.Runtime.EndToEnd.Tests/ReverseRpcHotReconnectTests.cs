@@ -184,173 +184,6 @@ public sealed class ReverseRpcHotReconnectTests
     [TestMethod]
     [DoNotParallelize]
     [Timeout(30_000, CooperativeCancellation = true)]
-    public async Task WorkRun_PermissionWaitReconnectsAndReplaysWithoutDuplicateBusinessState()
-    {
-        const string managerGrantId = "grant-manager-work-reconnect";
-        var workspace = CreateTemporaryDirectory();
-        var instanceId = Guid.NewGuid().ToString("N");
-        var hostInstanceId = Guid.NewGuid().ToString("N");
-        var secret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
-        var provider = new ReconnectWorkProvider();
-        var host = new RecoveringWorkPermissionHost(workspace, managerGrantId);
-        using var shutdown = CancellationTokenSource.CreateLinkedTokenSource(
-            TestContext.CancellationToken);
-        try
-        {
-            await using var server = await RuntimeServer.StartAsync(
-                new RuntimeServerOptions(workspace)
-                {
-                    InstanceId = instanceId,
-                    PipePrefix = $"madorin.work-permission-reconnect.{Guid.NewGuid():N}",
-                    HandshakeSecret = secret,
-                    HostLeaseTimeout = TimeSpan.FromSeconds(5),
-                    MemoryUserHome = Path.Combine(workspace, "home"),
-                    ProviderResolver = _ => provider
-                },
-                TestContext.CancellationToken);
-            var serverTask = server.RunAsync(shutdown.Token);
-            await using var client = new RuntimeClient(
-                new RuntimeClientOptions(
-                    server.PipeName,
-                    hostInstanceId,
-                    ExpectedRuntimeInstanceId: instanceId,
-                    HandshakeSecret: secret,
-                    Capabilities: new RuntimeCapabilities(
-                        ReverseRpc: true,
-                        ToolCatalog: true,
-                        ToolPermissions: true)));
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(
-                TestContext.CancellationToken);
-            timeout.CancelAfter(TimeSpan.FromSeconds(20));
-            await client.ConnectAsync(timeout.Token);
-            client.ControlPeer.SetRequestHandler(host.HandleAsync);
-            await PublishCatalogAsync(client, timeout.Token);
-
-            var runId = await client.StartNewSessionRunAsync(
-                CreateWorkRequest(),
-                timeout.Token);
-            await provider.ManagerStarted.WaitAsync(timeout.Token);
-            var firstEvent = await ReadFirstRunEventAsync(client, runId, timeout.Token);
-            await client.AcknowledgeEventsAsync(firstEvent.Gsn, timeout.Token);
-            var replayCursor = firstEvent.Gsn;
-            var running = await client.QueryRunAsync(runId, timeout.Token);
-
-            var connectionString = new SqliteConnectionStringBuilder
-            {
-                DataSource = Path.Join(workspace, ".madorin", "state.db"),
-                Pooling = false,
-                DefaultTimeout = 5
-            }.ToString();
-            await using var connection = new SqliteConnection(connectionString);
-            await connection.OpenAsync(timeout.Token);
-            using var toolState = new SqliteToolIntentRepository(connection);
-            var authorization = new ToolAuthorizationService(
-                toolState,
-                RuntimeToolPolicy.CreateRestricted(workspace));
-            var managerGrantExpiresAt = DateTimeOffset.UtcNow.AddMinutes(30);
-            await authorization.SaveGrantAsync(
-                CreateManagerGrant(
-                    managerGrantId,
-                    runId,
-                    workspace,
-                    managerGrantExpiresAt),
-                ct: timeout.Token);
-
-            provider.ReleaseManager();
-            var permission = await host.PermissionReceived.WaitAsync(timeout.Token);
-            Assert.AreEqual(runId, permission.RunId);
-            Assert.AreEqual("worker", permission.AgentId);
-            Assert.AreEqual("manager", permission.ParentAgentId);
-            Assert.AreEqual("work-order-call", permission.CallId);
-            Assert.IsFalse(string.IsNullOrWhiteSpace(permission.WorkStepId));
-            Assert.AreEqual("1", permission.PlanVersion);
-
-            var workRepo = new SqliteWorkRepository(connection);
-            var waiting = await workRepo.GetResumeStateAsync(running.SessionId, timeout.Token);
-            Assert.IsNotNull(waiting);
-            Assert.AreEqual(WorkSessionStatus.WaitingForApproval, waiting.Status);
-            Assert.AreEqual(permission.ApprovalRequestId, waiting.PendingApprovalRequestId);
-            var waitingStep = Assert.ContainsSingle(waiting.Steps);
-            Assert.AreEqual(WorkStepLifecycleStatus.WaitingForApproval, waitingStep.Status);
-            Assert.AreEqual(permission.WorkStepId, waitingStep.StepId);
-
-            await server.DisconnectControlChannelsAsync();
-            host.ReleaseLostPermissionResponse();
-            await WaitForAsync(
-                () => server.ConnectedSessionCount == 0,
-                timeout.Token);
-
-            await client.ReconnectAsync(timeout.Token);
-            client.ControlPeer.SetRequestHandler(host.HandleAsync);
-            var replayed = await ReadRunEventsUntilTerminalAsync(
-                client,
-                runId,
-                replayCursor,
-                timeout.Token);
-            var terminal = replayed[^1];
-            await client.AcknowledgeEventsAsync(terminal.Gsn, timeout.Token);
-
-            Assert.AreEqual(MessageTypes.RunCompleted, terminal.MessageType);
-            Assert.IsTrue(replayed.All(envelope => envelope.Gsn > replayCursor));
-            Assert.AreEqual(
-                replayed.Count,
-                replayed.Select(static envelope => envelope.Gsn).Distinct().Count());
-            Assert.AreEqual(
-                1,
-                replayed.Count(static envelope =>
-                    envelope.MessageType == MessageTypes.RunCompleted));
-            Assert.AreEqual(1, provider.ManagerCallCount);
-            Assert.AreEqual(2, provider.WorkerCallCount);
-            Assert.AreEqual(1, provider.UniqueWorkerInvocationCount);
-            Assert.AreEqual(1, host.UniquePermissionRequestCount);
-            Assert.IsGreaterThanOrEqualTo(1, host.PhysicalPermissionRequestCount);
-            Assert.AreEqual(1, host.ExecutionCount);
-            Assert.AreEqual(0, host.QueryCount);
-
-            var completedRun = await client.QueryRunAsync(runId, timeout.Token);
-            Assert.AreEqual(RunStatus.Completed, completedRun.Status);
-            var completed = await workRepo.GetResumeStateAsync(
-                completedRun.SessionId,
-                timeout.Token);
-            Assert.IsNotNull(completed);
-            Assert.AreEqual(WorkSessionStatus.Completed, completed.Status);
-            Assert.IsNull(completed.PendingApprovalRequestId);
-            var completedStep = Assert.ContainsSingle(completed.Steps);
-            Assert.AreEqual(WorkStepLifecycleStatus.Completed, completedStep.Status);
-            Assert.AreEqual(1, completedStep.AttemptCount);
-
-            var intent = await toolState.GetIntentAsync("work-order-call", timeout.Token);
-            Assert.IsNotNull(intent);
-            Assert.AreEqual(ToolIntentStatus.Succeeded, intent.Status);
-            Assert.AreEqual(permission.ApprovalRequestId, intent.ApprovalRequestId);
-            Assert.AreEqual(completedStep.StepId, intent.WorkStepId);
-            Assert.AreEqual(completedStep.InvocationId, intent.InvocationId);
-            await AssertSingleWorkBusinessStateAsync(
-                connection,
-                runId,
-                completedRun.SessionId,
-                completedStep.InvocationId!,
-                permission,
-                timeout.Token);
-
-            shutdown.Cancel();
-            await serverTask;
-        }
-        finally
-        {
-            provider.ReleaseManager();
-            host.ReleaseLostPermissionResponse();
-            shutdown.Cancel();
-            if (Directory.Exists(workspace))
-            {
-                Directory.Delete(workspace, recursive: true);
-            }
-        }
-    }
-
-    [TestMethod]
-    [DoNotParallelize]
-    [Timeout(30_000, CooperativeCancellation = true)]
     public async Task StartupSentToolRecovery_BlocksNewRunsUntilHostQueryCompletes()
     {
         var workspace = CreateTemporaryDirectory();
@@ -552,7 +385,7 @@ public sealed class ReverseRpcHotReconnectTests
             ct);
         var repository = new SqliteSessionRepository(connection);
         var sessionId = await repository.CreateSessionAsync(
-            RuntimeMode.Work,
+            RuntimeMode.Expert,
             Guid.NewGuid().ToString("N"),
             TimeSpan.FromMinutes(10),
             ct);
@@ -654,14 +487,8 @@ public sealed class ReverseRpcHotReconnectTests
 
     private static NewSessionRunRequest CreateOfflineWorkRequest()
     {
-        var manager = new AgentRef(
-            "offline-manager",
-            "v1",
-            "Create one local step.",
-            "offline-work-provider",
-            "offline-work-model");
-        var worker = new AgentRef(
-            "offline-worker",
+        var agent = new AgentRef(
+            "offline-agent",
             "v1",
             "Complete the local step without tools.",
             "offline-work-provider",
@@ -669,25 +496,19 @@ public sealed class ReverseRpcHotReconnectTests
         return new NewSessionRunRequest(
             "offline-work-session",
             "offline-work-run",
-            RuntimeMode.Work,
+            RuntimeMode.Expert,
             new NextTurnSelection(
                 1,
-                RuntimeMode.Work,
+                RuntimeMode.Expert,
                 new DefaultSelection("offline-work-provider", "offline-work-model"),
-                new WorkModeOptions(manager, [worker], supervisor: null, workflowPolicy: WorkflowPolicy.Default)),
+                new ExpertModeOptions(agent)),
             [new TextContentBlock("Complete the local task while the Host is offline.")]);
     }
 
     private static NewSessionRunRequest CreateWorkRequest()
     {
-        var manager = new AgentRef(
-            "manager",
-            "v1",
-            "Create a one-step plan.",
-            "work-reconnect-provider",
-            "work-reconnect-model");
-        var worker = new AgentRef(
-            "worker",
+        var agent = new AgentRef(
+            "agent",
             "v1",
             "Execute the assigned step.",
             "work-reconnect-provider",
@@ -696,12 +517,12 @@ public sealed class ReverseRpcHotReconnectTests
         return new NewSessionRunRequest(
             "work-reconnect-session",
             "work-reconnect-run",
-            RuntimeMode.Work,
+            RuntimeMode.Expert,
             new NextTurnSelection(
                 1,
-                RuntimeMode.Work,
+                RuntimeMode.Expert,
                 new DefaultSelection("work-reconnect-provider", "work-reconnect-model"),
-                new WorkModeOptions(manager, [worker], supervisor: null, workflowPolicy: WorkflowPolicy.Default),
+                new ExpertModeOptions(agent),
                 ToolCatalogVersion: "host-v1"),
             [new TextContentBlock("Create one order.")]);
     }

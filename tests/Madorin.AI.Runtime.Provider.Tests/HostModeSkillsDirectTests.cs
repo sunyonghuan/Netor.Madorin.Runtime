@@ -192,26 +192,6 @@ public sealed class HostModeSkillsDirectTests
         Assert.Contains("skillDiscoveryMode", json, StringComparison.Ordinal);
     }
 
-    [TestMethod]
-    public void MeetingParticipant_SkillDiscoveryMode_RoundTripsViaHandWrittenJson()
-    {
-        var participant = new MeetingParticipant(
-            "p1",
-            new AgentRef(
-                "agent-1",
-                "v1",
-                "prompt",
-                SkillIds: ["alpha-skill"],
-                SkillDiscoveryMode: "direct"),
-            "Alice",
-            1,
-            ParticipantStatus.Active);
-        var json = JsonSerializer.Serialize(participant, RuntimeJsonContext.Default.MeetingParticipant);
-        var restored = JsonSerializer.Deserialize(json, RuntimeJsonContext.Default.MeetingParticipant);
-        Assert.IsNotNull(restored);
-        Assert.AreEqual("direct", restored!.Agent.SkillDiscoveryMode);
-        Assert.Contains("skillDiscoveryMode", json, StringComparison.Ordinal);
-    }
 
     private void CreateSkill(string name, string description)
     {

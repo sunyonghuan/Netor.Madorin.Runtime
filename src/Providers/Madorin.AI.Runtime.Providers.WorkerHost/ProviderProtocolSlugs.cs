@@ -9,19 +9,19 @@ public static class ProviderProtocolSlugs
 {
     public static bool TryMap(string? protocol, [NotNullWhen(true)] out string? slug)
     {
-        slug = protocol?.Trim() switch
+        slug = protocol?.Trim().ToLowerInvariant() switch
         {
-            "OpenAI" => "openai",
-            "Anthropic" => "anthropic",
-            "OpenAI Compatible" => "openai-compatible",
-            "Custom" => "openai-compatible",
-            "DeepSeek" => "deepseek",
-            "Kimi" => "kimi",
-            "Aliyun" => "aliyun",
-            "Azure OpenAI" => "azure-openai",
-            "Gemini" => "gemini",
-            "GLM" => "glm",
-            "Ollama" => "ollama",
+            "openai" => "openai",
+            "anthropic" => "anthropic",
+            "openai compatible" => "openai-compatible",
+            "custom" => "openai-compatible",
+            "deepseek" => "deepseek",
+            "kimi" => "kimi",
+            "aliyun" => "aliyun",
+            "azure openai" => "azure-openai",
+            "gemini" => "gemini",
+            "glm" => "glm",
+            "ollama" => "ollama",
             _ => null
         };
         return slug is not null;

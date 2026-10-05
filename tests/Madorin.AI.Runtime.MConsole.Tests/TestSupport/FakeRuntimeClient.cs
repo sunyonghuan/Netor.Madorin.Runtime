@@ -150,52 +150,6 @@ internal sealed class FakeRuntimeClient : IRuntimeClient
         CancellationToken cancellationToken = default) => ValueTask.FromResult(
             ResumeResult ?? throw new NotSupportedException());
 
-    public MeetingHitlResponse? LastMeetingHitlResponse { get; private set; }
-
-    public ValueTask<bool> SubmitMeetingHitlResponseAsync(
-        MeetingHitlResponse response,
-        CancellationToken cancellationToken = default)
-    {
-        LastMeetingHitlResponse = response;
-        return ValueTask.FromResult(true);
-    }
-
-    public ValueTask<WorkInputEnqueueResult> EnqueueWorkInputAsync(
-        WorkInputEnqueueRequest request,
-        CancellationToken cancellationToken = default) =>
-        ValueTask.FromResult(new WorkInputEnqueueResult(
-            request.SessionId,
-            request.RequestId,
-            Accepted: true,
-            Status: "Pending"));
-
-    public ValueTask<MeetingInputEnqueueResult> EnqueueMeetingInputAsync(
-        MeetingInputEnqueueRequest request,
-        CancellationToken cancellationToken = default) =>
-        ValueTask.FromResult(new MeetingInputEnqueueResult(
-            request.SessionId,
-            request.RequestId,
-            Accepted: true,
-            Status: "Pending"));
-
-    public ValueTask<MeetingPauseResult> PauseMeetingAsync(
-        MeetingPauseRequest request,
-        CancellationToken cancellationToken = default) =>
-        ValueTask.FromResult(new MeetingPauseResult(
-            request.SessionId,
-            request.RequestId,
-            Accepted: true,
-            Status: "PauseRequested"));
-
-    public ValueTask<MeetingResumeResult> ResumeMeetingAsync(
-        MeetingResumeRequest request,
-        CancellationToken cancellationToken = default) =>
-        ValueTask.FromResult(new MeetingResumeResult(
-            request.SessionId,
-            request.RequestId,
-            Accepted: true,
-            Status: "ReadyForContinuation"));
-
     public ValueTask<SessionMessagesListResult> ListSessionMessagesAsync(
         SessionMessagesListParameters parameters,
         CancellationToken cancellationToken = default) =>

@@ -70,13 +70,13 @@ public sealed class SessionListStage7Tests(TestContext testContext)
             timeout.Token);
         var meeting = await StartAndCompleteAsync(
             fixture.Client,
-            RuntimeMode.Meeting,
+            RuntimeMode.Expert,
             "meeting",
             [new TextContentBlock("Meeting filter needle")],
             timeout.Token);
         var work = await StartAndCompleteAsync(
             fixture.Client,
-            RuntimeMode.Work,
+            RuntimeMode.Expert,
             "work",
             [new TextContentBlock($"  {workTitle}\U0001f600 must disappear")],
             timeout.Token);
@@ -99,12 +99,12 @@ public sealed class SessionListStage7Tests(TestContext testContext)
 
         var meetingItem = Assert.ContainsSingle(defaultPage.Sessions.Where(
             session => session.SessionId == meeting.SessionId));
-        Assert.AreEqual(RuntimeMode.Meeting, meetingItem.Mode);
+        Assert.AreEqual(RuntimeMode.Expert, meetingItem.Mode);
         Assert.AreEqual("Meeting filter needle", meetingItem.Title);
 
         var workItem = Assert.ContainsSingle(defaultPage.Sessions.Where(
             session => session.SessionId == work.SessionId));
-        Assert.AreEqual(RuntimeMode.Work, workItem.Mode);
+        Assert.AreEqual(RuntimeMode.Expert, workItem.Mode);
         var actualWorkTitle = workItem.Title
             ?? throw new InvalidDataException("The Work session title was not derived.");
         Assert.AreEqual(workTitle, actualWorkTitle);
@@ -113,7 +113,7 @@ public sealed class SessionListStage7Tests(TestContext testContext)
 
         var filtered = await fixture.Client.ListSessionsAsync(
             new SessionListParameters(
-                RuntimeMode.Meeting,
+                RuntimeMode.Expert,
                 SessionStatus.Active,
                 since,
                 Search: "filter needle",
@@ -197,24 +197,6 @@ public sealed class SessionListStage7Tests(TestContext testContext)
         ModeOptions modeOptions = mode switch
         {
             RuntimeMode.Expert => new ExpertModeOptions(ExpertAgent),
-            RuntimeMode.Meeting => new MeetingModeOptions(
-            [
-                new MeetingParticipant(
-                    "session-list-participant-a",
-                    MeetingAgentA,
-                    "A",
-                    JoinOrder: 0),
-                new MeetingParticipant(
-                    "session-list-participant-b",
-                    MeetingAgentB,
-                    "B",
-                    JoinOrder: 1)
-            ]),
-            RuntimeMode.Work => new WorkModeOptions(
-                WorkManager,
-                [WorkWorker],
-                supervisor: null,
-                workflowPolicy: WorkflowPolicy.Default),
             _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, null)
         };
         return new NextTurnSelection(

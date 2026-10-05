@@ -84,32 +84,6 @@ public interface IRuntimeClient : IAsyncDisposable
         string sessionId,
         CancellationToken cancellationToken = default);
 
-    /// <summary>Sends <c>meeting.hitl.response</c> for a pending meeting HITL request.</summary>
-    public ValueTask<bool> SubmitMeetingHitlResponseAsync(
-        MeetingHitlResponse response,
-        CancellationToken cancellationToken = default);
-
-    /// <summary>Enqueues mid-meeting user interrupt input for the next safe point.</summary>
-    public ValueTask<WorkInputEnqueueResult> EnqueueWorkInputAsync(
-        WorkInputEnqueueRequest request,
-        CancellationToken cancellationToken = default);
-
-    public ValueTask<MeetingInputEnqueueResult> EnqueueMeetingInputAsync(
-        MeetingInputEnqueueRequest request,
-        CancellationToken cancellationToken = default);
-
-    /// <summary>Requests a cooperative Meeting pause at the next safe point.</summary>
-    public ValueTask<MeetingPauseResult> PauseMeetingAsync(
-        MeetingPauseRequest request,
-        CancellationToken cancellationToken = default);
-
-    /// <summary>
-    /// Checks that a paused Meeting can continue. Start the continuation with
-    /// <c>run.existing_session</c> after this call returns ReadyForContinuation.
-    /// </summary>
-    public ValueTask<MeetingResumeResult> ResumeMeetingAsync(
-        MeetingResumeRequest request,
-        CancellationToken cancellationToken = default);
 
     public ValueTask<SessionMessagesListResult> ListSessionMessagesAsync(
         SessionMessagesListParameters parameters,
