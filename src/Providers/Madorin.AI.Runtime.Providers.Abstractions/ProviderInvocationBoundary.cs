@@ -17,6 +17,14 @@ public static class ProviderInvocationBoundary
         var projection = ProviderRequestCompatibilityProjector.ProjectWithDiagnostics(
             request,
             adapter);
+        if (projection.Diagnostics.FilteredContentBlockCount > 0)
+        {
+            yield return new ProjectionAdjustedProviderEvent(
+                request.InvocationId,
+                "FilteredContent",
+                "madorin.provider",
+                $"filteredBlocks={projection.Diagnostics.FilteredContentBlockCount}");
+        }
 
         await foreach (var providerEvent in adapter.CompleteStreamingAsync(
                 projection.Request,

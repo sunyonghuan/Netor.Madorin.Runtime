@@ -36,7 +36,7 @@ internal sealed class ExpertPlanManager
         }
 
         var now = DateTimeOffset.UtcNow;
-        var planId = $"plan-{now:yyyyMMdd-HHmmss}";
+        var planId = $"plan-{Guid.NewGuid():N}";
 
         var steps = request.Steps.Select(draft => new ExpertPlanStep(
             draft.StepId,
@@ -160,9 +160,12 @@ internal sealed class ExpertPlanManager
     }
 
     /// <summary>恢复活跃计划（续跑时调用）</summary>
-    public async Task<ExpertPlan?> RestoreActivePlanAsync(CancellationToken ct = default)
+    public async Task<ExpertPlan?> RestoreActivePlanAsync(
+        string sessionId,
+        CancellationToken ct = default)
     {
-        _activePlan = await _fileStore.LoadActiveAsync(ct).ConfigureAwait(false);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        _activePlan = await _fileStore.LoadActiveAsync(sessionId, ct).ConfigureAwait(false);
         return _activePlan;
     }
 

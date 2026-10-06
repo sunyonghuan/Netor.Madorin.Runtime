@@ -19,7 +19,7 @@ using Madorin.AI.Runtime.Services.Skills;
 using Madorin.AI.Runtime.Services.Tools;
 using Madorin.AI.Runtime.Tools.Abstractions;
 using Madorin.AI.Runtime.Tools.Builtin;
-using Madorin.AI.Runtime.Tools.Builtin.ModeShared;
+
 using System.Security.Cryptography;
 using Madorin.AI.Runtime.Transport.Abstractions;
 using Microsoft.Data.Sqlite;
@@ -133,7 +133,6 @@ internal sealed class RuntimeExecutionCore(
         // 并行子 Agent 作业池（无定时）：Run 作用域，Expert 绑定 Worker 后可 create/wait/result 回收。
         await using var agentJobCoordinator = new AgentJobCoordinator();
         var conversationStore = new ConversationStore(_dataDirectory);
-        Func<ApprovalRequest, CancellationToken, Task<ApprovalResponse>>? askUserApproval = null;
         var executors = new List<IToolExecutor>
         {
             new BuiltinFsToolExecutor(_memoryFiles.WorkspaceMutationLock),
@@ -142,6 +141,7 @@ internal sealed class RuntimeExecutionCore(
             new BuiltinMemoryToolExecutor(_memoryFiles),
             new BuiltinDelegateAgentToolExecutor(),
             new BuiltinAgentJobToolExecutor(agentJobCoordinator),
+            new BuiltinExpertPlanToolExecutor(),
         };
         if (skillCatalog is not null)
         {
@@ -198,10 +198,6 @@ internal sealed class RuntimeExecutionCore(
             _workspaceRoot,
             toolStateStore,
             liveCatalogProvider);
-        askUserApproval = toolConsentCoordinator.CanRequestApproval
-            ? toolConsentCoordinator.RequestWorkflowApprovalAsync
-            : null;
-
         Func<RuntimeSkillScriptInvocation, CancellationToken, Task<RuntimeSkillScriptResult>>? scriptInvoker =
             skillCatalog is null
                 ? null
@@ -253,6 +249,7 @@ internal sealed class RuntimeExecutionCore(
                 gatewayCatalogSnapshot,
                 _memorySnapshots,
                 _runtimeLimits,
+                _resultBlobStore,
                 reverseExecutor is null ? null : reverseExecutor.RequestPermissionAsync,
                 reverseExecutor is null ? null : reverseExecutor.RequestApprovalAsync,
                 toolStateStore,

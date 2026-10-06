@@ -154,7 +154,7 @@ public sealed class StandaloneLocalRuntimeTests
             var dataDirectory = Path.Combine(root, "data");
             var runtimeInstanceId = Guid.NewGuid().ToString("N");
             var logDirectory = Path.Combine(dataDirectory, "logs");
-            var logPath = Path.Combine(logDirectory, "20260729", "2016.jsonl");
+            var logPath = Path.Combine(logDirectory, "20260729", "runtime.jsonl");
             var options = new LocalRuntimeOptions(
                 workspace,
                 dataDirectory,
@@ -240,7 +240,7 @@ public sealed class StandaloneLocalRuntimeTests
                     ct: _testContext.CancellationToken);
             }
 
-            var logPath = Path.Combine(logDirectory, "20260729", "2016.jsonl");
+            var logPath = Path.Combine(logDirectory, "20260729", "runtime.jsonl");
             var lines = await File.ReadAllLinesAsync(logPath, _testContext.CancellationToken);
             var line = Assert.ContainsSingle(lines);
             using var document = JsonDocument.Parse(line);
@@ -311,7 +311,7 @@ public sealed class StandaloneLocalRuntimeTests
                     envelope.MessageType == MessageTypes.RunFailed));
             }
 
-            var logPath = Path.Combine(dataDirectory, "logs", "20260729", "2016.jsonl");
+            var logPath = Path.Combine(dataDirectory, "logs", "20260729", "runtime.jsonl");
             var lines = await File.ReadAllLinesAsync(logPath, _testContext.CancellationToken);
             var failedLine = Assert.ContainsSingle(lines.Where(static line =>
             {
@@ -564,12 +564,14 @@ public sealed class StandaloneLocalRuntimeTests
                 CreateOptions(secondWorkspace, Path.Combine(root, "data-b"), provider),
                 _testContext.CancellationToken);
 
-            var exception = await Assert.ThrowsExactlyAsync<InvalidOperationException>(
+            var exception = await Assert.ThrowsExactlyAsync<WorkspaceBusyException>(
                 () => LocalRuntime.StartAsync(
                     CreateOptions(firstWorkspace, Path.Combine(root, "data-c"), provider),
                     _testContext.CancellationToken));
 
             Assert.Contains("active Runtime instance", exception.Message, StringComparison.Ordinal);
+            Assert.IsTrue(exception.ToError().IsRetryable);
+            Assert.AreEqual(RuntimeErrorCodes.WorkspaceBusy, exception.ToError().Code);
             Assert.AreNotEqual(first.WorkspaceRoot, second.WorkspaceRoot);
         }
         finally
@@ -631,7 +633,7 @@ public sealed class StandaloneLocalRuntimeTests
                 hostOptions,
                 _testContext.CancellationToken);
 
-            var exception = await Assert.ThrowsExactlyAsync<InvalidOperationException>(
+            var exception = await Assert.ThrowsExactlyAsync<WorkspaceBusyException>(
                 () => LocalRuntime.StartAsync(
                     CreateOptions(
                         workspace,
@@ -640,6 +642,7 @@ public sealed class StandaloneLocalRuntimeTests
                     _testContext.CancellationToken));
 
             Assert.Contains("active Runtime instance", exception.Message, StringComparison.Ordinal);
+            Assert.IsTrue(exception.ToError().IsRetryable);
         }
         finally
         {

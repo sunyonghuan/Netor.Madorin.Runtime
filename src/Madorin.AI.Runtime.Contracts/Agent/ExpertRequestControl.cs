@@ -107,6 +107,12 @@ public sealed record ExpertRequestControl
     public double? FrequencyPenalty { get; init; }
 
     /// <summary>
+    /// Random seed for deterministic sampling (when the provider supports it).
+    /// Null = non-deterministic (default).
+    /// </summary>
+    public int? Seed { get; init; }
+
+    /// <summary>
     /// Request timeout in milliseconds. Overrides runtime default.
     /// Null = runtime default timeout.
     /// Valid range: 1000-600000 (1s-10min, provider-dependent).
@@ -133,12 +139,12 @@ public sealed record ExpertRequestControl
             throw new ArgumentException($"MaxTokens must be >= 1, got {MaxTokens.Value}", nameof(MaxTokens));
         }
 
-        if (Temperature.HasValue && (Temperature.Value < 0.0 || Temperature.Value > 2.0))
+        if (Temperature.HasValue && (!double.IsFinite(Temperature.Value) || Temperature.Value < 0.0 || Temperature.Value > 2.0))
         {
             throw new ArgumentException($"Temperature must be in [0.0, 2.0], got {Temperature.Value}", nameof(Temperature));
         }
 
-        if (TopP.HasValue && (TopP.Value <= 0.0 || TopP.Value > 1.0))
+        if (TopP.HasValue && (!double.IsFinite(TopP.Value) || TopP.Value <= 0.0 || TopP.Value > 1.0))
         {
             throw new ArgumentException($"TopP must be in (0.0, 1.0], got {TopP.Value}", nameof(TopP));
         }
@@ -159,12 +165,12 @@ public sealed record ExpertRequestControl
             }
         }
 
-        if (PresencePenalty.HasValue && (PresencePenalty.Value < -2.0 || PresencePenalty.Value > 2.0))
+        if (PresencePenalty.HasValue && (!double.IsFinite(PresencePenalty.Value) || PresencePenalty.Value < -2.0 || PresencePenalty.Value > 2.0))
         {
             throw new ArgumentException($"PresencePenalty must be in [-2.0, 2.0], got {PresencePenalty.Value}", nameof(PresencePenalty));
         }
 
-        if (FrequencyPenalty.HasValue && (FrequencyPenalty.Value < -2.0 || FrequencyPenalty.Value > 2.0))
+        if (FrequencyPenalty.HasValue && (!double.IsFinite(FrequencyPenalty.Value) || FrequencyPenalty.Value < -2.0 || FrequencyPenalty.Value > 2.0))
         {
             throw new ArgumentException($"FrequencyPenalty must be in [-2.0, 2.0], got {FrequencyPenalty.Value}", nameof(FrequencyPenalty));
         }

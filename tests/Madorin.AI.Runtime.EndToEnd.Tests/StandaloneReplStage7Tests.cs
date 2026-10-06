@@ -139,7 +139,7 @@ public sealed class StandaloneReplStage7Tests
                         "/skill list",
                         "/skill show repl-demo",
                         "/skill refresh",
-                        "/help skill",
+                        "/help en skill",
                         "/exit",
                         string.Empty
                     ])),
@@ -152,7 +152,9 @@ public sealed class StandaloneReplStage7Tests
             Assert.Contains("repl-demo\tworkspace\tREPL Skill", output.ToString(), StringComparison.Ordinal);
             Assert.Contains("Name: repl-demo", output.ToString(), StringComparison.Ordinal);
             Assert.Contains("REPL demo body.", output.ToString(), StringComparison.Ordinal);
-            Assert.Contains("/skill <list|show <name>|refresh>", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("/skill <list | show name | refresh>", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("Show or refresh local skills.", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("/skill show repl-demo", output.ToString(), StringComparison.Ordinal);
             Assert.DoesNotContain("Unknown REPL command", error.ToString(), StringComparison.Ordinal);
         }
         finally
@@ -370,7 +372,8 @@ public sealed class StandaloneReplStage7Tests
                     $"/export {exportPath}",
                     "/status",
                     "/clear",
-                    "/help compact",
+                    "/help en compact",
+                    "/help zh",
                     "/exit",
                     string.Empty
                 ]));
@@ -397,7 +400,7 @@ public sealed class StandaloneReplStage7Tests
             Assert.Contains($"Exported Session: {exportPath}", output.ToString(), StringComparison.Ordinal);
             Assert.Contains("Active runs: 0", output.ToString(), StringComparison.Ordinal);
             Assert.Contains(
-                "创建或刷新当前会话的上下文摘要。",
+                "Compact the session into a context summary.",
                 output.ToString(),
                 StringComparison.Ordinal);
             Assert.DoesNotContain("Unknown REPL command", error.ToString(), StringComparison.Ordinal);
@@ -431,7 +434,8 @@ public sealed class StandaloneReplStage7Tests
                     "/cd ../workspace-two",
                     "/cd",
                     "/status",
-                    "/help cd",
+                    "/help en",
+                    "/help zh cd",
                     "/exit",
                     string.Empty
                 ]));
@@ -445,19 +449,14 @@ public sealed class StandaloneReplStage7Tests
                 error: error);
 
             Assert.AreEqual(ExitCodes.Success, exitCode, error.ToString());
-            Assert.Contains(
-                $"工作区：{Path.GetFullPath(workspace)}",
-                output.ToString(),
-                StringComparison.Ordinal);
-            Assert.Contains(
-                $"正在切换工作区：{Path.GetFullPath(nextWorkspace)}",
-                output.ToString(),
-                StringComparison.Ordinal);
+            Assert.Contains(Path.GetFullPath(workspace), output.ToString(), StringComparison.Ordinal);
+            Assert.Contains(Path.GetFullPath(nextWorkspace), output.ToString(), StringComparison.Ordinal);
             Assert.Contains(
                 $"Workspace: {Path.GetFullPath(nextWorkspace)}",
                 output.ToString(),
                 StringComparison.Ordinal);
-            Assert.Contains("/cd [path]", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("/cd [directory]", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("Show or change the current workspace.", output.ToString(), StringComparison.Ordinal);
             Assert.Contains("查看或切换当前工作区。", output.ToString(), StringComparison.Ordinal);
             Assert.DoesNotContain("Unknown REPL command", error.ToString(), StringComparison.Ordinal);
         }

@@ -15,4 +15,12 @@ public interface IToolResultBlobStore
     public Task ValidateReferenceAsync(
         BlobReference reference,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// 读取已保存的工具结果正文。模型不支持文件引用时，用它生成可见预览。
+    /// </summary>
+    public Task<ReadOnlyMemory<byte>> ReadAsync(
+        BlobReference reference,
+        int maxBytes,
+        CancellationToken ct = default);
 }

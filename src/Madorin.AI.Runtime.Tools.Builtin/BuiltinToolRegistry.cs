@@ -31,48 +31,11 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
     public const string AgentJobResultToolId = "mcli_agent_job_result";
     public const string AgentJobWaitToolId = "mcli_agent_job_wait";
     public const string AgentJobCancelToolId = "mcli_agent_job_cancel";
-    public const string MeetingOutputSummaryToolId = "mcli_meeting_output_summary";
-    public const string MeetingConfirmEndToolId = "mcli_meeting_confirm_end";
-    public const string MeetingListAttachmentsToolId = "mcli_meeting_list_attachments";
-    public const string AskUserToolId = "mcli_ask_user";
-    public const string CheckPendingUserInputToolId = "mcli_check_pending_user_input";
-    public const string WorkSetPlanToolId = "mcli_work_set_plan";
     public const string ExpertCreatePlanToolId = "mcli_expert_create_plan";
     public const string ExpertExecuteStepToolId = "mcli_expert_execute_step";
     public const string ExpertGetPlanToolId = "mcli_expert_get_plan";
     public const string ExpertUpdateStepStatusToolId = "mcli_expert_update_step_status";
     public const string ExpertAbandonPlanToolId = "mcli_expert_abandon_plan";
-    public const string WorkListPlanTemplatesToolId = "mcli_work_list_plan_templates";
-    public const string WorkLoadPlanFromTemplateToolId = "mcli_work_load_plan_from_template";
-    public const string WorkReadTemplateFileToolId = "mcli_work_read_template_file";
-    public const string WorkDispatchStepToolId = "mcli_work_dispatch_step";
-    public const string WorkLoadPlanFromChatHistoryToolId = "mcli_work_load_plan_from_chat_history";
-    public const string WorkLoadPlanFromGroupchatToolId = "mcli_work_load_plan_from_groupchat";
-    public const string WorkGetRecentCompletedTaskPlanToolId = "mcli_work_get_recent_completed_task_plan";
-
-    /// <summary>
-    /// 计划工具说明。步骤字段必须出现在这里，否则模型会猜 subSteps、children、agentId。
-    /// </summary>
-    private const string WorkSetPlanDescription =
-        "Writes the executable plan from the scheme already discussed. " +
-        "Call it only after the user message is 已确认开始执行。 " +
-        "Do not call it during discussion. A successful call publishes the plan and starts execution. " +
-        "After it succeeds, do not ask the user to confirm again. "
-        + "Use one shape. Shape A: planVersion, goal, and a flat steps array. "
-        + "Every step has stepId and goal. A leaf sets targetAgentId to an AvailableAgents id other than general-manager or project-lead. "
-        + "To group work, put the parent and its children in that same array and set each child's parentStepId to the parent's stepId. "
-        + "Parent steps are not dispatched and omit targetAgentId. "
-        + "Do not nest subSteps, children, or steps inside a step. "
-        + "Shape B: goal and main_steps[].title plus main_steps[].sub_steps[]. "
-        + "Each sub_step has title, acceptance_criteria, and targetAgentId. "
-        + "The only agent field is targetAgentId. "
-        + "When no roster agent fits, omit targetAgentId and set ephemeralName plus ephemeralSystemPrompt. "
-        + "Set investigate true when later steps must wait for this step's result.";
-
-    private const string WorkSetPlanInputSchema =
-        """{"type":"object","additionalProperties":true,"properties":{"planVersion":{"type":"string","description":"Plan revision. Use 1 the first time."},"previousPlanVersion":{"type":"string"},"goal":{"type":"string","description":"Outcome of the whole plan."},"summary":{"type":"string"},"steps":{"type":"array","description":"Flat list. Grouping is child.parentStepId = parent.stepId in this same array. Do not nest subSteps, children, or steps inside a step.","items":{"type":"object","additionalProperties":true,"required":["stepId","goal"],"properties":{"stepId":{"type":"string"},"goal":{"type":"string","description":"Deliverable and how to verify it."},"title":{"type":"string"},"targetAgentId":{"type":"string","description":"Required on a leaf. Must be an AvailableAgents id. general-manager and project-lead cannot execute steps. Omit on a parent that another step points at with parentStepId. The property name is targetAgentId."},"parentStepId":{"type":"string","description":"On a child, the parent stepId. This is the only way a step is recognized as a parent."},"depth":{"type":"integer"},"dependsOn":{"type":"array","items":{"type":"string"}},"ephemeralName":{"type":"string"},"ephemeralSystemPrompt":{"type":"string","description":"Together with ephemeralName, replaces targetAgentId when no roster agent fits."},"investigate":{"type":"boolean","description":"True when later steps must wait for this step's result."}}}},"main_steps":{"type":"array","description":"Alternate shape. Use this instead of steps. Each item requires sub_steps, spelled exactly sub_steps.","items":{"type":"object","additionalProperties":true,"required":["title","sub_steps"],"properties":{"title":{"type":"string"},"targetAgentId":{"type":"string","description":"Default agent id for sub_steps that omit targetAgentId."},"sub_steps":{"type":"array","items":{"type":"object","additionalProperties":true,"required":["title","acceptance_criteria"],"properties":{"title":{"type":"string"},"acceptance_criteria":{"type":"string"},"targetAgentId":{"type":"string","description":"Required unless ephemeralSystemPrompt is set. Property name is targetAgentId."},"ephemeralName":{"type":"string"},"ephemeralSystemPrompt":{"type":"string"},"investigate":{"type":"boolean"}}}}}}},"plan":{"type":"object","description":"Optional wrapper. Use the same planVersion, goal, and steps fields as the top level, including each step's stepId, goal, targetAgentId, and parentStepId.","properties":{"planVersion":{"type":"string"},"goal":{"type":"string"},"steps":{"type":"array","description":"Same item shape as the top-level steps array: stepId, goal, title, targetAgentId, parentStepId, depth, dependsOn, ephemeralName, ephemeralSystemPrompt, investigate.","items":{"type":"object","additionalProperties":true,"required":["stepId","goal"],"properties":{"stepId":{"type":"string"},"goal":{"type":"string"},"title":{"type":"string"},"targetAgentId":{"type":"string"},"parentStepId":{"type":"string"},"depth":{"type":"integer"},"dependsOn":{"type":"array","items":{"type":"string"}},"ephemeralName":{"type":"string"},"ephemeralSystemPrompt":{"type":"string"},"investigate":{"type":"boolean"}}}}}}}}""";
-
-    private static readonly IReadOnlyList<string> WorkOnlyModes = Array.AsReadOnly(["work"]);
 
     private static readonly IReadOnlyList<ToolDescriptor> AdvertisedTools = Array.AsReadOnly<ToolDescriptor>(
     [
@@ -278,108 +241,6 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
             IsIdempotent: false,
             SupportedModes: ["expert"]),
         new(
-            MeetingOutputSummaryToolId,
-            "mcli",
-            "Output meeting summary",
-            "Writes the meeting summary as an independent markdown artifact and registers it for end confirmation.",
-            """{"type":"object","properties":{"summary":{"type":"string","minLength":1}},"required":["summary"],"additionalProperties":false}""",
-            """{"type":"object","properties":{"ok":{"type":"boolean"},"summaryMessageId":{"type":"string"},"summaryPath":{"type":"string"},"next":{"type":"string"}},"required":["ok"],"additionalProperties":false}""",
-            RiskLevel: "low",
-            Capabilities: ["meeting.summary"],
-            Risk: ToolRiskLevel.Low,
-            IsIdempotent: false,
-            SupportedModes: ["meeting"]),
-        new(
-            MeetingConfirmEndToolId,
-            "mcli",
-            "Confirm meeting end",
-            "Marks the meeting as explicitly ended after a summary has been produced.",
-            """{"type":"object","properties":{},"additionalProperties":false}""",
-            """{"type":"object","properties":{"ok":{"type":"boolean"},"endConfirmed":{"type":"boolean"},"finalSummaryMessageId":{"type":"string"}},"required":["ok"],"additionalProperties":false}""",
-            RiskLevel: "medium",
-            RequiresApproval: false,
-            Capabilities: ["meeting.control"],
-            Risk: ToolRiskLevel.Write,
-            IsIdempotent: false,
-            SupportedModes: ["meeting"]),
-        new(
-            MeetingListAttachmentsToolId,
-            "mcli",
-            "List meeting attachments",
-            "Lists attachment metadata for the current meeting without reading file contents.",
-            """{"type":"object","properties":{},"additionalProperties":false}""",
-            """{"type":"object","properties":{"ok":{"type":"boolean"},"attachmentRoot":{"type":"string"},"attachments":{"type":"array"},"empty":{"type":"boolean"}},"required":["ok","attachments","empty"],"additionalProperties":false}""",
-            RiskLevel: "low",
-            Capabilities: ["meeting.attachments"],
-            Risk: ToolRiskLevel.SensitiveRead,
-            SupportedModes: ["meeting"]),
-        new(
-            AskUserToolId,
-            "mcli",
-            "Ask user",
-            "Asks the host/user a short question and blocks the current invocation until HITL responds. Does not use the interrupt queue.",
-            """{"type":"object","properties":{"question":{"type":"string","minLength":1}},"required":["question"],"additionalProperties":false}""",
-            """{"type":"object","properties":{"ok":{"type":"boolean"},"waitingForUser":{"type":"boolean"},"requestId":{"type":"string"},"question":{"type":"string"},"userAnswer":{"type":"string"},"message":{"type":"string"}},"required":["ok"],"additionalProperties":false}""",
-            RiskLevel: "low",
-            Capabilities: ["meeting.hitl", "work.hitl"],
-            Risk: ToolRiskLevel.Low,
-            IsIdempotent: false,
-            SupportedModes: ["meeting", "work"]),
-        new(
-            CheckPendingUserInputToolId,
-            "mcli",
-            "Check pending user input",
-            "Peeks whether the current session has unconsumed user interrupt input from meeting.input.enqueue.",
-            """{"type":"object","properties":{},"additionalProperties":false}""",
-            """{"type":"object","properties":{"ok":{"type":"boolean"},"hasPending":{"type":"boolean"},"pending":{"type":"array"},"message":{"type":"string"}},"required":["ok","hasPending","pending","message"],"additionalProperties":false}""",
-            RiskLevel: "low",
-            Capabilities: ["meeting.hitl", "work.hitl"],
-            Risk: ToolRiskLevel.Low,
-            SupportedModes: ["meeting", "work"]),
-        new(
-            WorkListPlanTemplatesToolId,
-            "mcli",
-            "List work plan templates",
-            "Lists valid work-plan templates under user/system work-templates roots. Empty list is success.",
-            """{"type":"object","properties":{"keyword":{"type":"string"},"category":{"type":"string"}},"additionalProperties":false}""",
-            """{"type":"object","properties":{"ok":{"type":"boolean"},"templates":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"},"path":{"type":"string"},"category":{"type":"string"},"version":{"type":"string"}},"required":["name","description","path","category","version"],"additionalProperties":false}}},"required":["ok","templates"],"additionalProperties":false}""",
-            Capabilities: ["work.templates"],
-            Risk: ToolRiskLevel.SensitiveRead,
-            SupportedModes: WorkOnlyModes),
-        new(
-            WorkLoadPlanFromTemplateToolId,
-            "mcli",
-            "Load work plan template",
-            "Loads TEMPLATE.md materials from an absolute template directory path. Does not call set_plan.",
-            """{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}""",
-            """{"type":"object","properties":{"ok":{"type":"boolean"},"error":{"type":"string"},"message":{"type":"string"},"path":{"type":"string"},"name":{"type":"string"},"description":{"type":"string"},"category":{"type":"string"},"version":{"type":"string"},"instructions":{"type":"string"},"planSkeleton":{"type":"string"},"files":{"type":"array"},"note":{"type":"string"}},"required":["ok"],"additionalProperties":false}""",
-            Capabilities: ["work.templates"],
-            Risk: ToolRiskLevel.SensitiveRead,
-            SupportedModes: WorkOnlyModes),
-        new(
-            WorkReadTemplateFileToolId,
-            "mcli",
-            "Read work template file",
-            "Reads one indexed UTF-8 file inside a work-plan template directory.",
-            """{"type":"object","properties":{"path":{"type":"string"},"relativePath":{"type":"string"}},"required":["path","relativePath"],"additionalProperties":false}""",
-            """{"type":"object","properties":{"ok":{"type":"boolean"},"error":{"type":"string"},"message":{"type":"string"},"path":{"type":"string"},"relativePath":{"type":"string"},"content":{"type":"string"}},"required":["ok"],"additionalProperties":false}""",
-            Capabilities: ["work.templates"],
-            Risk: ToolRiskLevel.SensitiveRead,
-            SupportedModes: WorkOnlyModes),
-        new(
-            WorkSetPlanToolId,
-            "mcli",
-            "Set work plan",
-            WorkSetPlanDescription,
-            WorkSetPlanInputSchema,
-            """{"type":"object","properties":{"ok":{"type":"boolean"},"error":{"type":"string"},"message":{"type":"string"},"planVersion":{"type":"string"},"goal":{"type":"string"},"stepCount":{"type":"integer"},"plan":{"type":"object"},"requiresConfirmation":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}""",
-            RiskLevel: "medium",
-            RequiresApproval: false,
-            Capabilities: ["work.plan"],
-            Risk: ToolRiskLevel.Write,
-            IsIdempotent: false,
-            SupportedModes: ["work"]),
-        new(
             ExpertCreatePlanToolId,
             "mcli",
             "Create execution plan",
@@ -396,8 +257,8 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
             "mcli",
             "Execute plan step",
             "Execute a single step from the active plan. Marks the step as in-progress, performs the work, then marks it completed or failed. Returns execution result.",
-            """{"type":"object","properties":{"stepIndex":{"type":"integer","minimum":0,"description":"Zero-based step index"},"notes":{"type":"string","description":"Optional execution notes"}},"required":["stepIndex"],"additionalProperties":false}""",
-            """{"type":"object","properties":{"success":{"type":"boolean"},"stepIndex":{"type":"integer"},"stepTitle":{"type":"string"},"status":{"type":"string"},"result":{"type":"string"},"message":{"type":"string"}},"required":["success","message"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"stepId":{"type":"string","description":"Step identifier from the plan (e.g. step-1)"},"notes":{"type":"string","description":"Optional execution notes"}},"required":["stepId"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"success":{"type":"boolean"},"stepId":{"type":"string"},"stepTitle":{"type":"string"},"status":{"type":"string"},"result":{"type":"string"},"message":{"type":"string"}},"required":["success","message"],"additionalProperties":false}""",
             RiskLevel: "low",
             Capabilities: ["expert.plan"],
             Risk: ToolRiskLevel.Low,
@@ -420,8 +281,8 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
             "mcli",
             "Update step status",
             "Manually update the status of a specific plan step. Useful for marking steps as skipped, failed, or completed without execution.",
-            """{"type":"object","properties":{"stepIndex":{"type":"integer","minimum":0,"description":"Zero-based step index"},"newStatus":{"type":"string","enum":["pending","running","completed","failed","skipped"],"description":"New step status"},"notes":{"type":"string","description":"Optional reason for status change"}},"required":["stepIndex","newStatus"],"additionalProperties":false}""",
-            """{"type":"object","properties":{"success":{"type":"boolean"},"stepIndex":{"type":"integer"},"oldStatus":{"type":"string"},"newStatus":{"type":"string"},"message":{"type":"string"}},"required":["success","message"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"stepId":{"type":"string","description":"Step identifier from the plan"},"newStatus":{"type":"string","enum":["pending","running","completed","failed","skipped"],"description":"New step status"},"notes":{"type":"string","description":"Optional reason for status change"}},"required":["stepId","newStatus"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"success":{"type":"boolean"},"stepId":{"type":"string"},"oldStatus":{"type":"string"},"newStatus":{"type":"string"},"message":{"type":"string"}},"required":["success","message"],"additionalProperties":false}""",
             RiskLevel: "low",
             Capabilities: ["expert.plan"],
             Risk: ToolRiskLevel.Low,
@@ -438,49 +299,7 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
             Capabilities: ["expert.plan"],
             Risk: ToolRiskLevel.Low,
             IsIdempotent: false,
-            SupportedModes: new[] { "expert" }),
-        new(
-            WorkDispatchStepToolId,
-            "mcli",
-            "Dispatch work step",
-            "Validates one confirmed work sub-step and synchronously runs the target agent through the Work orchestrator. Rejects when plan is missing or waiting for confirmation.",
-            """{"type":"object","properties":{"stepIndex":{"type":"integer","minimum":1},"subStepIndex":{"type":"integer","minimum":1},"instruction":{"type":"string"}},"required":["stepIndex","subStepIndex","instruction"],"additionalProperties":false}""",
-            """{"type":"object","properties":{"ok":{"type":"boolean"},"executed":{"type":"boolean"},"error":{"type":"string"},"message":{"type":"string"},"planVersion":{"type":"string"},"stepId":{"type":"string"},"targetAgentId":{"type":"string"},"goal":{"type":"string"},"instruction":{"type":"string"},"childInvocationId":{"type":"string"},"outputText":{"type":"string"}},"required":["ok"],"additionalProperties":false}""",
-            RiskLevel: "medium",
-            Capabilities: ["work.dispatch"],
-            Risk: ToolRiskLevel.Write,
-            IsIdempotent: false,
-            SupportedModes: WorkOnlyModes),
-        new(
-            WorkLoadPlanFromChatHistoryToolId,
-            "mcli",
-            "Load plan from chat history",
-            "Loads recent chat/session transcript as planning materials. Still requires mcli_work_set_plan to publish.",
-            """{"type":"object","properties":{"sessionId":{"type":"string"},"limit":{"type":"integer","minimum":1}},"additionalProperties":false}""",
-            """{"type":"object","properties":{"ok":{"type":"boolean"},"source":{"type":"string"},"sessionId":{"type":"string"},"count":{"type":"integer"},"messages":{"type":"array"},"note":{"type":"string"},"error":{"type":"string"},"message":{"type":"string"}},"required":["ok"],"additionalProperties":false}""",
-            Capabilities: ["work.history"],
-            Risk: ToolRiskLevel.SensitiveRead,
-            SupportedModes: WorkOnlyModes),
-        new(
-            WorkLoadPlanFromGroupchatToolId,
-            "mcli",
-            "Load plan from groupchat",
-            "Loads groupchat/meeting transcript as planning materials. Still requires mcli_work_set_plan to publish.",
-            """{"type":"object","properties":{"meetingId":{"type":"string"},"limit":{"type":"integer","minimum":1}},"additionalProperties":false}""",
-            """{"type":"object","properties":{"ok":{"type":"boolean"},"source":{"type":"string"},"sessionId":{"type":"string"},"count":{"type":"integer"},"messages":{"type":"array"},"note":{"type":"string"},"error":{"type":"string"},"message":{"type":"string"}},"required":["ok"],"additionalProperties":false}""",
-            Capabilities: ["work.history"],
-            Risk: ToolRiskLevel.SensitiveRead,
-            SupportedModes: WorkOnlyModes),
-        new(
-            WorkGetRecentCompletedTaskPlanToolId,
-            "mcli",
-            "Get recent completed task plan",
-            "Returns the current session plan when the Work session is completed, as materials for redo/revise. Still requires mcli_work_set_plan.",
-            """{"type":"object","properties":{},"additionalProperties":false}""",
-            """{"type":"object","properties":{"ok":{"type":"boolean"},"found":{"type":"boolean"},"status":{"type":"string"},"planVersion":{"type":"string"},"plan":{"type":"object"},"note":{"type":"string"},"message":{"type":"string"},"error":{"type":"string"}},"required":["ok"],"additionalProperties":false}""",
-            Capabilities: ["work.history"],
-            Risk: ToolRiskLevel.SensitiveRead,
-            SupportedModes: WorkOnlyModes)
+            SupportedModes: new[] { "expert" })
     ]);
 
     private static readonly IReadOnlyList<ToolDescriptor> Tools = Array.AsReadOnly(

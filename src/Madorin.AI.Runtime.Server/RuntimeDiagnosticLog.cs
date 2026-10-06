@@ -58,7 +58,8 @@ internal sealed class RuntimeDiagnosticLog : IAsyncDisposable
         var normalizedDirectory = Path.Combine(
             Path.GetFullPath(logDirectory),
             localNow.ToString("yyyyMMdd", CultureInfo.InvariantCulture));
-        var fileName = $"{localNow.ToString("HHmm", CultureInfo.InvariantCulture)}.jsonl";
+        // 一次运行只写当天一个文件。跨分钟时不再换文件，外部可以持续读取。
+        var fileName = "runtime.jsonl";
         Directory.CreateDirectory(normalizedDirectory);
         var stream = new FileStream(
             Path.Combine(normalizedDirectory, fileName),
@@ -66,6 +67,7 @@ internal sealed class RuntimeDiagnosticLog : IAsyncDisposable
             {
                 Mode = FileMode.Append,
                 Access = FileAccess.Write,
+                // 运行中允许其他进程读取，长任务可以边跑边看日志。
                 Share = FileShare.ReadWrite,
                 BufferSize = 4096,
                 Options = FileOptions.Asynchronous | FileOptions.SequentialScan
@@ -87,6 +89,7 @@ internal sealed class RuntimeDiagnosticLog : IAsyncDisposable
         Exception? exception = null,
         RuntimeError? error = null,
         bool alwaysWrite = false,
+        Action<Utf8JsonWriter>? writeDetails = null,
         CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(eventName);
@@ -124,6 +127,7 @@ internal sealed class RuntimeDiagnosticLog : IAsyncDisposable
             WriteOptionalString(writer, "exceptionType", exception?.GetType().FullName);
             WriteOptionalString(writer, "exceptionMessage", exception?.Message);
             WriteOptionalString(writer, "stackTrace", exception?.ToString());
+            writeDetails?.Invoke(writer);
             writer.WriteEndObject();
         }
 
@@ -150,7 +154,8 @@ internal sealed class RuntimeDiagnosticLog : IAsyncDisposable
         string? diagnosticId = null,
         Exception? exception = null,
         RuntimeError? error = null,
-        bool alwaysWrite = false)
+        bool alwaysWrite = false,
+        Action<Utf8JsonWriter>? writeDetails = null)
     {
         try
         {
@@ -163,6 +168,7 @@ internal sealed class RuntimeDiagnosticLog : IAsyncDisposable
                     exception,
                     error,
                     alwaysWrite,
+                    writeDetails,
                     CancellationToken.None)
                 .ConfigureAwait(false);
         }

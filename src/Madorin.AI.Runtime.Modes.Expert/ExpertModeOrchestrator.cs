@@ -37,6 +37,7 @@ public sealed class ExpertModeOrchestrator(
     ToolCatalogSnapshot? toolCatalogSnapshot = null,
     MemoryInvocationSnapshotStore? memorySnapshotStore = null,
     RuntimeLimits? runtimeLimits = null,
+    IToolResultBlobStore? toolResultBlobStore = null,
     Func<ToolPermissionRequest, CancellationToken, Task<ToolPermissionResponse>>?
         toolPermissionHandler = null,
     Func<ApprovalRequest, CancellationToken, Task<ApprovalResponse>>?
@@ -83,6 +84,7 @@ public sealed class ExpertModeOrchestrator(
     private readonly MemoryInvocationSnapshotStore? _memorySnapshotStore = memorySnapshotStore;
     private readonly RuntimeLimits _runtimeLimits = runtimeLimits ?? new RuntimeLimits(
         MaxToolResultBytesPerInvocation: 4 * 1024 * 1024);
+    private readonly IToolResultBlobStore? _toolResultBlobStore = toolResultBlobStore;
     private readonly ToolCatalogSnapshot? _toolCatalogSnapshot = toolCatalogSnapshot;
     private readonly ToolGateway? _toolGateway = toolGateway;
     private readonly IToolAuthorizationService? _toolAuthorizationService = toolAuthorizationService;
@@ -163,6 +165,8 @@ public sealed class ExpertModeOrchestrator(
 
         // Initialize plan manager for this session
         _planManager = new ExpertPlanManager(_workspaceRoot, _outbox);
+        var restoredPlan = await _planManager.RestoreActivePlanAsync(sessionId, ct)
+            .ConfigureAwait(false);
 
         // Inject available sub-agents list and plan progress into system prompt
         var baseSystemPrompt = expert.Agent.SystemPrompt;
@@ -568,8 +572,6 @@ public sealed class ExpertModeOrchestrator(
                 ct).ConfigureAwait(false);
         }
 
-        // Attempt to restore active plan from previous session
-        var restoredPlan = await _planManager.RestoreActivePlanAsync(ct).ConfigureAwait(false);
         if (restoredPlan is not null)
         {
             var planRestoredPayload = JsonSerializer.SerializeToElement(
@@ -948,16 +950,21 @@ public sealed class ExpertModeOrchestrator(
 
                 var resultBytes = GetContentByteCount(toolResult);
                 totalToolResultBytes += resultBytes;
-                if (HasOversizedInlineContent(
-                        toolResult,
-                        _runtimeLimits.MaxInlineContentBytes)
-                    || totalToolResultBytes > maxToolResultBytes)
+                if (totalToolResultBytes > maxToolResultBytes)
                 {
                     failure = CreateRuntimeError(
                         RuntimeErrorCodes.LimitsIncompatible,
-                        "Tool results exceeded the configured inline or Invocation size limit.");
+                        "Tool results exceeded the configured Invocation size limit.");
                     break;
                 }
+
+                // 完整正文已在 Blob。发给模型前收成可见预览，避免不支持文件的 Provider 把结果丢掉。
+                toolResult = await ToolResultPreview.MaterializeAsync(
+                    toolResult,
+                    ProviderSupportsFileBlobs(_provider),
+                    _toolResultBlobStore,
+                    _runtimeLimits.MaxInlineContentBytes,
+                    ct).ConfigureAwait(false);
 
                 await AppendContentAsync(
                     sessionId,
@@ -2098,12 +2105,8 @@ public sealed class ExpertModeOrchestrator(
                     _ => 0
                 })));
 
-    private static bool HasOversizedInlineContent(
-        ToolResultContentBlock content,
-        int maxInlineContentBytes) =>
-        content.Content
-            .OfType<TextContentBlock>()
-            .Any(text => Encoding.UTF8.GetByteCount(text.Text) > maxInlineContentBytes);
+    private static bool ProviderSupportsFileBlobs(IRuntimeProviderAdapter provider) =>
+        provider.Capabilities.Files;
 
     private static ToolGatewayResult FailedToolGatewayResult(string code, string message) =>
         new(

@@ -12,6 +12,7 @@ public static class RuntimeErrorCodes
     public const string ProviderTimeout = nameof(ProviderTimeout);
     public const string LimitsIncompatible = nameof(LimitsIncompatible);
     public const string WorkspaceMismatch = nameof(WorkspaceMismatch);
+    public const string WorkspaceBusy = nameof(WorkspaceBusy);
     public const string RunBusy = nameof(RunBusy);
     public const string RunTimedOut = nameof(RunTimedOut);
     public const string SessionNotFound = nameof(SessionNotFound);

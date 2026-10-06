@@ -111,7 +111,8 @@ internal sealed class RunOutputWriter(
         RunOutputFormat format,
         bool machineOutputRedirected,
         string code,
-        string message)
+        string message,
+        bool isRetryable = false)
     {
         var destination = format is RunOutputFormat.Text || machineOutputRedirected
             ? error
@@ -128,7 +129,7 @@ internal sealed class RunOutputWriter(
                 writer,
                 code,
                 message,
-                isRetryable: false,
+                isRetryable,
                 diagnosticId,
                 envelope: null));
     }

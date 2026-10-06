@@ -7,11 +7,10 @@
     "sessionId": "session-2",
     "status": "WaitingForApproval",
     "startedAt": "2026-07-26T01:03:04+00:00",
-    "mode": "Meeting",
+    "mode": "Expert",
     "phase": "waiting-for-approval",
-    "currentStep": "round:1:approval",
     "completedUnits": 0,
-    "totalUnits": 2,
+    "totalUnits": 1,
     "updatedAt": "2026-07-26T02:03:04+00:00",
     "lastRunSequence": 4
   }

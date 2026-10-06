@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using Madorin.AI.Runtime.Contracts;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 
@@ -20,6 +21,8 @@ public static class MafSkillsAgentFactory
         ArgumentNullException.ThrowIfNull(messages);
         ArgumentNullException.ThrowIfNull(options);
 
+        ApplyRequestControl(options, request.RequestControl);
+
         var agentOptions = new ChatClientAgentOptions
         {
             Id = request.AgentId,
@@ -39,6 +42,50 @@ public static class MafSkillsAgentFactory
             yield return new MafProviderResponseUpdate(
                 update.FinishReason?.ToString(),
                 update.Contents.ToArray());
+        }
+    }
+
+    private static void ApplyRequestControl(ChatOptions options, ExpertRequestControl? control)
+    {
+        if (control is null)
+        {
+            return;
+        }
+
+        control.Validate();
+        if (control.Temperature is { } temperature)
+        {
+            options.Temperature = (float)temperature;
+        }
+
+        if (control.MaxTokens is { } maxTokens)
+        {
+            options.MaxOutputTokens = maxTokens;
+        }
+
+        if (control.TopP is { } topP)
+        {
+            options.TopP = (float)topP;
+        }
+
+        if (control.TopK is { } topK)
+        {
+            options.TopK = topK;
+        }
+
+        if (control.StopSequences is { Length: > 0 } stopSequences)
+        {
+            options.StopSequences = [.. stopSequences];
+        }
+
+        if (control.FrequencyPenalty is { } frequencyPenalty)
+        {
+            options.FrequencyPenalty = (float)frequencyPenalty;
+        }
+
+        if (control.PresencePenalty is { } presencePenalty)
+        {
+            options.PresencePenalty = (float)presencePenalty;
         }
     }
 

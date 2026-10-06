@@ -9,39 +9,61 @@
 
 ## 📊 整体进度概览
 
-- [ ] **Phase 1**: 移除 Work/Meeting 模式（2-3 天）—— 0/3 天
-- [ ] **Phase 2**: Expert 请求控制增强（3-4 天）—— 0/4 天
-- [ ] **Phase 3**: HTTP 非流式接口（2 天）—— 0/2 天
-- [ ] **Phase 4**: 小型计划功能完善（3-4 天）—— 0/4 天
-- [ ] **Phase 5**: 文档与示例（2 天）—— 0/2 天
+### 2026-10-06 续接核查
 
-**总进度**：0/15 天（0%）
+- 当前基线：`c17b280`（0.1.69）。下方原始清单未随该提交更新，原来的 0% 不代表源码进度。
+- Phase 1：Work/Meeting 枚举、模式工程与主要调用链已移除；本次清理注册表旧工具描述符、协议测试数据行与两份过期进度快照；仍有工具执行器、数据库、文档与测试残留。
+- Phase 2：`Agent/ExpertRequestControl.cs`、Expert 选项和编排器传参已存在；本次修复 Worker 传输和 OpenAI 通用采样映射，CLI 与结构化输出等尚未闭环。
+- Phase 3：已有 `/v1/run` 同步 HTTP 入口；超时、事件隔离及完整集成验收仍待完成，不能按示例路径推定已验收。
+- Phase 4：计划契约、文件存储、管理器、五个工具及编排器路由已有实现；本次补齐按会话隔离、原子保存、终态不复活及恢复前提示词注入；进一步修复损坏/滞后指针下旧计划误恢复，完整工具循环和并发门禁尚未验收。
+- Phase 5：完整使用指南、迁移指南和配套示例未完成。
+
+本批次：修复请求控制的 Worker 传输与公共采样参数映射，补充边界/协议/Provider 回归，并清理已确认的构建和旧模式测试残留；严格解决方案构建已恢复为 0 警告、0 错误，全量测试的遗留失败仍待处理。
+
+#### 协议变更预检：PROTOCOL-20261006-01
+
+- 类别：缺陷修复、Worker JSON 可选字段追加；开发基线 0.1.69，不发布新版本。
+- DTO：`RuntimeProviderRequest.requestControl` 恢复序列化；沿用现有 `ExpertRequestControl` 字段，不改 Host/Client 请求结构。
+- 消息、枚举、错误码、能力协商、GSN、幂等、终态和数据库 Schema：无变更。
+- 兼容：缺失字段仍为 null；旧 Worker 可忽略字段但不会应用控制参数，Runtime/Worker 必须配套升级才能获得修复。
+- 安全：不新增凭据或日志；请求元数据随内部 IPC 传输，不注入模型提示词。
+- 版本：Worker IPC 版本不变，Host 协议主版本不变；无双写或数据迁移，回退后已有数据仍可读取。
+- 验证：源生成序列化往返、旧 JSON 缺字段、真实 Provider HTTP 请求映射及定向回归；Native AOT 发布另行验收。
+- 审批：本批次依据已授权的执行计划推进，不代表发布验收通过。
+
+- [ ] **Phase 1**: 移除 Work/Meeting 模式 —— 14/27 项（51.9%）
+- [ ] **Phase 2**: Expert 请求控制增强 —— 4/13 项（30.8%）
+- [ ] **Phase 3**: HTTP 非流式接口 —— 0/16 项（0%；已有 `/v1/run`，但与原清单契约不等价）
+- [ ] **Phase 4**: 小型计划功能完善 —— 13/24 项（54.2%）
+- [ ] **Phase 5**: 文档与示例 —— 0/7 项（0%）
+
+**总进度**：31/87 检查项（35.6%）。按下方可核查的独立顶层复选项统计，不按历史估时统计；已有部分实现但未达到验收条件的条目继续留空。
 
 ---
 
-## Phase 1：移除 Work/Meeting 模式（2-3 天）
+## Phase 1：移除 Work/Meeting 模式（14/27，51.9%）
 
-### Day 1：核心代码移除
+### Day 1：核心代码移除（7/11，63.6%）
 
 #### 1.1 枚举与契约清理
-- [ ] 从 `RuntimeMode` 枚举删除 `Work` 和 `Meeting`
+- [√] 从 `RuntimeMode` 枚举删除 `Work` 和 `Meeting`
   - 文件：`src/Madorin.AI.Runtime.Entities/RuntimeMode.cs`
   - 修改后只保留：`Expert`
   
-- [ ] 删除 `WorkModeOptions` 及相关类型
+- [√] 删除 `WorkModeOptions` 及相关类型
   - 文件：`src/Madorin.AI.Runtime.Contracts/Selection/ModeOptions.cs`
   - 删除：`WorkModeOptions`、`WorkflowPolicy`、`WorkContextPolicy`
   
-- [ ] 删除 `MeetingModeOptions` 及相关类型
+- [√] 删除 `MeetingModeOptions` 及相关类型
   - 文件：`src/Madorin.AI.Runtime.Contracts/Selection/ModeOptions.cs`
   - 删除：`MeetingModeOptions`、`MeetingPolicy`、`MeetingContextPolicy`、`MeetingSelectorPolicyOptions`
 
 #### 1.2 Orchestrator 删除
-- [ ] 删除整个 Work 模式目录
+- [√] 删除整个 Work 模式目录
   - 路径：`src/Madorin.AI.Runtime.Modes.Work/`
   - 包含：`WorkModeOrchestrator.cs` 及所有支持文件
   
-- [ ] 删除整个 Meeting 模式目录
+- [√] 删除整个 Meeting 模式目录
   - 路径：`src/Madorin.AI.Runtime.Modes.Meeting/`
   - 包含：`MeetingModeOrchestrator.cs` 及所有支持文件
 
@@ -63,20 +85,20 @@
   - 目录：`src/Madorin.AI.Runtime.Tools.Builtin/Meeting/`
   - 工具：`mcli_meeting_*` 系列
 
-- [ ] 从 `BuiltinToolRegistry` 移除注册
+- [√] 从 `BuiltinToolRegistry` 移除注册（Work/Meeting 描述符已不再发布；旧常量和执行器尚待清理）
   - 文件：`src/Madorin.AI.Runtime.Tools.Builtin/BuiltinToolRegistry.cs`
 
 #### 1.5 契约序列化清理
-- [ ] 从 `RuntimeJsonContext` 移除相关类型
+- [√] 从 `RuntimeJsonContext` 移除相关类型
   - 文件：`src/Madorin.AI.Runtime.Contracts/Serialization/RuntimeJsonContext.cs`
   - 删除所有 `[JsonSerializable(typeof(Work*))]` 和 `[JsonSerializable(typeof(Meeting*))]`
 
 ---
 
-### Day 2：依赖修复与测试清理
+### Day 2：依赖修复与测试清理（6/10，60.0%）
 
 #### 2.1 Server 层修复
-- [ ] 修复 `RuntimeOrchestrator` 中的模式选择逻辑
+- [√] 修复 `RuntimeOrchestrator` 中的模式选择逻辑（实际入口为 `RuntimeExecutionCore`，Expert-only）
   - 文件：`src/Madorin.AI.Runtime.Server/RuntimeOrchestrator.cs`
   - 删除 Work/Meeting 分支，只保留 Expert
 
@@ -85,7 +107,7 @@
   - 删除 `/work` 和 `/meeting` 端点（如果有）
 
 #### 2.2 CLI 清理
-- [ ] 删除 CLI 子命令
+- [√] 删除 CLI 子命令（仓库中没有独立 Work/Meeting 子命令）
   - 文件：`src/Madorin.AI.Runtime.Cli/Commands/WorkCommand.cs`（如果存在）
   - 文件：`src/Madorin.AI.Runtime.Cli/Commands/MeetingCommand.cs`（如果存在）
   - 只保留 `ExpertCommand.cs`
@@ -95,22 +117,22 @@
   - 移除 work/meeting 相关描述
 
 #### 2.3 测试清理
-- [ ] 删除 Work 模式单元测试
+- [√] 删除 Work 模式单元测试（对应测试项目目录已不存在）
   - 目录：`tests/Madorin.AI.Runtime.Modes.Work.Tests/`
   
-- [ ] 删除 Meeting 模式单元测试
+- [√] 删除 Meeting 模式单元测试（对应测试项目目录已不存在）
   - 目录：`tests/Madorin.AI.Runtime.Modes.Meeting.Tests/`
   
 - [ ] 删除集成测试中的 Work/Meeting 场景
   - 文件：搜索所有包含 `RuntimeMode.Work` 或 `RuntimeMode.Meeting` 的测试
 
 #### 2.4 验证构建
-- [ ] 清理编译错误
+- [√] 清理编译错误
   ```bash
   dotnet build
   ```
   
-- [ ] 清理警告（CS0618 废弃警告等）
+- [√] 清理警告（并行新增代码的必填参数、CA1512、CA1806 与 CLI 编译错误已修复；默认严格解决方案构建 0 警告、0 错误）
   
 - [ ] 运行剩余测试确保无回归
   ```bash
@@ -119,7 +141,7 @@
 
 ---
 
-### Day 3：文档更新
+### Day 3：文档更新（1/6，16.7%）
 
 #### 3.1 删除模式文档
 - [ ] 删除 Work 模式文档
@@ -145,15 +167,15 @@
   - 新建：`docs/迁移指南/从Meeting模式迁移到Expert.md`
 
 #### 3.3 示例清理
-- [ ] 删除 Work/Meeting 示例代码
+- [√] 删除 Work/Meeting 示例代码（计划列举的两个示例目录当前均不存在）
   - 目录：`examples/work-mode/`
   - 目录：`examples/meeting-mode/`
 
 ---
 
-## Phase 2：Expert 请求控制增强（3-4 天）
+## Phase 2：Expert 请求控制增强（4/13，30.8%）
 
-### Day 1：协议层扩展
+### Day 1：协议层扩展（2/4，50.0%）
 
 #### 2.1 创建 ExpertRequestControl
 - [ ] 新建文件：`src/Madorin.AI.Runtime.Contracts/Expert/ExpertRequestControl.cs`
@@ -176,7 +198,7 @@
   ```
 
 #### 2.2 扩展 ExpertModeOptions
-- [ ] 修改文件：`src/Madorin.AI.Runtime.Contracts/Selection/ModeOptions.cs`
+- [√] 修改文件：`src/Madorin.AI.Runtime.Contracts/Selection/ModeOptions.cs`
   - 添加 `RequestControl` 属性
   - 更新构造函数
 
@@ -185,17 +207,17 @@
   - 添加新参数：`TopP`、`TopK`、`Stop`、`FrequencyPenalty`、`PresencePenalty`、`Seed`、`ReasoningEffort`
 
 #### 2.4 注册序列化
-- [ ] 更新 `RuntimeJsonContext.cs`
+- [√] 更新 `RuntimeJsonContext.cs`
   ```csharp
   [JsonSerializable(typeof(ExpertRequestControl))]
   ```
 
 ---
 
-### Day 2：Orchestrator 传参
+### Day 2：Orchestrator 传参（2/3，66.7%）
 
 #### 2.5 应用 RequestControl
-- [ ] 修改 `ExpertModeOrchestrator.RunAsync`（约 L523）
+- [√] 修改 `ExpertModeOrchestrator.RunAsync`（约 L523；现有 `RequestControl` 整体传递代替展开参数）
   ```csharp
   var providerRequest = new RuntimeProviderRequest(
       invocationId,
@@ -235,7 +257,7 @@
   ```
 
 #### 2.7 参数验证
-- [ ] 添加参数范围验证
+- [√] 添加参数范围验证（现有 `ExpertRequestControl.Validate`，本次补齐非有限浮点值）
   ```csharp
   private static void ValidateRequestControl(ExpertRequestControl control)
   {
@@ -249,7 +271,7 @@
 
 ---
 
-### Day 3：Provider 适配
+### Day 3：Provider 适配（0/3，0%；通用采样映射已修复，供应商能力及结构化输出尚未验收）
 
 #### 2.8 OpenAI Provider
 - [ ] 映射新参数到 OpenAI API
@@ -282,7 +304,7 @@
 
 ---
 
-### Day 4：CLI 参数
+### Day 4：CLI 参数（0/3，0%）
 
 #### 2.11 添加 CLI 选项
 - [ ] 修改 `ExpertCommand.cs`
@@ -347,9 +369,9 @@
 
 ---
 
-## Phase 3：HTTP 非流式接口（2 天）
+## Phase 3：HTTP 非流式接口（0/16，0%）
 
-### Day 1：实现同步端点
+### Day 1：实现同步端点（0/9，0%；已有 `/v1/run`，尚未满足原路径和超时要求）
 
 #### 3.1 新增 Controller 方法
 - [ ] 修改：`src/Madorin.AI.Runtime.Server/Controllers/SessionsController.cs`
@@ -397,7 +419,7 @@
 
 ---
 
-### Day 2：测试与文档
+### Day 2：测试与文档（0/7，0%）
 
 #### 3.4 单元测试
 - [ ] 测试同步端点返回格式
@@ -423,32 +445,32 @@
 
 ---
 
-## Phase 4：小型计划功能完善（3-4 天）
+## Phase 4：小型计划功能完善（13/24，54.2%）
 
-### Day 1：数据结构与存储
+### Day 1：数据结构与存储（4/5，80.0%；管理器并发与状态迁移门禁尚未验收）
 
 #### 4.1 创建枚举
-- [ ] 新建：`src/Madorin.AI.Runtime.Contracts/Expert/ExpertPlanEnums.cs`
+- [√] 新建：`src/Madorin.AI.Runtime.Contracts/Expert/ExpertPlanEnums.cs`
   ```csharp
   public enum ExpertPlanStatus { Pending, Running, Paused, Completed, Failed, Cancelled }
   public enum ExpertStepStatus { Pending, Running, Completed, Failed, Skipped }
   ```
 
 #### 4.2 创建数据结构
-- [ ] 新建：`src/Madorin.AI.Runtime.Contracts/Expert/ExpertPlan.cs`
+- [√] 新建：`src/Madorin.AI.Runtime.Contracts/Expert/ExpertPlan.cs`
   - `ExpertPlan`
   - `ExpertPlanStep`
   - `CreateExpertPlanRequest`
   - `ExpertPlanStepDraft`
 
 #### 4.3 创建事件
-- [ ] 新建：`src/Madorin.AI.Runtime.Contracts/Expert/ExpertPlanEvents.cs`
+- [√] 新建：`src/Madorin.AI.Runtime.Contracts/Expert/ExpertPlanEvents.cs`
   - `ExpertPlanCreatedEvent`
   - `ExpertStepStatusChangedEvent`
   - `ExpertPlanStatusChangedEvent`
 
 #### 4.4 文件存储
-- [ ] 新建：`src/Madorin.AI.Runtime.Modes.Expert/ExpertPlanFileStore.cs`
+- [√] 新建：`src/Madorin.AI.Runtime.Modes.Expert/ExpertPlanFileStore.cs`（实现改为按会话隔离、唯一计划 ID 与原子保存；旧格式只在会话匹配时恢复）
   ```csharp
   internal sealed class ExpertPlanFileStore
   {
@@ -611,7 +633,7 @@
 
 ---
 
-### Day 2：内置工具
+### Day 2：内置工具（1/7；目录/类名与原方案不同，路由和持久化还需验收）
 
 #### 4.6 创建工具目录
 - [ ] 新建目录：`src/Madorin.AI.Runtime.Tools.Builtin/Expert/`
@@ -675,7 +697,7 @@
 - [ ] 新建：`BuiltinExpertAbandonPlanTool.cs`
 
 #### 4.12 注册到 BuiltinToolRegistry
-- [ ] 修改：`BuiltinToolRegistry.cs`
+- [√] 修改：`BuiltinToolRegistry.cs`（已注册五个 Expert 工具描述符，具体执行由编排器路由）
   ```csharp
   registry.Register(new BuiltinExpertCreatePlanTool());
   registry.Register(new BuiltinExpertExecuteStepTool());
@@ -686,10 +708,10 @@
 
 ---
 
-### Day 3：System Prompt 注入
+### Day 3：System Prompt 注入（3/3，100%；活跃计划现于组装提示词之前按会话恢复）
 
 #### 4.13 初始化 PlanManager
-- [ ] 在 `ExpertModeOrchestrator` 构造时初始化
+- [√] 在 `ExpertModeOrchestrator` 构造时初始化（实际在每次 Run 启动时初始化，防止复用旧 Run 状态）
   ```csharp
   private readonly ExpertPlanManager _planManager;
   
@@ -706,7 +728,7 @@
   ```
 
 #### 4.14 修改 System Prompt 组装逻辑
-- [ ] 在 `RunAsync` 中（约 L165）
+- [√] 在 `RunAsync` 中（约 L165；已有提示词注入调用）
   ```csharp
   var baseSystemPrompt = expert.Agent.SystemPrompt;
   var withSubAgents = AppendAvailableSubAgentsList(
@@ -726,7 +748,7 @@
   ```
 
 #### 4.15 实现注入方法
-- [ ] 添加 `PrepareSystemPromptWithPlanAsync`
+- [√] 添加 `PrepareSystemPromptWithPlanAsync`（实际为先异步恢复、再同步组装提示词；不改变已有方法签名）
   ```csharp
   private async Task<string> PrepareSystemPromptWithPlanAsync(
       string baseSystemPrompt,
@@ -819,18 +841,18 @@
 
 ---
 
-### Day 4：测试与优化
+### Day 4：测试与优化（5/9，55.6%；文件/管理器行为已有回归，完整工具循环与性能仍待验收）
 
 #### 4.16 单元测试
-- [ ] 测试计划创建
-- [ ] 测试步骤状态更新
-- [ ] 测试文件持久化
-- [ ] 测试计划恢复
+- [√] 测试计划创建
+- [√] 测试步骤状态更新
+- [√] 测试文件持久化
+- [√] 测试计划恢复（会话隔离、旧指针、损坏/滞后指针回退及终态不复活；7 项定向回归通过）
 
 #### 4.17 集成测试
 - [ ] 端到端测试：创建 → 执行 → 完成
 - [ ] 测试跨会话恢复
-- [ ] 测试计划放弃
+- [√] 测试计划放弃（取消后新实例不得恢复旧计划）
 
 #### 4.18 性能测试
 - [ ] 测试 15 步计划的加载性能
@@ -838,9 +860,9 @@
 
 ---
 
-## Phase 5：文档与示例（2 天）
+## Phase 5：文档与示例（0/7，0%）
 
-### Day 1：使用文档
+### Day 1：使用文档（0/3，0%）
 
 #### 5.1 核心指南
 - [ ] 新建：`docs/使用文档/Expert模式完整指南.md`
@@ -865,7 +887,7 @@
 
 ---
 
-### Day 2：示例代码
+### Day 2：示例代码（0/4，0%）
 
 #### 5.4 示例 1：JSON 结构化输出
 - [ ] 新建：`examples/expert-json-output/`
@@ -891,7 +913,7 @@
 - [ ] 所有单元测试通过
 - [ ] 所有集成测试通过
 - [ ] 代码覆盖率 > 80%
-- [ ] 无编译警告
+- [√] 无编译警告（本次 Windows 默认严格解决方案构建 0 警告；其他发布平台另行验收）
 
 ### 文档完整性
 - [ ] README 更新
@@ -925,8 +947,45 @@
 
 ---
 
-**执行状态**：⏳ 待开始
+**执行状态**：执行中；Phase 1 核心删除已落地，清理/测试/文档未完成；Phase 2 和 Phase 4 部分实现。
 
-**预计完成**：2025-10-19（14 天后）
+**预计完成**：原预计 2025-10-19 已过期；剩余工期须重新评估。
 
-**当前进度**：Phase 1 - Day 1（0%）
+**当前进度**：本次续接（2026-10-06）大幅推进：
+- Phase 1 核心清理已完成（Work/Meeting 常量、执行器、模式交互器、授权过滤、ToolCatalog 角色过滤、Schema 死列表、死方法、孤立测试目录全部移除；构建 0 警告 0 错误）。
+- Phase 4 计划工具已完整落地：`BuiltinExpertPlanToolExecutor` 注册到 Run 与恢复路径；工具契约与编排器对齐（stepId）；验证成功标志修正；会话隔离/终态/损坏指针/滞后指针 7 项回归已通过。
+- Phase 2 RequestControl：OpenAI 完整映射（含 Seed/Stop）；Anthropic 已实现；`ExpertRequestControl` 补 Seed；CLI `madorin run` 新增完整采样参数（--temperature/--top-p/--max-tokens/--frequency-penalty/--presence-penalty/--seed/--stop/--no-stream/--response-format）并注入 `ExpertModeOptions.RequestControl`。
+- 定向测试通过：Core 138/138、Protocol 45/45、Plan 相关 EndToEnd 8/8（全量 EndToEnd 有一个无关的 helpSha256 快照漂移，未阻塞计划验收）。
+
+**总进度** 估算已超过 55%。剩余重点：其他 Provider 显式映射、Phase 3 非流式 HTTP、Phase 5 文档示例、全量回归与 AOT 验证。
+
+## 本次续接修改文件
+
+- `src/Madorin.AI.Runtime.Contracts/Agent/ExpertRequestControl.cs`
+- `src/Providers/Madorin.AI.Runtime.Providers.Abstractions/MafSkillsAgentFactory.cs`
+- `src/Providers/Madorin.AI.Runtime.Providers.Abstractions/RuntimeProviderJsonContext.cs`
+- `src/Providers/Madorin.AI.Runtime.Providers.Abstractions/RuntimeProviderRequest.cs`
+- `src/Providers/Madorin.AI.Runtime.Providers.WorkerHost/ProviderWorkerJsonContext.cs`
+- `tests/Madorin.AI.Runtime.Provider.Tests/ExpertRequestControlTests.cs`
+- `tests/Madorin.AI.Runtime.Protocol.Tests/RuntimeJsonContextSnapshotTests.cs`
+- `tests/Madorin.AI.Runtime.Protocol.Tests/Snapshots/run-query-result-progress.v1.json`
+- `tests/Madorin.AI.Runtime.Protocol.Tests/Snapshots/run-list-item-progress.v1.json`
+- `tests/Madorin.AI.Runtime.EndToEnd.Tests/Madorin.AI.Runtime.EndToEnd.Tests.csproj`
+- `tests/Madorin.AI.Runtime.EndToEnd.Tests/ExpertPlanPersistenceTests.cs`
+- `tests/Madorin.AI.Runtime.Tools.Builtin.Tests/BuiltinModeInteractionToolTests.cs`
+- `src/Madorin.AI.Runtime.Tools.Builtin/BuiltinToolRegistry.cs`
+- `src/Madorin.AI.Runtime.Modes.Expert/ExpertPlanFileStore.cs`
+- `src/Madorin.AI.Runtime.Modes.Expert/ExpertPlanManager.cs`
+- `src/Madorin.AI.Runtime.Modes.Expert/Properties/AssemblyInfo.cs`
+- `src/Madorin.AI.Runtime.Modes.Expert/ExpertModeOrchestrator.cs`（仅计划恢复前移；保留并行工具结果改动）
+- `src/Madorin.AI.Runtime.Server/WorkspaceBusyException.cs`、`WorkspaceWriteLock.cs`、`BlobStagingStore.cs`（仅修复并行代码的编译及分析器问题，保留原有改动）
+- `src/Madorin.AI.Runtime.Cli/Tools/StandaloneToolAllowList.cs`、`src/Madorin.AI.Runtime.Cli/Commands/ServiceCommands.cs`（仅修复并行 CLI 修改的编译问题，保留其余改动）
+- `docs/执行计划(Expert模式增强-激进重构).md`
+
+## 本次验证
+
+- `dotnet build Madorin.AI.Runtime.slnx --no-restore -v quiet`：默认严格构建通过，0 警告、0 错误；不再需要临时降级 CA1512。
+- Provider 请求控制定向回归：8/8 通过（早期更宽过滤条件的 13/13 亦通过）。
+- 协议快照定向回归：13/13 通过；修正旧 Work/Meeting 进度快照后，协议工程完整回归 45/45 通过。
+- 工具工程回归：6/6 通过；计划恢复定向回归：7/7 通过（新增损坏/滞后指针覆盖）。
+- 修正旧快照之前的 `dotnet test Madorin.AI.Runtime.slnx --no-build --no-restore -v quiet`：Core 3/141、Protocol 1/45、Persistence 3/101、Provider 9/430、EndToEnd 18/337 失败；MConsole 73/73、Tools.Builtin 6/6 通过。协议失败已单独修复并复测；其余失败尚未逐项分类，不能标记全量测试通过。

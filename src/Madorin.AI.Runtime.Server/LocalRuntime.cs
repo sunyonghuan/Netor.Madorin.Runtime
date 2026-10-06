@@ -1209,7 +1209,7 @@ public sealed class LocalRuntime : IAsyncDisposable
                 break;
             }
 
-            await LogTerminalEnvelopeAsync(envelope, prepared).ConfigureAwait(false);
+            await LogObservedEnvelopeAsync(envelope, prepared).ConfigureAwait(false);
             yield return envelope;
         }
 
@@ -1219,7 +1219,7 @@ public sealed class LocalRuntime : IAsyncDisposable
         }
     }
 
-    private ValueTask LogTerminalEnvelopeAsync(
+    private ValueTask LogObservedEnvelopeAsync(
         RuntimeEventEnvelope envelope,
         PreparedRun prepared) => envelope.MessageType switch
         {
@@ -1234,8 +1234,65 @@ public sealed class LocalRuntime : IAsyncDisposable
                 prepared.RunId,
                 prepared.SessionId),
             MessageTypes.RunFailed => LogRunFailedAsync(envelope, prepared),
+            MessageTypes.ToolCallCompleted => LogToolCallAsync(envelope, prepared),
+            MessageTypes.ProviderProjectionAdjusted => _diagnosticLog.TryWriteAsync(
+                RuntimeDiagnosticLogLevel.Warning,
+                "ProviderProjectionAdjusted",
+                prepared.RunId,
+                prepared.SessionId,
+                writeDetails: writer => writer.WriteString("payload", envelope.Payload.GetRawText())),
+            MessageTypes.UsageUpdated => _diagnosticLog.TryWriteAsync(
+                RuntimeDiagnosticLogLevel.Debug,
+                "UsageUpdated",
+                prepared.RunId,
+                prepared.SessionId,
+                writeDetails: writer => writer.WriteString("payload", envelope.Payload.GetRawText())),
             _ => ValueTask.CompletedTask
         };
+
+    private ValueTask LogToolCallAsync(
+        RuntimeEventEnvelope envelope,
+        PreparedRun prepared)
+    {
+        string? toolName = null;
+        string? callId = null;
+        try
+        {
+            if (envelope.Payload.TryGetProperty("name", out var name))
+            {
+                toolName = name.GetString();
+            }
+
+            if (envelope.Payload.TryGetProperty("callId", out var id))
+            {
+                callId = id.GetString();
+            }
+        }
+        catch (InvalidOperationException)
+        {
+            // 工具事件结构异常时仍记录事件名，不中断运行。
+        }
+
+        var capturedName = toolName;
+        var capturedCallId = callId;
+        return _diagnosticLog.TryWriteAsync(
+            RuntimeDiagnosticLogLevel.Information,
+            "ToolCallCompleted",
+            prepared.RunId,
+            prepared.SessionId,
+            writeDetails: writer =>
+            {
+                if (!string.IsNullOrWhiteSpace(capturedName))
+                {
+                    writer.WriteString("tool", capturedName);
+                }
+
+                if (!string.IsNullOrWhiteSpace(capturedCallId))
+                {
+                    writer.WriteString("callId", capturedCallId);
+                }
+            });
+    }
 
     private ValueTask LogRunFailedAsync(
         RuntimeEventEnvelope envelope,

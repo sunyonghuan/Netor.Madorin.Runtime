@@ -1,4 +1,5 @@
-using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Madorin.AI.Runtime.Contracts.Expert;
 using Madorin.AI.Runtime.Contracts.Serialization;
@@ -17,129 +18,167 @@ internal sealed class ExpertPlanFileStore
         Directory.CreateDirectory(_plansDirectory);
     }
 
-    /// <summary>保存计划到文件（根据状态生成文件名）</summary>
+    /// <summary>保存计划到按会话隔离的文件</summary>
     public async Task SaveAsync(ExpertPlan plan, CancellationToken ct = default)
     {
-        var fileName = GenerateFileName(plan.CreatedAt, plan.Status);
-        var filePath = Path.Combine(_plansDirectory, fileName);
-
-        // 删除同一 planId 的旧状态文件
-        await DeleteOldStatusFilesAsync(plan.PlanId, plan.CreatedAt, ct).ConfigureAwait(false);
-
+        ArgumentNullException.ThrowIfNull(plan);
+        var sessionDirectory = GetSessionDirectory(plan.SessionId);
+        Directory.CreateDirectory(sessionDirectory);
+        var fileName = $"{plan.PlanId}-{plan.Status.ToString().ToLowerInvariant()}.json";
+        var filePath = Path.Combine(sessionDirectory, fileName);
         var json = JsonSerializer.Serialize(plan, RuntimeJsonContext.Default.ExpertPlan);
-        await File.WriteAllTextAsync(filePath, json, ct).ConfigureAwait(false);
+        await WriteAtomicallyAsync(filePath, json, ct).ConfigureAwait(false);
+        await WriteAtomicallyAsync(Path.Combine(sessionDirectory, "active.json"), json, ct)
+            .ConfigureAwait(false);
 
-        // 更新 active.json 软链接（指向最新文件）
-        await UpdateActiveSymlinkAsync(fileName, ct).ConfigureAwait(false);
+        foreach (var oldFile in Directory.GetFiles(sessionDirectory, $"{plan.PlanId}-*.json"))
+        {
+            if (!string.Equals(oldFile, filePath, StringComparison.OrdinalIgnoreCase))
+            {
+                File.Delete(oldFile);
+            }
+        }
     }
 
-    /// <summary>加载最新的活跃计划</summary>
-    public async Task<ExpertPlan?> LoadActiveAsync(CancellationToken ct = default)
+    /// <summary>只恢复当前会话的活跃计划，终态计划不回退到更旧的计划</summary>
+    public async Task<ExpertPlan?> LoadActiveAsync(string sessionId, CancellationToken ct = default)
     {
-        var activeFile = Path.Combine(_plansDirectory, "active.json");
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        var sessionDirectory = GetSessionDirectory(sessionId);
+        var activeFile = Path.Combine(sessionDirectory, "active.json");
+        ExpertPlan? candidate = null;
         if (File.Exists(activeFile))
         {
             try
             {
-                var json = await File.ReadAllTextAsync(activeFile, ct).ConfigureAwait(false);
-                var plan = JsonSerializer.Deserialize(json, RuntimeJsonContext.Default.ExpertPlan);
-
-                // 只恢复未完成的计划
-                if (plan is not null && plan.Status is ExpertPlanStatus.Pending or ExpertPlanStatus.Running)
+                var plan = await ReadPlanAsync(activeFile, ct).ConfigureAwait(false);
+                if (plan is not null && string.Equals(plan.SessionId, sessionId, StringComparison.Ordinal))
                 {
-                    return plan;
+                    candidate = plan;
                 }
             }
             catch (JsonException)
             {
-                // 文件损坏，忽略
+                // Fall back to this session's plan files if the active pointer is corrupt.
             }
         }
 
-        // 回退：查找最新的 running 或 pending 文件
-        return await LoadLatestUnfinishedAsync(ct).ConfigureAwait(false);
-    }
-
-    /// <summary>查找最新的未完成计划</summary>
-    private async Task<ExpertPlan?> LoadLatestUnfinishedAsync(CancellationToken ct)
-    {
-        var files = Directory.GetFiles(_plansDirectory, "*-running.json")
-            .Concat(Directory.GetFiles(_plansDirectory, "*-pending.json"))
-            .OrderByDescending(f => f)
-            .ToArray();
-
-        foreach (var file in files)
+        var latest = await LoadLatestAsync(sessionDirectory, sessionId, ct).ConfigureAwait(false);
+        if (latest is not null
+            && (candidate is null
+                || latest.CreatedAt > candidate.CreatedAt
+                || (latest.CreatedAt == candidate.CreatedAt
+                    && latest.UpdatedAt > candidate.UpdatedAt)))
         {
-            try
-            {
-                var json = await File.ReadAllTextAsync(file, ct).ConfigureAwait(false);
-                var plan = JsonSerializer.Deserialize(json, RuntimeJsonContext.Default.ExpertPlan);
-                if (plan is not null)
-                {
-                    return plan;
-                }
-            }
-            catch (JsonException)
-            {
-                continue;
-            }
+            candidate = latest;
         }
 
-        return null;
+        if (candidate is not null)
+        {
+            return IsActive(candidate) ? candidate : null;
+        }
+
+        if (Directory.Exists(sessionDirectory))
+        {
+            return null;
+        }
+
+        // Older installations used one shared active.json. Never restore another session's plan.
+        var legacyFile = Path.Combine(_plansDirectory, "active.json");
+        if (!File.Exists(legacyFile))
+        {
+            return null;
+        }
+
+        try
+        {
+            var legacyPlan = await ReadPlanAsync(legacyFile, ct).ConfigureAwait(false);
+            return legacyPlan is not null
+                && string.Equals(legacyPlan.SessionId, sessionId, StringComparison.Ordinal)
+                && IsActive(legacyPlan)
+                    ? legacyPlan
+                    : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
-    /// <summary>生成文件名：yyyyMMdd-HHmmss-{status}.json</summary>
-    private static string GenerateFileName(DateTimeOffset createdAt, ExpertPlanStatus status)
-    {
-        var timestamp = createdAt.ToLocalTime().ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
-        var statusStr = status.ToString().ToLowerInvariant();
-        return $"{timestamp}-{statusStr}.json";
-    }
-
-    /// <summary>删除同一计划的旧状态文件</summary>
-    private async Task DeleteOldStatusFilesAsync(
-        string planId,
-        DateTimeOffset createdAt,
+    private static async Task<ExpertPlan?> LoadLatestAsync(
+        string sessionDirectory,
+        string sessionId,
         CancellationToken ct)
     {
-        var timestamp = createdAt.ToLocalTime().ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
-        var pattern = $"{timestamp}-*.json";
-        var oldFiles = Directory.GetFiles(_plansDirectory, pattern);
+        if (!Directory.Exists(sessionDirectory))
+        {
+            return null;
+        }
 
-        foreach (var oldFile in oldFiles)
+        ExpertPlan? latest = null;
+        foreach (var file in Directory.GetFiles(sessionDirectory, "plan-*.json"))
         {
             try
             {
-                File.Delete(oldFile);
+                var plan = await ReadPlanAsync(file, ct).ConfigureAwait(false);
+                if (plan is not null
+                    && string.Equals(plan.SessionId, sessionId, StringComparison.Ordinal)
+                    && (latest is null
+                        || plan.CreatedAt > latest.CreatedAt
+                        || (plan.CreatedAt == latest.CreatedAt
+                            && plan.UpdatedAt > latest.UpdatedAt)))
+                {
+                    latest = plan;
+                }
             }
-            catch (IOException)
+            catch (JsonException)
             {
-                // 文件被占用，忽略
+                // Ignore a damaged archive without losing other valid plans.
             }
         }
 
-        await Task.CompletedTask.ConfigureAwait(false);
+        return latest;
     }
 
-    /// <summary>更新 active.json（直接复制内容，Windows 不支持软链接）</summary>
-    private async Task UpdateActiveSymlinkAsync(string targetFileName, CancellationToken ct)
+    private string GetSessionDirectory(string sessionId)
     {
-        var activeFile = Path.Combine(_plansDirectory, "active.json");
-        var targetFile = Path.Combine(_plansDirectory, targetFileName);
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sessionId)));
+        return Path.Combine(_plansDirectory, hash);
+    }
 
-        if (File.Exists(targetFile))
+    private static bool IsActive(ExpertPlan plan) =>
+        plan.Status is ExpertPlanStatus.Pending or ExpertPlanStatus.Running;
+
+    private static async Task<ExpertPlan?> ReadPlanAsync(string path, CancellationToken ct)
+    {
+        var json = await File.ReadAllTextAsync(path, ct).ConfigureAwait(false);
+        return JsonSerializer.Deserialize(json, RuntimeJsonContext.Default.ExpertPlan);
+    }
+
+    private static async Task WriteAtomicallyAsync(string path, string content, CancellationToken ct)
+    {
+        var tempPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
         {
-            var content = await File.ReadAllTextAsync(targetFile, ct).ConfigureAwait(false);
-            await File.WriteAllTextAsync(activeFile, content, ct).ConfigureAwait(false);
+            await File.WriteAllTextAsync(tempPath, content, ct).ConfigureAwait(false);
+            File.Move(tempPath, path, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+            {
+                File.Delete(tempPath);
+            }
         }
     }
 
     /// <summary>清理历史文件（保留最近 N 个已完成的计划）</summary>
     public void CleanupOldPlans(int keepCount = 10)
     {
-        var completedFiles = Directory.GetFiles(_plansDirectory, "*-completed.json")
-            .Concat(Directory.GetFiles(_plansDirectory, "*-failed.json"))
-            .Concat(Directory.GetFiles(_plansDirectory, "*-cancelled.json"))
+        var completedFiles = Directory.GetFiles(_plansDirectory, "*.json", SearchOption.AllDirectories)
+            .Where(static file => file.EndsWith("-completed.json", StringComparison.Ordinal)
+                || file.EndsWith("-failed.json", StringComparison.Ordinal)
+                || file.EndsWith("-cancelled.json", StringComparison.Ordinal))
             .OrderByDescending(f => f)
             .Skip(keepCount)
             .ToArray();

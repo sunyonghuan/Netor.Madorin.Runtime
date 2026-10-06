@@ -12,6 +12,7 @@ using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Server;
 using Madorin.AI.Runtime.Server.ProviderWorkers;
 using Madorin.AI.Runtime.Services.Memory;
+using Madorin.AI.Runtime.Services.Tools;
 using StandaloneSelection = Madorin.AI.Runtime.Cli.Config.ResolvedStandaloneSelection;
 
 namespace Madorin.AI.Runtime.Cli.Commands;
@@ -193,6 +194,17 @@ internal static class ServiceCommands
             "--no-stream",
             "Wait for the complete result; output streams by default.");
 
+        // Expert RequestControl options (passed via ExpertModeOptions.RequestControl)
+        var temperatureOption = CommandOptions.Create<float?>("--temperature", "Sampling temperature (0.0-2.0).");
+        var topPOption = CommandOptions.Create<float?>("--top-p", "Nucleus sampling (0.0-1.0).");
+        var topKOption = CommandOptions.Create<int?>("--top-k", "Top-K sampling.");
+        var maxTokensOption = CommandOptions.Create<int?>("--max-tokens", "Maximum tokens to generate.");
+        var frequencyPenaltyOption = CommandOptions.Create<float?>("--frequency-penalty", "Frequency penalty (-2.0 to 2.0).");
+        var presencePenaltyOption = CommandOptions.Create<float?>("--presence-penalty", "Presence penalty (-2.0 to 2.0).");
+        var seedOption = CommandOptions.Create<int?>("--seed", "Random seed for deterministic generation.");
+        var stopOption = CommandOptions.Create<string[]?>("--stop", "Stop sequences (repeatable).");
+        var responseFormatOption = CommandOptions.Create<string?>("--response-format", "text | json (for structured output).");
+
         var command = new Command("run", "Run one task or enter interactive mode.")
             .AddOptions(
                 providerOption,
@@ -205,7 +217,22 @@ internal static class ServiceCommands
                 outputFileOption,
                 outputFormatOption,
                 noStreamOption,
-                CommandOptions.Create<int?>("--timeout", "Set the timeout in seconds."));
+                CommandOptions.Create<int?>("--timeout", "Set the timeout in seconds."),
+                CommandOptions.Create<int?>(
+                    "--lock-wait",
+                    "Seconds to wait when another Runtime holds the workspace lock."),
+                CommandOptions.Create<string?>(
+                    "--allow-tools",
+                    "Comma-separated tool ids to allow without an interactive prompt."),
+                temperatureOption,
+                topPOption,
+                topKOption,
+                maxTokensOption,
+                frequencyPenaltyOption,
+                presencePenaltyOption,
+                seedOption,
+                stopOption,
+                responseFormatOption);
 
         command.SetAction(async parseResult =>
         {
@@ -439,6 +466,66 @@ internal static class ServiceCommands
                 using var cts = timeout is > 0
                     ? new CancellationTokenSource(TimeSpan.FromSeconds(timeout.Value))
                     : new CancellationTokenSource();
+                var lockWait = parseResult.GetValue<int?>("--lock-wait");
+                if (lockWait is < 0)
+                {
+                    RunOutputWriter.WriteCommandFailure(
+                        output,
+                        error,
+                        outputFormat,
+                        machineOutputRedirected,
+                        "InvalidLockWait",
+                        "--lock-wait must be zero or a positive number of seconds.");
+                    return ExitCodes.InvalidArguments;
+                }
+
+                if (!StandaloneToolAllowList.TryParse(
+                        parseResult.GetValue<string?>("--allow-tools"),
+                        out var listedTools,
+                        out var allowToolsError)
+                    && parseResult.GetValue<string?>("--allow-tools") is not null)
+                {
+                    RunOutputWriter.WriteCommandFailure(
+                        output,
+                        error,
+                        outputFormat,
+                        machineOutputRedirected,
+                        "InvalidAllowTools",
+                        allowToolsError ?? "--allow-tools is invalid.");
+                    return ExitCodes.InvalidArguments;
+                }
+
+                // Collect Expert RequestControl from CLI (only meaningful for Expert mode)
+                ExpertRequestControl? requestControl = null;
+                var cliTemperature = parseResult.GetValue(temperatureOption);
+                var cliTopP = parseResult.GetValue(topPOption);
+                var cliTopK = parseResult.GetValue(topKOption);
+                var cliMaxTokens = parseResult.GetValue(maxTokensOption);
+                var cliFrequency = parseResult.GetValue(frequencyPenaltyOption);
+                var cliPresence = parseResult.GetValue(presencePenaltyOption);
+                var cliSeed = parseResult.GetValue(seedOption);
+                var cliStop = parseResult.GetValue(stopOption);
+                var cliResponseFormat = parseResult.GetValue(responseFormatOption);
+                var cliNoStream = parseResult.GetValue(noStreamOption);
+
+                if (cliTemperature.HasValue || cliTopP.HasValue || cliTopK.HasValue || cliMaxTokens.HasValue ||
+                    cliFrequency.HasValue || cliPresence.HasValue || cliSeed.HasValue ||
+                    (cliStop is { Length: > 0 }) || !string.IsNullOrWhiteSpace(cliResponseFormat) || cliNoStream)
+                {
+                    requestControl = new ExpertRequestControl
+                    {
+                        Temperature = cliTemperature,
+                        TopP = cliTopP,
+                        TopK = cliTopK,
+                        MaxTokens = cliMaxTokens,
+                        FrequencyPenalty = cliFrequency,
+                        PresencePenalty = cliPresence,
+                        Seed = cliSeed,
+                        StopSequences = cliStop is { Length: > 0 } ? cliStop : null,
+                        ResponseFormat = string.IsNullOrWhiteSpace(cliResponseFormat) ? null : cliResponseFormat.Trim(),
+                        Stream = cliNoStream ? false : null
+                    };
+                }
 
                 LocalRuntime runtime;
                 try
@@ -453,7 +540,8 @@ internal static class ServiceCommands
                     var memoryFiles = new MemoryFileService(
                         Path.GetFullPath(resolvedMemoryUserHome),
                         context.WorkspaceRoot);
-                    using var consentHandler = StandaloneToolConsentPolicy.IsInteractiveConsentEnabled(
+                    using var interactiveConsent = listedTools is null
+                        && StandaloneToolConsentPolicy.IsInteractiveConsentEnabled(
                             terminal,
                             outputFormat is RunOutputFormat.Text,
                             outputFile is not null)
@@ -461,6 +549,9 @@ internal static class ServiceCommands
                             terminal,
                             new StandaloneToolGrantFactory())
                         : null;
+                    IToolConsentHandler? consentHandler = listedTools is null
+                        ? interactiveConsent
+                        : listedTools;
                     runtime = await LocalRuntime.StartAsync(
                             new LocalRuntimeOptions(
                                 context.WorkspaceRoot,
@@ -472,7 +563,10 @@ internal static class ServiceCommands
                                 MemoryFiles = memoryFiles,
                                 ToolConsentHandler = consentHandler,
                                 WorkerSupervisor = workerSupervisor,
-                                MinimumLogLevel = minimumLogLevel
+                                MinimumLogLevel = minimumLogLevel,
+                                WorkspaceLockTimeout = lockWait is > 0
+                                    ? TimeSpan.FromSeconds(lockWait.Value)
+                                    : TimeSpan.Zero
                             },
                             cts.Token)
                         .ConfigureAwait(false);
@@ -489,7 +583,8 @@ internal static class ServiceCommands
                                         mode,
                                         selection,
                                         config,
-                                        agents),
+                                        agents,
+                                        requestControl: requestControl),
                                     cts.Token)
                                 : runtime.RunAsync(
                                     BuildExistingRunRequest(
@@ -498,7 +593,8 @@ internal static class ServiceCommands
                                         mode,
                                         selection,
                                         config,
-                                        agents),
+                                        agents,
+                                        requestControl: requestControl),
                                     cts.Token);
                             var runOutput = outputDestination?.Writer ?? output;
                             var runOutputWriter = new RunOutputWriter(
@@ -570,6 +666,18 @@ internal static class ServiceCommands
                         announceWorkspaceChange = true;
                     }
                 }
+                catch (WorkspaceBusyException ex)
+                {
+                    RunOutputWriter.WriteCommandFailure(
+                        output,
+                        error,
+                        outputFormat,
+                        machineOutputRedirected,
+                        ex.ToError().Code,
+                        RedactSecrets(ex.Message, config),
+                        isRetryable: true);
+                    return ExitCodes.WorkspaceError;
+                }
                 catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException)
                 {
                     RunOutputWriter.WriteCommandFailure(
@@ -605,6 +713,7 @@ internal static class ServiceCommands
         ReplLoopResult Complete(int exitCode) => new(exitCode, null, selection);
 
         var selectionVersion = 1;
+        var helpLanguage = ReplHelpLanguage.Chinese;
         if (sessionId is not null)
         {
             var snapshot = await runtime.GetSessionSnapshotAsync(sessionId, ct).ConfigureAwait(false);
@@ -724,10 +833,12 @@ internal static class ServiceCommands
                         selectionVersion,
                         agents,
                         config,
+                        helpLanguage,
                         exitCts.Token)
                     .ConfigureAwait(false);
                 if (commandResult is not null)
                 {
+                    helpLanguage = commandResult.HelpLanguage;
                     sessionId = commandResult.SessionId;
                     selection = commandResult.Selection;
                     selectionVersion = commandResult.SelectionVersion;
@@ -869,6 +980,7 @@ internal static class ServiceCommands
         int selectionVersion,
         IReadOnlyList<AgentConfig> agents,
         StandaloneConfig config,
+        ReplHelpLanguage helpLanguage,
         CancellationToken ct)
     {
         if (!command.StartsWith('/'))
@@ -885,7 +997,7 @@ internal static class ServiceCommands
         }
 
         ReplCommandResult Current(int? exitCode = null) =>
-            new(sessionId, selection, selectionVersion, exitCode);
+            new(sessionId, selection, selectionVersion, exitCode, HelpLanguage: helpLanguage);
 
         try
         {
@@ -1477,15 +1589,17 @@ internal static class ServiceCommands
                     return Current();
 
                 case "/HELP":
-                    if (!ReplHelpWriter.Write(terminal, argument))
+                    if (!ReplHelpWriter.Write(terminal, argument, helpLanguage, out var nextLanguage))
                     {
                         await error.WriteLineAsync(
-                                $"Unknown REPL help topic '{argument}'. Use /help to list commands.")
+                                nextLanguage == ReplHelpLanguage.English
+                                    ? $"Unknown command '{argument}'. Use /help to list commands."
+                                    : $"没有这个命令：{argument}。用 /help 查看命令。")
                             .ConfigureAwait(false);
                         return Current();
                     }
 
-                    return Current();
+                    return Current() with { HelpLanguage = nextLanguage };
 
                 case "/MEMORY":
                 case "/REMEMBER":
@@ -1493,7 +1607,9 @@ internal static class ServiceCommands
 
                 default:
                     await error.WriteLineAsync(
-                            $"Unknown REPL command '{commandName}'. Use /help to list commands.")
+                            helpLanguage == ReplHelpLanguage.English
+                                ? $"Unknown command '{commandName}'. Use /help to list commands."
+                                : $"没有这个命令：{commandName}。用 /help 查看命令。")
                         .ConfigureAwait(false);
                     return Current();
             }
@@ -1881,14 +1997,16 @@ internal static class ServiceCommands
         StandaloneSelection selection,
         StandaloneConfig config,
         IReadOnlyList<AgentConfig> agents,
-        int selectionVersion = 1)
+        int selectionVersion = 1,
+        ExpertRequestControl? requestControl = null)
     {
         var nextTurn = BuildNextTurnSelection(
             mode,
             selection,
             config,
             agents,
-            selectionVersion);
+            selectionVersion,
+            requestControl);
         return new NewSessionRunRequest(
             SessionIdempotencyKey: Guid.NewGuid().ToString("N"),
             RunIdempotencyKey: Guid.NewGuid().ToString("N"),
@@ -1904,11 +2022,12 @@ internal static class ServiceCommands
         StandaloneSelection selection,
         StandaloneConfig config,
         IReadOnlyList<AgentConfig> agents,
-        int selectionVersion = 1) =>
+        int selectionVersion = 1,
+        ExpertRequestControl? requestControl = null) =>
         new(
             sessionId,
             Guid.NewGuid().ToString("N"),
-            BuildNextTurnSelection(mode, selection, config, agents, selectionVersion),
+            BuildNextTurnSelection(mode, selection, config, agents, selectionVersion, requestControl),
             [new TextContentBlock(userInput)]);
 
     private static NextTurnSelection BuildNextTurnSelection(
@@ -1916,7 +2035,8 @@ internal static class ServiceCommands
         StandaloneSelection selection,
         StandaloneConfig config,
         IReadOnlyList<AgentConfig> agents,
-        int selectionVersion = 1)
+        int selectionVersion = 1,
+        ExpertRequestControl? requestControl = null)
     {
         var selectedAgent = BuildAgentRef(selection);
         var agentRefs = agents
@@ -1925,7 +2045,7 @@ internal static class ServiceCommands
             .ToArray();
         ModeOptions modeOptions = mode switch
         {
-            RuntimeMode.Expert => new ExpertModeOptions(selectedAgent),
+            RuntimeMode.Expert => new ExpertModeOptions(selectedAgent, requestControl: requestControl),
             _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, null)
         };
         return new NextTurnSelection(
@@ -2084,7 +2204,8 @@ internal static class ServiceCommands
         StandaloneSelection Selection,
         int SelectionVersion,
         int? ExitCode,
-        string? WorkspaceRoot = null);
+        string? WorkspaceRoot = null,
+        ReplHelpLanguage HelpLanguage = ReplHelpLanguage.Chinese);
 
     private sealed record ReplLoopResult(
         int ExitCode,

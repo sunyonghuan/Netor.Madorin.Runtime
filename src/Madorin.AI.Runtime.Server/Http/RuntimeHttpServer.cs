@@ -80,10 +80,27 @@ internal sealed partial class RuntimeHttpServer : IAsyncDisposable
     private async Task<IResult> HandleRunAsync(HttpRunRequest request, CancellationToken ct)
     {
         var sw = Stopwatch.StartNew();
+
+        // Determine sync timeout (default 300s as per plan).
+        // Priority: RequestControl.TimeoutMs (ms) > 300s default.
+        // (Header override can be added later via HttpContext if required.)
+        var timeoutSeconds = 300;
+        if (request.RequestControl?.TimeoutMs is > 0)
+        {
+            timeoutSeconds = Math.Max(1, request.RequestControl.TimeoutMs.Value / 1000);
+        }
+
+        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+        var effectiveCt = linkedCts.Token;
+
         try
         {
-            // Validate RequestControl parameters early to return clear HTTP 400 errors
-            request.RequestControl?.Validate();
+            // Validate RequestControl parameters early to return clear HTTP 400 errors.
+            // For the synchronous HTTP path we force Stream=false intent so the caller
+            // receives a single buffered response instead of an event stream.
+            var forcedControl = (request.RequestControl ?? new ExpertRequestControl()) with { Stream = false };
+            forcedControl.Validate();
 
             await using var client = new RuntimeClient(
                 new RuntimeClientOptions(
@@ -92,7 +109,7 @@ internal sealed partial class RuntimeHttpServer : IAsyncDisposable
                     ExpectedRuntimeInstanceId: _instanceId,
                     HandshakeSecret: _handshakeSecret));
 
-            await client.ConnectAsync(ct);
+            await client.ConnectAsync(effectiveCt);
 
             var sessionId = request.SessionId ?? Guid.NewGuid().ToString("N");
             var runId = Guid.NewGuid().ToString("N");
@@ -112,7 +129,7 @@ internal sealed partial class RuntimeHttpServer : IAsyncDisposable
                         ModelId: request.ModelId),
                     availableAgents: null,
                     contextPolicy: null,
-                    requestControl: request.RequestControl));
+                    requestControl: forcedControl));
 
             var runRequest = string.IsNullOrWhiteSpace(request.SessionId)
                 ? new NewSessionRunRequest(
@@ -130,10 +147,10 @@ internal sealed partial class RuntimeHttpServer : IAsyncDisposable
 
             var actualRunId = runRequest switch
             {
-                NewSessionRunRequest newReq => await client.StartNewSessionRunAsync(newReq, ct),
+                NewSessionRunRequest newReq => await client.StartNewSessionRunAsync(newReq, effectiveCt),
                 ExistingSessionRunRequest existingReq => await client.StartExistingSessionRunAsync(
                     existingReq,
-                    ct),
+                    effectiveCt),
                 _ => throw new InvalidOperationException("Invalid run request type")
             };
 
@@ -143,7 +160,11 @@ internal sealed partial class RuntimeHttpServer : IAsyncDisposable
             int? inputTokens = null;
             int? outputTokens = null;
 
-            await foreach (var evt in client.ReadEventsAsync(0, ct))
+            // Buffer the entire event stream. This is required because a Runtime Run
+            // is a multi-turn agent loop (LLM calls + tools + plan state + re-injection),
+            // not a single provider call. We cannot simply forward a provider-level
+            // non-stream response; we must wait for the Run to reach a terminal state.
+            await foreach (var evt in client.ReadEventsAsync(0, effectiveCt))
             {
                 switch (evt.MessageType)
                 {
@@ -205,6 +226,15 @@ internal sealed partial class RuntimeHttpServer : IAsyncDisposable
             };
 
             return Results.Ok(response);
+        }
+        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            sw.Stop();
+            Log.HttpRunTimeout(_logger, timeoutSeconds);
+            return Results.Problem(
+                detail: $"Request exceeded the synchronous timeout of {timeoutSeconds} seconds.",
+                statusCode: 504,
+                title: "Gateway Timeout");
         }
         catch (ArgumentException ex) when (ex.ParamName != null)
         {
@@ -271,6 +301,12 @@ internal sealed partial class RuntimeHttpServer : IAsyncDisposable
             Level = LogLevel.Warning,
             Message = "HTTP run request validation failed")]
         public static partial void HttpRunValidationFailed(ILogger logger, Exception ex);
+
+        [LoggerMessage(
+            EventId = 4,
+            Level = LogLevel.Warning,
+            Message = "HTTP run request timed out after {TimeoutSeconds} seconds")]
+        public static partial void HttpRunTimeout(ILogger logger, int timeoutSeconds);
     }
 }
 

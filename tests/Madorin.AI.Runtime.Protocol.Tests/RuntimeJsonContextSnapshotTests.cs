@@ -15,8 +15,6 @@ public sealed class RuntimeJsonContextSnapshotTests
     [DataRow("initialize-request.v1.json", "initialize.request")]
     [DataRow("initialize-response.v1.json", "initialize.response")]
     [DataRow("new-session-run-expert.v1.json", "run.new_session.expert")]
-    [DataRow("new-session-run-meeting.v1.json", "run.new_session.meeting")]
-    [DataRow("new-session-run-work.v1.json", "run.new_session.work")]
     [DataRow("existing-session-run.v1.json", "run.existing_session")]
     [DataRow("runtime-event-envelope.v1.json", "event.envelope")]
     [DataRow("json-rpc-request.v1.json", "jsonrpc.request")]
@@ -111,9 +109,7 @@ public sealed class RuntimeJsonContextSnapshotTests
             "initialize-response.v1.json" => RoundTrip(
                 payload,
                 RuntimeJsonContext.Default.InitializeResponse),
-            "new-session-run-expert.v1.json" or
-            "new-session-run-meeting.v1.json" or
-            "new-session-run-work.v1.json" => RoundTrip(
+            "new-session-run-expert.v1.json" => RoundTrip(
                 payload,
                 RuntimeJsonContext.Default.NewSessionRunRequest),
             "existing-session-run.v1.json" => RoundTrip(

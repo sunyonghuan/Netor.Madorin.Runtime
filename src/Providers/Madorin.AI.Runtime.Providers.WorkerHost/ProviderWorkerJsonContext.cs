@@ -24,6 +24,7 @@ namespace Madorin.AI.Runtime.Providers.WorkerHost;
 [JsonSerializable(typeof(ProviderModel))]
 [JsonSerializable(typeof(ProviderModel[]))]
 [JsonSerializable(typeof(RuntimeProviderRequest))]
+[JsonSerializable(typeof(ExpertRequestControl))]
 [JsonSerializable(typeof(RuntimeProviderMessage))]
 [JsonSerializable(typeof(RuntimeProviderMessage[]))]
 [JsonSerializable(typeof(RuntimeProviderEvent))]

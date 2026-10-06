@@ -143,6 +143,44 @@ internal sealed class BlobStagingStore : IToolResultBlobStore, IAsyncDisposable
         }
     }
 
+    /// <inheritdoc />
+    public async Task<ReadOnlyMemory<byte>> ReadAsync(
+        BlobReference reference,
+        int maxBytes,
+        CancellationToken ct = default)
+    {
+        await ValidateReferenceAsync(reference, ct).ConfigureAwait(false);
+        ArgumentOutOfRangeException.ThrowIfNegative(maxBytes);
+
+        if (maxBytes == 0 || reference.Length == 0)
+        {
+            return ReadOnlyMemory<byte>.Empty;
+        }
+
+        var count = (int)Math.Min(maxBytes, reference.Length);
+        var bytes = new byte[count];
+        await using var stream = new FileStream(
+            GetBlobPath(reference.BlobId),
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            128 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var read = 0;
+        while (read < bytes.Length)
+        {
+            var current = await stream.ReadAsync(bytes.AsMemory(read), ct).ConfigureAwait(false);
+            if (current == 0)
+            {
+                break;
+            }
+
+            read += current;
+        }
+
+        return read == bytes.Length ? bytes : bytes.AsMemory(0, read);
+    }
+
     public async Task BeginAsync(BlobBeginRequest request, string owner, CancellationToken ct)
     {
         ValidateOwner(owner);

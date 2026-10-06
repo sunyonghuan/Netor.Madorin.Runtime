@@ -57,7 +57,11 @@ public sealed class StandaloneWelcomeTests
                 "provider-one",
                 "model-one",
                 Path.GetFullPath("workspace")));
-        var wroteHelp = ReplHelpWriter.Write(terminal, "provider");
+        var wroteHelp = ReplHelpWriter.Write(
+            terminal,
+            "provider",
+            ReplHelpLanguage.Chinese,
+            out _);
 
         Assert.IsTrue(wroteHelp);
         Assert.IsTrue(terminal.Writes.Any(write =>
@@ -70,10 +74,10 @@ public sealed class StandaloneWelcomeTests
             write.Value == "/provider"
             && write.Style == CliTextStyle.Command));
         Assert.IsTrue(terminal.Writes.Any(write =>
-            write.Value == "[providerId]"
+            write.Value == "[供应商名称]"
             && write.Style == CliTextStyle.Parameter));
         Assert.IsTrue(terminal.Writes.Any(write =>
-            write.Value == "选择或更新下一轮使用的模型服务商。"
+            write.Value == "不写名称时从已添加的供应商里选择。这里不能添加新供应商，添加请看 madorin config edit。"
             && write.Style == CliTextStyle.Muted));
         Assert.IsTrue(terminal.Writes.Any(write =>
             write.Value == "ready"
@@ -88,41 +92,49 @@ public sealed class StandaloneWelcomeTests
     {
         var terminal = new RecordingTerminal();
 
-        var wroteHelp = ReplHelpWriter.Write(terminal, null);
+        var wroteHelp = ReplHelpWriter.Write(
+            terminal,
+            null,
+            ReplHelpLanguage.Chinese,
+            out var language);
 
         Assert.IsTrue(wroteHelp);
-        (string Command, string Description)[] expectedEntries =
+        Assert.AreEqual(ReplHelpLanguage.Chinese, language);
+        var output = terminal.Output.ToString();
+        Assert.Contains("交互命令", output, StringComparison.Ordinal);
+        Assert.Contains("[] 可以不写，<> 必须写。", output, StringComparison.Ordinal);
+        string[] commands =
         [
-            ("/model [modelId]", "选择或更新下一轮使用的模型。"),
-            ("/provider [providerId]", "选择或更新下一轮使用的模型服务商。"),
-            ("/agent [agentId]", "选择或更新下一轮使用的智能体。"),
-            ("/memory [global|project|effective]", "查看记忆内容及其来源。"),
-            ("/remember <global|project>", "经交互确认后追加一条记忆。"),
-            ("/mode", "查看当前交互会话中不可变更的工作模式。"),
-            ("/compact", "创建或刷新当前会话的上下文摘要。"),
-            ("/context", "查看规范历史记录和有效上下文投影的统计信息。"),
-            ("/session", "查看当前会话及下一轮选择。"),
-            ("/new", "在下次提交内容时新建会话。"),
-            ("/resume [sessionId]", "列出可恢复的会话，或切换到指定会话。"),
-            ("/export [path]", "将当前会话导出为 Markdown 文件。"),
-            ("/tools", "查看工具及其权限状态。"),
-            ("/skill <list|show <name>|refresh>", "查看或刷新本地技能目录。"),
-            ("/history [positive-count|all]", "查看最近的规范化消息。"),
-            ("/clear", "清空当前交互式控制台，不删除历史记录。"),
-            ("/cd [path]", "查看或切换当前工作区。"),
-            ("/status", "查看运行时、工作区、活动、记忆和工具数量。"),
-            ("/help [command]", "显示命令列表或指定命令的详细帮助。"),
-            ("/exit | /quit", "保存当前会话并退出交互界面。")
+            "/help [命令]",
+            "/help en",
+            "/exit",
+            "/provider [供应商名称]",
+            "/model [模型编号]",
+            "madorin config edit",
+            "/agent [智能体编号]",
+            "/session",
+            "/new",
+            "/resume [会话编号]",
+            "/history [条数 | all]",
+            "/export [文件路径]",
+            "/compact",
+            "/context",
+            "/cd [目录]",
+            "/status",
+            "/mode",
+            "/clear",
+            "/memory [global | project | effective]",
+            "/remember <global | project>",
+            "/tools",
+            "/skill <list | show 名称 | refresh>"
         ];
-        var descriptionColumn = expectedEntries.Max(entry => entry.Command.Length) + 4;
-        var expectedOutput = string.Join(
-            Environment.NewLine,
-            expectedEntries.Select(entry =>
-                $"{entry.Command.PadRight(descriptionColumn)}{entry.Description}"));
+        foreach (var command in commands)
+        {
+            Assert.Contains(command, output, StringComparison.Ordinal);
+        }
 
-        Assert.AreEqual(
-            $"可用命令：{Environment.NewLine}{expectedOutput}{Environment.NewLine}",
-            terminal.Output.ToString());
+        Assert.DoesNotContain("/pause", output, StringComparison.Ordinal);
+        Assert.DoesNotContain("/interrupt", output, StringComparison.Ordinal);
     }
 
     [TestMethod]

@@ -812,6 +812,7 @@ public sealed class RuntimeServer : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(toolCatalogSnapshot);
 
         var executors = new List<IToolExecutor>();
+        executors.Add(new BuiltinExpertPlanToolExecutor());
         if (session.SupportsReverseRpc)
         {
             executors.Add(new ReverseRpcToolExecutor(

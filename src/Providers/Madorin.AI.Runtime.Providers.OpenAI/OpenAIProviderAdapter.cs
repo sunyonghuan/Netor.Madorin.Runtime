@@ -354,11 +354,17 @@ public sealed class OpenAIProviderAdapter :
 
     private static ChatOptions CreateChatOptions(RuntimeProviderRequest request)
     {
+        var control = request.RequestControl;
         return new ChatOptions
         {
             ModelId = request.ModelId,
-            Temperature = request.Temperature,
-            MaxOutputTokens = request.MaxTokens,
+            Temperature = control?.Temperature is { } t ? (float)t : request.Temperature,
+            MaxOutputTokens = control?.MaxTokens ?? request.MaxTokens,
+            TopP = control?.TopP is { } p ? (float)p : null,
+            FrequencyPenalty = control?.FrequencyPenalty is { } f ? (float)f : null,
+            PresencePenalty = control?.PresencePenalty is { } pr ? (float)pr : null,
+            StopSequences = control?.StopSequences is { Length: > 0 } ? [.. control.StopSequences] : null,
+            Seed = control?.Seed,
             Tools = CreateTools(request.Tools),
             ResponseFormat = CreateResponseFormat(request.StructuredOutput)
         };

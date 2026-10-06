@@ -1456,6 +1456,15 @@ public sealed class ToolGatewayTests
             ct.ThrowIfCancellationRequested();
             return Task.CompletedTask;
         }
+
+        public Task<ReadOnlyMemory<byte>> ReadAsync(
+            BlobReference reference,
+            int maxBytes,
+            CancellationToken ct = default)
+        {
+            ct.ThrowIfCancellationRequested();
+            return Task.FromResult<ReadOnlyMemory<byte>>(ReadOnlyMemory<byte>.Empty);
+        }
     }
 
     private sealed class RecoverableToolExecutor(

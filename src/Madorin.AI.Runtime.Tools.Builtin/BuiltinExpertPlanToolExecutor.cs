@@ -104,7 +104,7 @@ public sealed class BuiltinExpertPlanToolExecutor : IToolExecutor
             var outputJson = ToolJson.Write(writer =>
             {
                 writer.WriteStartObject();
-                writer.WriteBoolean("success", false);
+                writer.WriteBoolean("success", true);
                 writer.WriteString("title", title.Trim());
                 writer.WriteNumber("stepCount", stepCount);
                 writer.WriteString(

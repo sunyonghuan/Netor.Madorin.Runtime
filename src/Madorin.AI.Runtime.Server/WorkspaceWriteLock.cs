@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -53,6 +55,7 @@ public sealed partial class WorkspaceWriteLock : IAsyncDisposable
         var holderPath = lockPath + ".holder";
         var deadline = DateTimeOffset.UtcNow + timeout;
         string? holder = null;
+        var staleRecoveries = 0;
 
         while (true)
         {
@@ -64,7 +67,8 @@ public sealed partial class WorkspaceWriteLock : IAsyncDisposable
                 {
                     Mode = FileMode.OpenOrCreate,
                     Access = FileAccess.ReadWrite,
-                    Share = FileShare.ReadWrite,
+                    // 外部可以读取持有者信息。排他性由下方的字节锁保证。
+                    Share = FileShare.Read,
                     Options = FileOptions.Asynchronous | FileOptions.WriteThrough
                 });
                 // FileShare is not an inter-process lock on Unix. Keep the same
@@ -86,11 +90,15 @@ public sealed partial class WorkspaceWriteLock : IAsyncDisposable
                 }
 
                 holder = await TryReadHolderAsync(holderPath, lockPath, ct).ConfigureAwait(false);
+                if (staleRecoveries < 2 && TryRecoverStaleLock(holder, holderPath))
+                {
+                    staleRecoveries++;
+                    continue;
+                }
+
                 if (timeout == TimeSpan.Zero || DateTimeOffset.UtcNow >= deadline)
                 {
-                    throw new InvalidOperationException(
-                        $"The workspace already has an active Runtime instance. " +
-                        $"Lock: '{lockPath}'. Holder: {holder ?? "unavailable"}.");
+                    throw CreateBusyException(lockPath, holder);
                 }
 
                 var remaining = deadline - DateTimeOffset.UtcNow;
@@ -189,6 +197,124 @@ public sealed partial class WorkspaceWriteLock : IAsyncDisposable
             {
                 return null;
             }
+        }
+    }
+
+    /// <summary>
+    /// 持有者进程已经退出时，操作系统会释放字节锁。
+    /// 删掉过期说明后立刻重试，避免把死进程的锁当成占用。
+    /// </summary>
+    private static bool TryRecoverStaleLock(string? holder, string holderPath)
+    {
+        if (!TryParseHolder(holder, out _, out var processId, out _)
+            || processId is not int pid
+            || IsProcessAlive(pid))
+        {
+            return false;
+        }
+
+        try
+        {
+            File.Delete(holderPath);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // 说明文件删不掉不影响下一次获取字节锁。
+        }
+
+        return true;
+    }
+
+    private static WorkspaceBusyException CreateBusyException(string lockPath, string? holder)
+    {
+        if (!TryParseHolder(holder, out var runtimeInstanceId, out var processId, out var startedAt))
+        {
+            runtimeInstanceId = null;
+            processId = null;
+            startedAt = null;
+        }
+        var alive = processId is int pid && IsProcessAlive(pid);
+        var visibleHolder = string.IsNullOrWhiteSpace(holder)
+            ? "unavailable"
+            : holder.Replace("\r", " ", StringComparison.Ordinal)
+                .Replace("\n", " ", StringComparison.Ordinal);
+        var processState = processId is null
+            ? string.Empty
+            : alive
+                ? " The holder process is still running."
+                : " The holder process is not running.";
+        return new WorkspaceBusyException(
+            lockPath,
+            runtimeInstanceId,
+            processId,
+            startedAt,
+            "The workspace already has an active Runtime instance. " +
+            $"Lock: '{lockPath}'. Holder: {visibleHolder}.{processState}");
+    }
+
+    private static bool TryParseHolder(
+        string? holder,
+        out string? runtimeInstanceId,
+        out int? processId,
+        out DateTimeOffset? startedAt)
+    {
+        runtimeInstanceId = null;
+        processId = null;
+        startedAt = null;
+        if (string.IsNullOrWhiteSpace(holder))
+        {
+            return false;
+        }
+
+        foreach (var rawLine in holder.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            var line = rawLine.Trim();
+            var separator = line.IndexOf('=');
+            if (separator <= 0 || separator == line.Length - 1)
+            {
+                continue;
+            }
+
+            var name = line[..separator];
+            var value = line[(separator + 1)..];
+            if (string.Equals(name, "runtimeInstanceId", StringComparison.Ordinal))
+            {
+                runtimeInstanceId = value;
+            }
+            else if (string.Equals(name, "pid", StringComparison.Ordinal)
+                && int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var pid))
+            {
+                processId = pid;
+            }
+            else if (string.Equals(name, "startedAt", StringComparison.Ordinal)
+                && DateTimeOffset.TryParse(
+                    value,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind,
+                    out var started))
+            {
+                startedAt = started;
+            }
+        }
+
+        return runtimeInstanceId is not null || processId is not null || startedAt is not null;
+    }
+
+    private static bool IsProcessAlive(int processId)
+    {
+        if (processId <= 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            return !process.HasExited;
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        {
+            return false;
         }
     }
 
