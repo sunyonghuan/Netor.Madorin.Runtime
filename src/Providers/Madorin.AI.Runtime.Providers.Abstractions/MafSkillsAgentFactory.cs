@@ -45,7 +45,22 @@ public static class MafSkillsAgentFactory
         }
     }
 
-    private static void ApplyRequestControl(ChatOptions options, ExpertRequestControl? control)
+    /// <summary>
+    /// Single source of truth for applying <see cref="ExpertRequestControl"/> to Microsoft.Extensions.AI <see cref="ChatOptions"/>.
+    ///
+    /// Mapping (cross-checked against latest official docs of the major providers as of 2025/2026):
+    /// - temperature (0.0-2.0)
+    /// - max_tokens / max_output_tokens
+    /// - top_p (0.0-1.0]
+    /// - top_k (provider dependent)
+    /// - stop / stop_sequences
+    /// - frequency_penalty / presence_penalty (-2.0 to 2.0)
+    /// - seed (for supported providers/models)
+    ///
+    /// Unsupported parameters for a given provider are simply ignored by the underlying SDK / API.
+    /// Stream preference is handled at a higher layer (HTTP sync endpoint forces Stream=false).
+    /// </summary>
+    public static void ApplyRequestControl(ChatOptions options, ExpertRequestControl? control)
     {
         if (control is null)
         {
@@ -53,6 +68,7 @@ public static class MafSkillsAgentFactory
         }
 
         control.Validate();
+
         if (control.Temperature is { } temperature)
         {
             options.Temperature = (float)temperature;
@@ -87,6 +103,14 @@ public static class MafSkillsAgentFactory
         {
             options.PresencePenalty = (float)presencePenalty;
         }
+
+        if (control.Seed is { } seed)
+        {
+            options.Seed = seed;
+        }
+
+        // Stream preference is honored at higher layers (HTTP sync forces false).
+        // Individual provider adapters may use it to decide between streaming/non-streaming calls when supported.
     }
 
     public static AgentSkillsProvider? CreateSkillsProvider(SkillsInvocationContext? context)

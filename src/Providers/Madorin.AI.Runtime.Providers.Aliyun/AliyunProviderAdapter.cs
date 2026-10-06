@@ -85,6 +85,20 @@ public sealed class AliyunProviderAdapter :
         CancellationToken ct = default) =>
         _innerAdapter.CompleteStreamingAsync(request, ct);
 
+    // === RequestControl / sampling parameters note (Aliyun DashScope) ===
+    // This adapter delegates to OpenAICompatibleProviderAdapter.
+    // All ExpertRequestControl parameters (temperature, top_p, max_tokens, stop, frequency_penalty,
+    // presence_penalty, seed, etc.) are applied via the central MafSkillsAgentFactory.ApplyRequestControl
+    // or OpenAIProviderAdapter path.
+    //
+    // Cross-checked against latest official docs (as of 2025/2026):
+    // - DashScope OpenAI-compatible chat completions:
+    //   https://help.aliyun.com/zh/dashscope/developer-reference/compatibility-of-openai-with-dashscope
+    // Supported (varies by model qwen-*):
+    //   temperature, top_p, max_tokens, stop, stream
+    // Limited / model-dependent: seed, penalties.
+    // TopK is usually not exposed in the OpenAI-compatible layer for Aliyun.
+
     public async Task UpdateCredentialsAsync(
         CredentialsUpdateParameters parameters,
         CancellationToken ct = default)

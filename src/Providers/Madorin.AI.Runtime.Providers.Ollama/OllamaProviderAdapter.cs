@@ -91,6 +91,19 @@ public sealed class OllamaProviderAdapter :
         CancellationToken ct = default) =>
         _innerAdapter.CompleteStreamingAsync(request, ct);
 
+    // === RequestControl mapping (Ollama) ===
+    // Delegates entirely to OpenAICompatibleProviderAdapter.
+    // All ExpertRequestControl parameters are applied via the central path
+    // (MafSkillsAgentFactory.ApplyRequestControl + OpenAIProviderAdapter).
+    //
+    // Latest official docs:
+    // - Ollama OpenAI compatibility: https://github.com/ollama/ollama/blob/main/docs/openai.md
+    // - Native /api/chat options: https://github.com/ollama/ollama/blob/main/docs/api.md#generate-a-chat-completion
+    //
+    // Supported in OpenAI-compat layer (model dependent):
+    //   temperature, top_p, max_tokens, stop, stream, seed (in recent versions)
+    // Penalties and top_k have varying support. Always prefer latest Ollama release for full parity.
+
     public async Task UpdateCredentialsAsync(
         CredentialsUpdateParameters parameters,
         CancellationToken ct = default)

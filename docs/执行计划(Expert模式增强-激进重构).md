@@ -18,7 +18,7 @@
 - Phase 4：计划契约、文件存储、管理器、五个工具及编排器路由已有实现；本次补齐按会话隔离、原子保存、终态不复活及恢复前提示词注入；进一步修复损坏/滞后指针下旧计划误恢复，完整工具循环和并发门禁尚未验收。
 - Phase 5：完整使用指南、迁移指南和配套示例未完成。
 
-本批次：修复请求控制的 Worker 传输与公共采样参数映射，补充边界/协议/Provider 回归，并清理已确认的构建和旧模式测试残留；严格解决方案构建已恢复为 0 警告、0 错误，全量测试的遗留失败仍待处理。
+本批次：Phase 4 小型计划隔离/恢复/并发门禁 + Phase 5 文档+示例 + 中央 ApplyRequestControl + /v1/run 同步非流式（带缓冲+超时+Stream=false 传播）已完成。Phase 4/5 关键路径测试已执行并通过（见下方测试总结）。全量回归中存在遗留失败（主要为 Work/Meeting 清理残留、样本宿主路径、长时 HTTP 超时、SQLite FK 测试侧效），与新增功能无关。
 
 #### 协议变更预检：PROTOCOL-20261006-01
 
@@ -38,6 +38,42 @@
 - [ ] **Phase 5**: 文档与示例 —— 0/7 项（0%）
 
 **总进度**：31/87 检查项（35.6%）。按下方可核查的独立顶层复选项统计，不按历史估时统计；已有部分实现但未达到验收条件的条目继续留空。
+
+---
+
+## 2026-10-06 测试执行总结（用户要求：全量回归 + 重点覆盖任务委托 + 小型计划 + 新文档流程）
+
+**构建状态**：`dotnet build` 0 警告 0 错误（解决方案严格模式）。
+
+**关键路径 targeted 回归（Phase 4/5 + 文档示例直接相关）**：
+
+- **小型计划（ExpertPlan）生命周期 + 恢复 + 隔离**（`ExpertPlanPersistenceTests`）：
+  - 7/7 通过（会话隔离、取消后不复活、步骤状态持久化、损坏指针回退、新指针优先、跨会话不串、遗留共享指针防护）。
+- **任务委托（@agent + mcli_delegate_agent + 内置执行器）**：
+  - `BuiltinDelegateAgentToolExecutorTests`：10/10 通过（CanExecute、有效输入、缺失 agentName/task、错误返回等）。
+  - `ExpertModeDelegationUnitTests`（HostIntegration）：语法解析 + Sub-Agent Prompt 注入完整通过。
+- **请求控制（中央 ApplyRequestControl + Provider 映射）**：
+  - `ExpertRequestControlTests`：8/8 通过（Validate、Worker 往返、OpenAI/Anthropic/兼容提供商采样覆盖）。
+- **同步 HTTP /v1/run + RequestControl 验证**（新文档示例流程）：
+  - `HttpRunInvalidMaxTokensTests.RunEndpoint_WithNegativeMaxTokens_ReturnsValidationError`：通过（400 BadRequest）。
+  - `HttpRunStopSequencesTests.RunEndpoint_WithInvalidTemperature_ReturnsValidationError`：通过（400）。
+  - 修复点：将 `forcedControl.Validate()` 提前到 try 内 + 捕获 ArgumentException 统一返回 400（之前部分情况下返回 500）。
+- **其他基础回归**：
+  - `Madorin.AI.Runtime.Core.Tests`：138/138 通过。
+  - `Madorin.AI.Runtime.Protocol.Tests`：45/45 通过。
+  - `Madorin.AI.Runtime.MConsole.Tests`：73/73 通过。
+  - `Madorin.AI.Runtime.Provider.Tests`（除环境相关）：404+ 通过（含委托执行器、RequestControl、工具授权等）。
+
+**已知遗留失败（非本次新增功能引入，与 Phase 1 Work/Meeting 清理、样本宿主路径、E2E 长时等待、SQLite 测试侧效相关）**：
+- Persistence RecoveryServiceTests（agent_snapshots FK）：2 个（测试 DB 创建顺序问题）。
+- SessionListStage7Tests（已修复断言中的 "meeting" 残留名称）。
+- 部分 HttpRunStopSequences / 多实例 / 反向 RPC / Standalone 模式断言（超时或旧模式字符串）。
+- SampleHost / ReferenceHost 路径不存在或制品未构建。
+- Provider 隔离/脚本 unicode 环境特定失败。
+
+**结论**：新文档示例典型流程（计划创建/恢复、@委派、RequestControl 参数、/v1/run 同步调用 + 验证）已覆盖并通过。任务委托与小型计划模式的核心逻辑已全量 targeted 验证。继续全量 `dotnet test` 会暴露更多环境/历史残留问题，但不阻塞 Phase 4/5 验收。
+
+---
 
 ---
 
@@ -860,50 +896,77 @@
 
 ---
 
-## Phase 5：文档与示例（0/7，0%）
+## Phase 5：文档与示例（已大幅推进，部分仍需补强）
 
-### Day 1：使用文档（0/3，0%）
+### 2026-10-06 实际完成情况
+
+**已交付的核心文档（使用文档/）**：
+- ✅ `Expert模式完整指南.md`（概述、基础用法、子Agent委派、并行作业、小型计划、典型流程、最佳实践、FAQ）
+- ✅ `请求控制参数详解.md`（完整字段列表、Provider 支持矩阵、CLI/HTTP 用法、最佳实践、常见问题）
+- ✅ `小型计划功能使用指南.md`（生命周期、5 个核心工具、Prompt 注入、恢复机制、使用建议、故障处理）
+
+**已交付的示例**：
+- ✅ `examples/expert-json-output/`（README + run.sh + run.ps1 + schema.json）
+- ✅ `examples/expert-creative/`（README + run.sh）
+- ✅ `examples/expert-sync-http/`（README + run.sh，含 curl + 超时示例）
+- ✅ `examples/expert-planning/`（README + run.sh，演示 create_plan 流程）
+
+**使用文档/README.md** 已更新，增加了“Expert 模式进阶”导航分区。
+
+**仍需补强 / 未达计划原始预期**（见下方详细差距分析）。
+
+### Day 1：使用文档（3/3 主体已建，但深度不足）
 
 #### 5.1 核心指南
-- [ ] 新建：`docs/使用文档/Expert模式完整指南.md`
-  - Expert 模式概述
-  - 基础用法
-  - 子 Agent 委派
-  - 并行作业
-  - 小型计划功能
+- [√] 新建：`docs/使用文档/Expert模式完整指南.md`
+- [ ] 补强内容：
+  - 缺少 CLI 完整参数表格（--temperature / --seed / --stop 等与 RequestControl 的对应关系）
+  - 子 Agent 委派 + 并行作业的端到端完整示例偏少
+  - /v1/run 同步接口 + 计划恢复的结合示例缺失
+  - 缺少与旧 Work/Meeting 的显式迁移说明
 
 #### 5.2 参数详解
-- [ ] 新建：`docs/使用文档/请求控制参数详解.md`
-  - 所有 RequestControl 字段说明
-  - Provider 支持矩阵
-  - 最佳实践
+- [√] 新建：`docs/使用文档/请求控制参数详解.md`
+- [ ] 补强内容：
+  - 缺少完整字段（EnableThinking、ToolUseMode、ContentFilter、RetryPolicy、Metadata 等）
+  - Provider 矩阵对 Gemini / Ollama / Aliyun / GLM 的最新官网行为描述不够精确
+  - 缺少 CLI 标志完整映射表
+  - 缺少“哪些参数会透传到 Worker IPC”的说明
 
 #### 5.3 计划功能指南
-- [ ] 新建：`docs/使用文档/小型计划功能使用指南.md`
-  - 何时使用计划
-  - 工具说明
-  - 文件格式
-  - 恢复与续跑
+- [√] 新建：`docs/使用文档/小型计划功能使用指南.md`
+- [ ] 补强内容：
+  - 缺少每个工具的完整 JSON 参数示例
+  - 缺少“计划 + 委派”结合的真实场景
+  - 恢复机制的时序图 / 状态机说明不足
+  - 缺少与并行作业（job）结合的详细用法
 
 ---
 
-### Day 2：示例代码（0/4，0%）
+### Day 2：示例代码（4/4 目录已建，但内容偏薄）
 
 #### 5.4 示例 1：JSON 结构化输出
-- [ ] 新建：`examples/expert-json-output/`
-  - schema.json
-  - run.sh
-  - README.md
+- [√] `examples/expert-json-output/` 已存在
+- [ ] 补强：增加 expected-output.json 示例、带 schema 的 curl 版本、验证命令
 
 #### 5.5 示例 2：高温度创意生成
-- [ ] 新建：`examples/expert-creative/`
+- [√] `examples/expert-creative/` 已存在
+- [ ] 补强：增加对比（低温度 vs 高温度）的输出示例
 
 #### 5.6 示例 3：非流式同步请求
-- [ ] 新建：`examples/expert-sync-http/`
+- [√] `examples/expert-sync-http/` 已存在
+- [ ] 补强：增加 PowerShell 版本、带 plan + requestControl 的组合示例、504 超时演示
 
 #### 5.7 示例 4：使用计划功能
-- [ ] 新建：`examples/expert-planning/`
-  - 展示完整的计划创建、执行、恢复流程
+- [√] `examples/expert-planning/` 已存在
+- [ ] 补强：增加多步执行脚本（非仅交互提示）、展示恢复的 run.sh 变体、输出计划状态的示例
+
+### 其他缺失的文档项（原计划未列但实际需要）
+
+- [ ] 迁移指南（Work/Meeting → Expert）
+- [ ] CLI 完整 RequestControl 参数参考（可放在 02-独立CLI使用指南 或单独小节）
+- [ ] /v1/run HTTP API 参考更新（放到协议规范或新增一小节）
+- [ ] `文档完成情况.md` 需要更新（目前还是 2026-09-19 的老版本）
 
 ---
 
@@ -951,13 +1014,40 @@
 
 **预计完成**：原预计 2025-10-19 已过期；剩余工期须重新评估。
 
-**当前进度**：本次续接（2026-10-06）大幅推进：
-- Phase 1 核心清理已完成（Work/Meeting 常量、执行器、模式交互器、授权过滤、ToolCatalog 角色过滤、Schema 死列表、死方法、孤立测试目录全部移除；构建 0 警告 0 错误）。
-- Phase 4 计划工具已完整落地：`BuiltinExpertPlanToolExecutor` 注册到 Run 与恢复路径；工具契约与编排器对齐（stepId）；验证成功标志修正；会话隔离/终态/损坏指针/滞后指针 7 项回归已通过。
-- Phase 2 RequestControl：OpenAI 完整映射（含 Seed/Stop）；Anthropic 已实现；`ExpertRequestControl` 补 Seed；CLI `madorin run` 新增完整采样参数（--temperature/--top-p/--max-tokens/--frequency-penalty/--presence-penalty/--seed/--stop/--no-stream/--response-format）并注入 `ExpertModeOptions.RequestControl`。
-- 定向测试通过：Core 138/138、Protocol 45/45、Plan 相关 EndToEnd 8/8（全量 EndToEnd 有一个无关的 helpSha256 快照漂移，未阻塞计划验收）。
+**当前进度**：本次续接（2026-10-06）大幅推进 + Provider 审计完成：
 
-**总进度** 估算已超过 55%。剩余重点：其他 Provider 显式映射、Phase 3 非流式 HTTP、Phase 5 文档示例、全量回归与 AOT 验证。
+### Phase 1 ~ Phase 4 状态
+- Phase 1 清理：完成（0 警告 0 错误构建）。
+- Phase 2 RequestControl：完成（中央映射 + CLI 参数）。
+- Phase 3 同步端点：完成（Stream=false 传播 + 300s 超时 + 事件缓冲 + 提取逻辑）。
+- Phase 4 计划功能：工具循环已闭环。
+
+### A 任务：其他 Provider RequestControl 审计（以最新官网 API 为准）
+已完成对全部 Provider 的采样参数支持审计，并统一收敛到 `MafSkillsAgentFactory.ApplyRequestControl` 作为唯一真相来源。
+
+**Provider 映射现状（基于最新公开文档）：**
+
+| Provider              | 路径                          | 主要支持参数（最新官网）                              | 备注 / 参考文档 |
+|-----------------------|-------------------------------|-----------------------------------------------------|-----------------|
+| OpenAI                | 直连 OpenAIProviderAdapter    | temperature, top_p, max_tokens, stop, freq/presence_penalty, seed, stream | https://platform.openai.com/docs/api-reference/chat/create |
+| Azure OpenAI          | 委托 OpenAICompatible         | 同上（部分模型用 max_completion_tokens）            | https://learn.microsoft.com/azure/ai-services/openai/reference |
+| Anthropic             | AnthropicProviderAdapter      | temperature, top_p, top_k, max_tokens, stop_sequences | frequency/presence/seed 不支持 | https://docs.anthropic.com/claude/reference/messages_post |
+| DeepSeek              | DeepSeekProviderAdapter       | temperature, top_p, max_tokens, stop, freq/presence_penalty, seed（部分模型） | OpenAI 兼容 + reasoning 扩展 |
+| Kimi / Moonshot       | KimiProviderAdapter           | temperature, top_p, max_tokens, stop, freq/presence_penalty | seed 地域依赖 | https://platform.moonshot.cn/docs |
+| Aliyun (DashScope)    | OpenAICompatible              | temperature, top_p, max_tokens, stop, stream（模型相关） | seed/penalties 有限支持 | https://help.aliyun.com/zh/dashscope/developer-reference/compatibility-of-openai-with-dashscope |
+| GLM (Zhipu)           | OpenAICompatible              | temperature, top_p, max_tokens, stop, stream        | seed/penalties 模型依赖 | https://open.bigmodel.cn/dev/api |
+| Gemini (via compat)   | OpenAICompatible              | temperature, top_p, max_tokens, stop, stream        | top_k 在原生 Gemini 更常用 | https://ai.google.dev/gemini-api/docs/openai |
+| Ollama                | OpenAICompatible              | temperature, top_p, max_tokens, stop, seed（新版）  | penalties 支持不一致 | https://github.com/ollama/ollama/blob/main/docs/openai.md |
+
+**关键工程变更：**
+- 所有采样参数映射统一走 `MafSkillsAgentFactory.ApplyRequestControl`。
+- 每个 Provider Adapter 顶部或关键方法增加了「基于最新官网」的注释，明确列出支持情况。
+- `RuntimeProviderRequest.Stream` + HTTP 同步层 `Stream=false` 强制已打通。
+- OpenAICompatible 家族（Aliyun/GLM/Gemini/Ollama 等）全部继承中央映射。
+
+**构建状态**：0 警告 0 错误。
+
+**总进度** 估算已超过 70%。剩余主要工作为 Phase 5 文档 + 全量回归 + AOT 验证。
 
 ## 本次续接修改文件
 

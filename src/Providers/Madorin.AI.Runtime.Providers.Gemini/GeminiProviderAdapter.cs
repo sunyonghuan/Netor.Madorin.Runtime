@@ -74,6 +74,18 @@ public sealed class GeminiProviderAdapter :
         CancellationToken ct = default) =>
         _innerAdapter.CompleteStreamingAsync(request, ct);
 
+    // === RequestControl mapping (Google Gemini via OpenAI-compatible) ===
+    // Delegates to OpenAICompatible → OpenAIProviderAdapter.
+    // Central ApplyRequestControl is used.
+    //
+    // Latest official docs:
+    // - Gemini OpenAI compatibility layer (Vertex AI / AI Studio):
+    //   https://ai.google.dev/gemini-api/docs/openai
+    // Supported in the compatibility layer (model dependent):
+    //   temperature, top_p, max_tokens, stop, stream
+    // Seed and penalties have limited or no support in the OpenAI-compat path.
+    // For native Gemini API (non-compat), topK is more commonly used.
+
     public async Task UpdateCredentialsAsync(
         CredentialsUpdateParameters parameters,
         CancellationToken ct = default)

@@ -91,14 +91,15 @@ public sealed class SessionListStage7Tests
 
         var expertId = await repository.CreateSessionAsync(
             RuntimeMode.Expert, "key-expert-mode", KeyRetention, _testContext.CancellationToken);
-        var meetingId = await repository.CreateSessionAsync(
-            RuntimeMode.Expert, "key-meeting-mode", KeyRetention, _testContext.CancellationToken);
+        // Use Expert for both (Work/Meeting removed in Phase 1). The filter by Mode=Expert should return Expert sessions.
+        var secondId = await repository.CreateSessionAsync(
+            RuntimeMode.Expert, "key-second-expert", KeyRetention, _testContext.CancellationToken);
 
         var query = new SessionListQuery(Mode: RuntimeMode.Expert, Status: null, Limit: 50);
         var results = await repository.ListSessionsAsync(query, _testContext.CancellationToken);
 
-        Assert.IsTrue(results.Any(s => s.SessionId == expertId), "Expected Expert session.");
-        Assert.IsFalse(results.Any(s => s.SessionId == meetingId), "Meeting session should be filtered out.");
+        Assert.IsTrue(results.Any(s => s.SessionId == expertId), "Expected first Expert session.");
+        Assert.IsTrue(results.Any(s => s.SessionId == secondId), "Expected second Expert session.");
     }
 
     [TestMethod]

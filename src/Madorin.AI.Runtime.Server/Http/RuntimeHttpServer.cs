@@ -73,21 +73,39 @@ internal sealed partial class RuntimeHttpServer : IAsyncDisposable
 
     private void MapEndpoints(IEndpointRouteBuilder app)
     {
-        app.MapPost("/v1/run", HandleRunAsync).DisableAntiforgery();
+        // Synchronous non-streaming run endpoint.
+        // Always returns a single buffered JSON response (HttpRunResponse).
+        // Internally we still drive the full streaming Run event loop and buffer events,
+        // because a Runtime Run is a multi-turn agent process (LLM + tools + state),
+        // not a single provider generation. Setting Stream=false in RequestControl
+        // is propagated as a hint for inner provider calls.
+        app.MapPost("/v1/run", async (HttpRunRequest request, HttpContext httpContext, CancellationToken ct) =>
+            await HandleRunAsync(request, httpContext, ct))
+            .DisableAntiforgery();
+
         app.MapGet("/v1/health", () => Results.Ok(new HealthResponse { Status = "healthy" }));
     }
 
-    private async Task<IResult> HandleRunAsync(HttpRunRequest request, CancellationToken ct)
+    private async Task<IResult> HandleRunAsync(HttpRunRequest request, HttpContext httpContext, CancellationToken ct)
     {
         var sw = Stopwatch.StartNew();
 
         // Determine sync timeout (default 300s as per plan).
-        // Priority: RequestControl.TimeoutMs (ms) > 300s default.
-        // (Header override can be added later via HttpContext if required.)
+        // Priority:
+        //   1. RequestControl.TimeoutMs (in milliseconds)
+        //   2. Header "X-Timeout-Seconds"
+        //   3. 300 seconds
         var timeoutSeconds = 300;
+
         if (request.RequestControl?.TimeoutMs is > 0)
         {
             timeoutSeconds = Math.Max(1, request.RequestControl.TimeoutMs.Value / 1000);
+        }
+        else if (httpContext.Request.Headers.TryGetValue("X-Timeout-Seconds", out var headerValues)
+                 && int.TryParse(headerValues.ToString(), out var headerTimeout)
+                 && headerTimeout > 0)
+        {
+            timeoutSeconds = headerTimeout;
         }
 
         using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
@@ -96,12 +114,15 @@ internal sealed partial class RuntimeHttpServer : IAsyncDisposable
 
         try
         {
-            // Validate RequestControl parameters early to return clear HTTP 400 errors.
-            // For the synchronous HTTP path we force Stream=false intent so the caller
-            // receives a single buffered response instead of an event stream.
+            // Validate RequestControl early (fail fast with 400 before expensive work).
+            // This covers Temperature, MaxTokens, TopP, StopSequences, TimeoutMs, etc.
+            // Must be inside the try so the dedicated ArgumentException handler below catches it.
             var forcedControl = (request.RequestControl ?? new ExpertRequestControl()) with { Stream = false };
             forcedControl.Validate();
 
+            // Force non-streaming intent for the synchronous HTTP path.
+            // This is propagated via RequestControl into the Run selection and
+            // down to provider requests as a hint (see RuntimeProviderRequest.Stream).
             await using var client = new RuntimeClient(
                 new RuntimeClientOptions(
                     _pipeName,
@@ -131,6 +152,8 @@ internal sealed partial class RuntimeHttpServer : IAsyncDisposable
                     contextPolicy: null,
                     requestControl: forcedControl));
 
+            // The selection already carries forcedControl (Stream=false) in ModeOptions.RequestControl.
+            // This will flow into every RuntimeProviderRequest created inside the Expert orchestrator.
             var runRequest = string.IsNullOrWhiteSpace(request.SessionId)
                 ? new NewSessionRunRequest(
                     sessionId,
@@ -154,58 +177,18 @@ internal sealed partial class RuntimeHttpServer : IAsyncDisposable
                 _ => throw new InvalidOperationException("Invalid run request type")
             };
 
-            var output = new StringBuilder();
-            string? status = null;
-            string? errorMessage = null;
-            int? inputTokens = null;
-            int? outputTokens = null;
-
             // Buffer the entire event stream. This is required because a Runtime Run
             // is a multi-turn agent loop (LLM calls + tools + plan state + re-injection),
             // not a single provider call. We cannot simply forward a provider-level
             // non-stream response; we must wait for the Run to reach a terminal state.
-            await foreach (var evt in client.ReadEventsAsync(0, effectiveCt))
+            //
+            // We force Stream=false at the RequestControl level as a strong hint
+            // for inner provider generations.
+            var events = new List<RuntimeEventEnvelope>();
+            await foreach (var envelope in client.ReadEventsAsync(0, effectiveCt))
             {
-                switch (evt.MessageType)
-                {
-                    case "output.delta":
-                        var delta = JsonSerializer.Deserialize<TextDeltaEvent>(
-                            evt.Payload.GetRawText());
-                        if (delta?.Delta != null)
-                        {
-                            output.Append(delta.Delta);
-                        }
-
-                        break;
-
-                    case "run.completed":
-                        status = "Completed";
-                        break;
-
-                    case "run.failed":
-                        status = "Failed";
-                        var failedEvt = JsonSerializer.Deserialize<RunFailedEvent>(
-                            evt.Payload.GetRawText());
-                        errorMessage = failedEvt?.Error.Message;
-                        break;
-
-                    case "run.cancelled":
-                        status = "Cancelled";
-                        break;
-
-                    case "usage.updated":
-                        var usageEvt = JsonSerializer.Deserialize<UsageUpdatedEvent>(
-                            evt.Payload.GetRawText());
-                        if (usageEvt != null)
-                        {
-                            inputTokens = usageEvt.InputTokens;
-                            outputTokens = usageEvt.OutputTokens;
-                        }
-
-                        break;
-                }
-
-                if (status != null)
+                events.Add(envelope);
+                if (IsTerminalEvent(envelope.MessageType))
                 {
                     break;
                 }
@@ -215,14 +198,14 @@ internal sealed partial class RuntimeHttpServer : IAsyncDisposable
 
             var response = new HttpRunResponse
             {
-                RunId = actualRunId,
+                RunId = ExtractRunId(events) ?? actualRunId,
                 SessionId = sessionId,
-                Output = output.ToString(),
-                Status = status ?? "Unknown",
-                ErrorMessage = errorMessage,
+                Output = ExtractFinalContent(events),
+                Status = ExtractFinalStatus(events) ?? "Unknown",
+                ErrorMessage = ExtractErrorMessage(events),
                 ElapsedMs = sw.ElapsedMilliseconds,
-                InputTokens = inputTokens,
-                OutputTokens = outputTokens
+                InputTokens = ExtractInputTokens(events),
+                OutputTokens = ExtractOutputTokens(events)
             };
 
             return Results.Ok(response);
@@ -236,9 +219,9 @@ internal sealed partial class RuntimeHttpServer : IAsyncDisposable
                 statusCode: 504,
                 title: "Gateway Timeout");
         }
-        catch (ArgumentException ex) when (ex.ParamName != null)
+        catch (ArgumentException ex)
         {
-            // Validation error from RequestControl.Validate()
+            // Validation error (RequestControl.Validate, selection, etc.)
             Log.HttpRunValidationFailed(_logger, ex);
             sw.Stop();
             return Results.Problem(
@@ -250,10 +233,17 @@ internal sealed partial class RuntimeHttpServer : IAsyncDisposable
         {
             Log.HttpRunFailed(_logger, ex);
             sw.Stop();
+
+            // For clearly client-caused issues (bad provider, invalid args that reached here), prefer 4xx.
+            // Otherwise fall back to 500.
+            var isClientError = ex is ArgumentException
+                                || ex.Message.Contains("provider", StringComparison.OrdinalIgnoreCase)
+                                || ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase);
+
             return Results.Problem(
                 detail: ex.Message,
-                statusCode: 500,
-                title: "Run execution failed");
+                statusCode: isClientError ? 400 : 500,
+                title: isClientError ? "Bad Request" : "Run execution failed");
         }
     }
 
@@ -267,6 +257,131 @@ internal sealed partial class RuntimeHttpServer : IAsyncDisposable
     {
         await _app.StopAsync();
         await _app.DisposeAsync();
+    }
+
+    private static bool IsTerminalEvent(string messageType) =>
+        string.Equals(messageType, "run.completed", StringComparison.Ordinal)
+        || string.Equals(messageType, "run.failed", StringComparison.Ordinal)
+        || string.Equals(messageType, "run.cancelled", StringComparison.Ordinal);
+
+    private static string? ExtractRunId(IReadOnlyList<RuntimeEventEnvelope> events)
+    {
+        // The actual run id is already returned by Start* methods.
+        // We can try to locate an invocation-started or similar envelope if needed.
+        // For now we rely on the value we already captured.
+        return null;
+    }
+
+    private static string ExtractFinalContent(List<RuntimeEventEnvelope> events)
+    {
+        var sb = new StringBuilder();
+        foreach (var evt in events)
+        {
+            if (string.Equals(evt.MessageType, "output.delta", StringComparison.Ordinal))
+            {
+                try
+                {
+                    var delta = JsonSerializer.Deserialize<TextDeltaEvent>(evt.Payload.GetRawText());
+                    if (delta?.Delta != null)
+                    {
+                        sb.Append(delta.Delta);
+                    }
+                }
+                catch
+                {
+                    // ignore malformed delta
+                }
+            }
+        }
+
+        return sb.ToString();
+    }
+
+    private static string? ExtractFinalStatus(List<RuntimeEventEnvelope> events)
+    {
+        for (var i = events.Count - 1; i >= 0; i--)
+        {
+            var t = events[i].MessageType;
+            if (string.Equals(t, "run.completed", StringComparison.Ordinal))
+            {
+                return "Completed";
+            }
+
+            if (string.Equals(t, "run.failed", StringComparison.Ordinal))
+            {
+                return "Failed";
+            }
+
+            if (string.Equals(t, "run.cancelled", StringComparison.Ordinal))
+            {
+                return "Cancelled";
+            }
+        }
+
+        return null;
+    }
+
+    private static string? ExtractErrorMessage(List<RuntimeEventEnvelope> events)
+    {
+        foreach (var evt in events)
+        {
+            if (string.Equals(evt.MessageType, "run.failed", StringComparison.Ordinal))
+            {
+                try
+                {
+                    var failed = JsonSerializer.Deserialize<RunFailedEvent>(evt.Payload.GetRawText());
+                    return failed?.Error.Message;
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static int? ExtractInputTokens(List<RuntimeEventEnvelope> events)
+    {
+        foreach (var evt in events)
+        {
+            if (string.Equals(evt.MessageType, "usage.updated", StringComparison.Ordinal))
+            {
+                try
+                {
+                    var usage = JsonSerializer.Deserialize<UsageUpdatedEvent>(evt.Payload.GetRawText());
+                    return usage?.InputTokens;
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static int? ExtractOutputTokens(List<RuntimeEventEnvelope> events)
+    {
+        foreach (var evt in events)
+        {
+            if (string.Equals(evt.MessageType, "usage.updated", StringComparison.Ordinal))
+            {
+                try
+                {
+                    var usage = JsonSerializer.Deserialize<UsageUpdatedEvent>(evt.Payload.GetRawText());
+                    return usage?.OutputTokens;
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+        }
+
+        return null;
     }
 
     private sealed class LoggerFactoryProvider : ILoggerProvider

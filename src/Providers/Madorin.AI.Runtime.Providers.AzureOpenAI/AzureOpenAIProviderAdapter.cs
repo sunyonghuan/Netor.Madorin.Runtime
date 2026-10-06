@@ -164,6 +164,21 @@ public sealed class AzureOpenAIProviderAdapter :
         }
     }
 
+    // === RequestControl note (Azure OpenAI) ===
+    // This adapter ultimately delegates to OpenAICompatibleProviderAdapter instances.
+    // All sampling / RequestControl parameters (temperature, top_p, max_tokens / max_completion_tokens,
+    // stop, frequency_penalty, presence_penalty, seed, stream, etc.) are handled by the centralized
+    // MafSkillsAgentFactory.ApplyRequestControl + OpenAI path.
+    //
+    // Cross-checked against latest Azure OpenAI docs (as of 2025/2026):
+    // - https://learn.microsoft.com/azure/ai-services/openai/reference
+    // - https://learn.microsoft.com/azure/ai-services/openai/how-to/migrating-from-legacy
+    //
+    // Important differences vs public OpenAI:
+    // - Reasoning models often require max_completion_tokens instead of max_tokens.
+    // - Seed support is model/region dependent.
+    // - Some older deployments may have different parameter names.
+
     public void Dispose()
     {
         lock (_adapterGate)

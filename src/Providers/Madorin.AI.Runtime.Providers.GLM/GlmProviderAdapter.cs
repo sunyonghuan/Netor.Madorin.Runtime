@@ -67,6 +67,20 @@ public sealed class GlmProviderAdapter :
         CancellationToken ct = default) =>
         _innerAdapter.CompleteStreamingAsync(request, ct);
 
+    // === RequestControl mapping (GLM / Zhipu AI) ===
+    // This adapter uses the OpenAI-compatible endpoint.
+    // All sampling parameters flow through OpenAIProviderAdapter + MafSkillsAgentFactory.ApplyRequestControl.
+    //
+    // Latest official docs (as of 2025/2026):
+    // - GLM OpenAI-compatible chat completions:
+    //   https://open.bigmodel.cn/dev/api#http
+    //   https://open.bigmodel.cn/dev/howuse/introduction
+    //
+    // Supported (glm-4* series):
+    //   temperature, top_p, max_tokens, stop (array), stream
+    // Limited / model-dependent: seed, frequency_penalty, presence_penalty.
+    // TopK is generally not exposed in the OpenAI-compatible interface.
+
     public Task UpdateCredentialsAsync(
         CredentialsUpdateParameters parameters,
         CancellationToken ct = default) =>

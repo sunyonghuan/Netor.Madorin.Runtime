@@ -354,20 +354,23 @@ public sealed class OpenAIProviderAdapter :
 
     private static ChatOptions CreateChatOptions(RuntimeProviderRequest request)
     {
-        var control = request.RequestControl;
-        return new ChatOptions
+        var options = new ChatOptions
         {
             ModelId = request.ModelId,
-            Temperature = control?.Temperature is { } t ? (float)t : request.Temperature,
-            MaxOutputTokens = control?.MaxTokens ?? request.MaxTokens,
-            TopP = control?.TopP is { } p ? (float)p : null,
-            FrequencyPenalty = control?.FrequencyPenalty is { } f ? (float)f : null,
-            PresencePenalty = control?.PresencePenalty is { } pr ? (float)pr : null,
-            StopSequences = control?.StopSequences is { Length: > 0 } ? [.. control.StopSequences] : null,
-            Seed = control?.Seed,
+            Temperature = request.Temperature,
+            MaxOutputTokens = request.MaxTokens,
             Tools = CreateTools(request.Tools),
             ResponseFormat = CreateResponseFormat(request.StructuredOutput)
         };
+
+        // === RequestControl mapping (source of truth: latest OpenAI Chat Completions API) ===
+        // https://platform.openai.com/docs/api-reference/chat/create
+        // Supported: temperature, top_p, max_tokens (max_completion_tokens for reasoning models),
+        //            stop, frequency_penalty, presence_penalty, seed (for supported models), stream.
+        // We delegate to the central ApplyRequestControl for consistency.
+        Madorin.AI.Runtime.Providers.Abstractions.MafSkillsAgentFactory.ApplyRequestControl(options, request.RequestControl);
+
+        return options;
     }
 
     private static ChatResponseFormatJson? CreateResponseFormat(RuntimeStructuredOutput? structuredOutput)

@@ -298,6 +298,16 @@ public sealed class OpenAICompatibleProviderAdapter :
             request.CancellationToken);
         var effectiveCt = linkedCts.Token;
 
+        // Note on RequestControl / sampling parameters:
+        // This adapter forwards the full RuntimeProviderRequest (including RequestControl) to the inner
+        // OpenAIProviderAdapter. All parameter mapping (temperature, top_p, max_tokens, stop, penalties,
+        // seed, etc.) is performed by the centralized MafSkillsAgentFactory.ApplyRequestControl inside
+        // the OpenAI path (or directly in provider-specific CreateChatOptions).
+        //
+        // For OpenAI-compatible endpoints (many third-party providers), support for advanced sampling
+        // parameters varies. See the individual provider adapter files (Aliyun, GLM, Gemini, Ollama, etc.)
+        // for notes against their latest official docs.
+
         RuntimeError? validationFailure = null;
         try
         {

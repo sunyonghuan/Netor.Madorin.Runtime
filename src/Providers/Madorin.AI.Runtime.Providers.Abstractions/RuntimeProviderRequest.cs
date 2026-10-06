@@ -28,6 +28,15 @@ public sealed record RuntimeProviderRequest(
     [JsonIgnore]
     public int HistoryMessageCount { get; init; }
 
+    /// <summary>
+    /// Resolved streaming preference for this provider request.
+    /// True (default) = streaming responses are preferred.
+    /// False = the caller prefers a single non-streaming response for this generation step.
+    /// This is a hint; the orchestrator may still consume via streaming boundary for eventing.
+    /// </summary>
+    [JsonIgnore]
+    public bool Stream => RequestControl?.Stream ?? true;
+
     public RuntimeProviderRequest CreateAttempt(int attemptNumber)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(attemptNumber);

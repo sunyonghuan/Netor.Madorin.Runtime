@@ -134,6 +134,12 @@ public sealed class KimiProviderAdapter : IRuntimeProviderAdapter
             Tools = CreateTools(request.Tools)
         };
 
+        // Apply full ExpertRequestControl.
+        // Moonshot / Kimi (OpenAI-compatible): supports temperature, top_p, max_tokens, stop,
+        // frequency_penalty, presence_penalty. Seed support is region-dependent.
+        // Source of truth: latest Moonshot OpenAI-compatible chat completions API.
+        MafSkillsAgentFactory.ApplyRequestControl(options, request.RequestControl);
+
         string finishReason = "stop";
 
         await foreach (var update in MafSkillsAgentFactory.CreateResponseStream(

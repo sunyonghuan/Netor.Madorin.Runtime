@@ -1,0 +1,16 @@
+{
+  "type": "object",
+  "properties": {
+    "projectName": { "type": "string" },
+    "features": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "externalServices": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+  },
+  "required": ["projectName", "features", "externalServices"]
+}
