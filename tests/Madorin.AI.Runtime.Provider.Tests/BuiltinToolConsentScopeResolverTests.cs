@@ -286,6 +286,31 @@ public sealed class BuiltinToolConsentScopeResolverTests
     }
 
     [TestMethod]
+    public void Resolve_ExpertPlanTools_AreRunScopedWithoutFilesystemPermissions()
+    {
+        var toolIds = new[]
+        {
+            BuiltinToolRegistry.ExpertCreatePlanToolId,
+            BuiltinToolRegistry.ExpertExecuteStepToolId,
+            BuiltinToolRegistry.ExpertGetPlanToolId,
+            BuiltinToolRegistry.ExpertUpdateStepStatusToolId,
+            BuiltinToolRegistry.ExpertAbandonPlanToolId
+        };
+
+        foreach (var toolId in toolIds)
+        {
+            var resolution = Resolve(toolId, "{}");
+
+            Assert.IsTrue(resolution.IsSuccess, $"{toolId}: {resolution.Error}");
+            Assert.IsNotNull(resolution.Scope);
+            Assert.AreEqual("expert:plan", resolution.Scope.TargetSummary);
+            Assert.IsTrue(resolution.Scope.CanGrantForRun);
+            Assert.IsEmpty(resolution.Scope.AllowedReadRoots);
+            Assert.IsEmpty(resolution.Scope.AllowedWriteRoots);
+        }
+    }
+
+    [TestMethod]
     public void Resolve_DestructiveFileOperations_AreExactAndOnceOnly()
     {
         var source = Path.Combine(_workspace, "source.txt");

@@ -56,9 +56,9 @@ public sealed partial class ProviderWorkerProcess
         }
 
         using var cancelReg = cancellationToken.Register(() =>
-            _ = WriteFrameAsync(new CancelFrame(request.InvocationId), CancellationToken.None));
+            _ = SendCancelAsync(request.InvocationId));
 
-        ProviderWorkerFrameTooLargeException? tooLarge = null;
+        RuntimeError? writeFailure = null;
         try
         {
             await WriteFrameAsync(
@@ -68,15 +68,21 @@ public sealed partial class ProviderWorkerProcess
         }
         catch (ProviderWorkerFrameTooLargeException ex)
         {
-            tooLarge = ex;
+            writeFailure = InvokeFailedError($"Invoke frame exceeds 16 MiB ({ex.Length} bytes).");
+        }
+        catch (IOException)
+        {
+            writeFailure = WorkerExitedError("Provider worker stdin closed.");
+        }
+        catch (ObjectDisposedException)
+        {
+            writeFailure = WorkerExitedError("Provider worker stdin closed.");
         }
 
-        if (tooLarge is not null)
+        if (writeFailure is not null)
         {
             _invokes.TryRemove(request.InvocationId, out _);
-            yield return new InvocationFailedProviderEvent(
-                request.InvocationId,
-                InvokeFailedError($"Invoke frame exceeds 16 MiB ({tooLarge.Length} bytes)."));
+            yield return new InvocationFailedProviderEvent(request.InvocationId, writeFailure);
             yield break;
         }
 
@@ -91,6 +97,19 @@ public sealed partial class ProviderWorkerProcess
         finally
         {
             _invokes.TryRemove(request.InvocationId, out _);
+        }
+    }
+
+    private async Task SendCancelAsync(string invocationId)
+    {
+        try
+        {
+            await WriteFrameAsync(new CancelFrame(invocationId), CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
+        {
+            // The worker may already have exited when cancellation is delivered.
         }
     }
 

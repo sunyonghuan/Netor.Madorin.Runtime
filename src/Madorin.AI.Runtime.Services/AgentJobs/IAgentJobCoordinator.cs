@@ -8,6 +8,7 @@ public interface IAgentJobCoordinator : IAsyncDisposable
 {
     /// <summary>绑定实际执行 Worker（Expert Run 开始时调用）。</summary>
     public void BindWorker(AgentJobWorker worker);
+    public void BindWorkerWithRequest(AgentJobWorkerWithRequest worker);
 
     /// <summary>创建并入队一个作业，立即返回快照（不等待完成）。</summary>
     public AgentJobSnapshot Create(

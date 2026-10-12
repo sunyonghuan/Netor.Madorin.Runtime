@@ -75,28 +75,26 @@ public sealed class RecoveryServiceTests
         CancellationToken ct)
     {
         var repository = new SqliteSessionRepository(connection);
-        var sessionId = Guid.NewGuid().ToString("N");
-        var runId = Guid.NewGuid().ToString("N");
+        var sessionId = await repository.CreateSessionAsync(
+            mode,
+            Guid.NewGuid().ToString("N"),
+            KeyRetention,
+            ct);
         var selection = CreateSelection(mode);
         var selectionJson = System.Text.Json.JsonSerializer.Serialize(
             selection,
             Contracts.Serialization.RuntimeJsonContext.Default.NextTurnSelection);
         var snapshot = RuntimeRunMetadata.CreateAgentSnapshots(selection);
-        await repository.CreateSessionAsync(
-            mode,
-            sessionId,
-            KeyRetention,
-            ct);
-        await repository.TrySaveSessionSelectionAsync(
+        Assert.IsTrue(await repository.TrySaveSessionSelectionAsync(
             sessionId,
             expectedSelectionVersion: null,
             selectionVersion: 1,
             selectionJson,
             snapshot,
-            ct);
-        await repository.CreateRunAsync(
+            ct));
+        var runId = await repository.CreateRunAsync(
             sessionId,
-            runId,
+            Guid.NewGuid().ToString("N"),
             KeyRetention,
             ct);
         return (repository, sessionId, runId);

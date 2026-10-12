@@ -418,16 +418,16 @@
     {
       "path": "run",
       "usage": "madorin run [options]",
-      "helpSha256": "2b7d7ab98e7e1b2d3551c9f2b078ff3bc2811e2809da9bd318c34d3af0ad9006",
-      "options": ["--provider", "--model", "--agent", "--mode", "--session", "--input", "--input-file", "--output-file", "--output-format", "--no-stream", "--timeout"],
+      "helpSha256": "d7e42f71f2d9a0355bb816b2680f2423003e21f68aa9bf70a568b576a363ad08",
+      "options": ["--provider", "--model", "--agent", "--mode", "--session", "--input", "--input-file", "--output-file", "--output-format", "--no-stream", "--timeout", "--lock-wait", "--allow-tools", "--temperature", "--top-p", "--top-k", "--max-tokens", "--frequency-penalty", "--presence-penalty", "--seed", "--stop", "--response-format"],
       "arguments": [],
       "example": ["run", "--input", "hello", "--no-stream"]
     },
     {
       "path": "serve",
       "usage": "madorin serve [options]",
-      "helpSha256": "2ccd17852342afcd7dd39d5088a51f8bc68d6714643195afd80156b294195c57",
-      "options": ["--config-dir", "--log-dir", "--instance", "--pipe-prefix", "--max-runs"],
+      "helpSha256": "4c4f9ce3a47fd5f3b2865a5a86e6c5a08f8efb36ac644ed9900860af8784a171",
+      "options": ["--config-dir", "--log-dir", "--instance", "--pipe-prefix", "--max-runs", "--http-port"],
       "arguments": [],
       "example": ["serve", "--workspace", "."]
     },
@@ -474,7 +474,7 @@
     {
       "path": "session list",
       "usage": "madorin session list [options]",
-      "helpSha256": "d3142fa6d33cbd925f4705c8aca22ced94d228514fd0b16fccfd78c9f2730a0d",
+      "helpSha256": "f848fb8f1c906a2437291c15e0ed4773b3714a2b1a9c68b7c74ec96830a74b77",
       "options": ["--status", "--mode", "--since", "--search", "--limit", "--cursor"],
       "arguments": [],
       "example": ["session", "list", "--status", "active", "--limit", "20"]

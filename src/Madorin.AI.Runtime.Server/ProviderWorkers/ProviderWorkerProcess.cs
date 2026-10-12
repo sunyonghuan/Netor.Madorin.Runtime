@@ -8,6 +8,8 @@ namespace Madorin.AI.Runtime.Server.ProviderWorkers;
 
 public sealed partial class ProviderWorkerProcess : IAsyncDisposable
 {
+    // Bound simultaneous worker startup so the hello handshake is not starved.
+    private static readonly SemaphoreSlim StartupGate = new(4);
     private readonly string _directory;
     private readonly string _slug;
     private readonly string _protocol;

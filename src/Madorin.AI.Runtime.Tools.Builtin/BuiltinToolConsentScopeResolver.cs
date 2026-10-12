@@ -125,6 +125,14 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
                 "agent:job",
                 "cancel parallel agent job",
                 canGrantForRun: true),
+            BuiltinToolRegistry.ExpertCreatePlanToolId or
+            BuiltinToolRegistry.ExpertExecuteStepToolId or
+            BuiltinToolRegistry.ExpertGetPlanToolId or
+            BuiltinToolRegistry.ExpertUpdateStepStatusToolId or
+            BuiltinToolRegistry.ExpertAbandonPlanToolId => Create(
+                "expert:plan",
+                "manage the active Expert plan",
+                canGrantForRun: true),
             SkillScriptAuthorization.ToolId => ScriptScope(arguments, workspaceRoot),
             SkillRuntimeTools.LoadToolId => FileReadScope(workspaceRoot, ".", "load skill"),
             SkillRuntimeTools.ReadToolId => SkillReadScope(arguments, workspaceRoot),

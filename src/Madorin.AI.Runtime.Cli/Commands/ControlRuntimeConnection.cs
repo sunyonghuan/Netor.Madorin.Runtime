@@ -113,9 +113,19 @@ internal sealed class ControlRuntimeConnection : IAsyncDisposable
                 $"No running Runtime instance was discovered in '{dataDirectory}'.");
         }
 
-        var json = await File.ReadAllBytesAsync(pidPath, cancellationToken).ConfigureAwait(false);
-        return JsonSerializer.Deserialize(json, ConfigJsonContext.Default.RuntimeInstanceInfo)
-            ?? throw new InvalidDataException("The Runtime instance file is empty.");
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                var json = await File.ReadAllBytesAsync(pidPath, cancellationToken).ConfigureAwait(false);
+                return JsonSerializer.Deserialize(json, ConfigJsonContext.Default.RuntimeInstanceInfo)
+                    ?? throw new InvalidDataException("The Runtime instance file is empty.");
+            }
+            catch (IOException) when (attempt < 9)
+            {
+                await Task.Delay(50, cancellationToken).ConfigureAwait(false);
+            }
+        }
     }
 
     private static void ValidateDiscoveredInstance(

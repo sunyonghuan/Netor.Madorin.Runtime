@@ -182,7 +182,7 @@ internal static class ServiceCommands
         var agentOption = CommandOptions.Create<string?>("--agent", "Select an Agent.");
         var modeOption = CommandOptions.Create<string?>(
             "--mode",
-            "Select expert, meeting, or work mode; defaults to expert.");
+            "Select expert or standalone mode; defaults to expert.");
         var sessionOption = CommandOptions.Create<string?>("--session", "Continue an existing Session.");
         var inputOption = CommandOptions.Create<string?>("--input", "Run once with the supplied input.");
         var inputFileOption = CommandOptions.Create<string?>("--input-file", "Read input from a file.");
@@ -2045,7 +2045,10 @@ internal static class ServiceCommands
             .ToArray();
         ModeOptions modeOptions = mode switch
         {
-            RuntimeMode.Expert => new ExpertModeOptions(selectedAgent, requestControl: requestControl),
+            RuntimeMode.Expert => new ExpertModeOptions(
+                selectedAgent,
+                agentRefs,
+                requestControl: requestControl),
             _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, null)
         };
         return new NextTurnSelection(
@@ -2081,7 +2084,9 @@ internal static class ServiceCommands
             PromptTemplateVersion: "1.0",
             selection.Agent.SystemPrompt,
             ProviderId: selection.Provider.Name,
-            ModelId: selection.Model);
+            ModelId: selection.Model,
+            Description: selection.Agent.Description,
+            Capabilities: selection.Agent.Capabilities);
 
     /// <summary>
     /// CLI Meeting defaults follow the product plan: HostDriven host, FinalOnly summarizer,

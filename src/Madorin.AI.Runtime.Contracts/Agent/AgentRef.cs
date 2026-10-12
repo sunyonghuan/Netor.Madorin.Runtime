@@ -14,4 +14,5 @@ public sealed record AgentRef(
     /// </summary>
     string? SkillDiscoveryMode = null,
     string? DisplayName = null,
-    string? Description = null);
+    string? Description = null,
+    string[]? Capabilities = null);

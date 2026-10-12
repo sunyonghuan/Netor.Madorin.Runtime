@@ -259,6 +259,41 @@ public sealed class ToolConsentCoordinatorTests
         await AssertIntentStatusAsync(harness.Store, invocation, ToolIntentStatus.Succeeded);
     }
 
+    [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public async Task ChildConsent_IsCallBoundWithOrWithoutScope(bool noScope)
+    {
+        var descriptor = CreateDescriptor(requiresApproval: false);
+        await using var harness = await ConsentHarness.CreateAsync(
+            _workspace, descriptor, new CountingExecutor(descriptor.ToolId), TestContext.CancellationToken);
+        var invocation = CreateInvocation(descriptor.ToolId, "child-call") with
+        {
+            AgentId = "temp-child", ParentAgentId = "planner"
+        };
+        var pending = await harness.CreatePendingAsync(
+            invocation, ToolGatewayResultKind.NeedsPermission, TestContext.CancellationToken);
+        var handler = new DelegateConsentHandler(permission: context => new ToolPermissionResponse(
+            context.Request.CorrelationId!, context.Request.CallId, ToolAuthorizationDecision.Granted,
+            noScope ? CreateGrant(context.Invocation, context.Descriptor, context.WorkspaceRoot) with
+            { AllowedCallIds = null } : null));
+        var coordinator = new ToolConsentCoordinator(harness.Gateway, harness.Authorization,
+            harness.Catalog, handler, noScope ? null : new FixedScopeResolver(canGrantForRun: true), _workspace, harness.Store);
+        var result = await coordinator.ResolveAndExecuteAsync(invocation, pending, TestContext.CancellationToken);
+        Assert.AreEqual(ToolGatewayResultKind.Success, result.Kind, result.Error?.Message);
+        foreach (var other in new[]
+        {
+            invocation with { CallId = "other-call" },
+            invocation with { AgentId = "other-agent" },
+            invocation with { RunId = "other-run" },
+            invocation with { ToolId = "outside-tool" }
+        })
+        {
+            var denied = await harness.Gateway.ExecuteAsync(other, null, harness.Catalog, TestContext.CancellationToken);
+            Assert.AreNotEqual(ToolGatewayResultKind.Success, denied.Kind);
+        }
+    }
+
     private static ToolDescriptor CreateDescriptor(bool requiresApproval) =>
         new(
             "custom.consent",
@@ -431,7 +466,7 @@ public sealed class ToolConsentCoordinatorTests
         }
     }
 
-    private sealed class FixedScopeResolver : IToolConsentScopeResolver
+    private sealed class FixedScopeResolver(bool canGrantForRun = false) : IToolConsentScopeResolver
     {
         public ToolConsentScopeResolution Resolve(
             ToolInvocation invocation,
@@ -450,7 +485,7 @@ public sealed class ToolConsentCoordinatorTests
                     AllowedEnvironmentVariables: [],
                     AllowPowerShell: false,
                     new NetworkPolicy(true, []),
-                    CanGrantForRun: false));
+                    CanGrantForRun: canGrantForRun));
     }
 
     private sealed class DelegateConsentHandler(

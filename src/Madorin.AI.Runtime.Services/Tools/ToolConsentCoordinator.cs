@@ -627,6 +627,7 @@ public sealed class ToolConsentCoordinator
         string approvalRequestId,
         bool pinToCall)
     {
+        pinToCall |= invocation.ParentAgentId is not null;
         if (hostGrant is null)
         {
             return scopeResolution.IsSuccess && scopeResolution.Scope is { } scopeOnly
@@ -639,7 +640,18 @@ public sealed class ToolConsentCoordinator
                 : null;
         }
 
-        var withApproval = hostGrant with { ApprovalRequestId = approvalRequestId };
+        if (pinToCall && hostGrant.AllowedCallIds is { Length: > 0 }
+            && !hostGrant.AllowedCallIds.Contains(invocation.CallId, StringComparer.Ordinal))
+        {
+            return null;
+        }
+
+        var withApproval = hostGrant with
+        {
+            ApprovalRequestId = approvalRequestId,
+            AgentId = hostGrant.AgentId ?? invocation.AgentId,
+            AllowedCallIds = pinToCall ? [invocation.CallId] : hostGrant.AllowedCallIds
+        };
         if (!scopeResolution.IsSuccess || scopeResolution.Scope is not { } scope)
         {
             return withApproval;

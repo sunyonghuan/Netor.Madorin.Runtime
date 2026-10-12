@@ -21,7 +21,12 @@ public sealed record ExpertPlanStep(
     DateTimeOffset? StartedAt,
     DateTimeOffset? CompletedAt,
     string? Result,
-    string? ErrorMessage);
+    string? ErrorMessage,
+    string? ExecutionPolicy = null,
+    string[]? ParallelTasks = null,
+    string CompletionMode = "tools",
+    string? ExpectedOutput = null,
+    ExpertToolEvidence[]? Evidence = null);
 
 /// <summary>创建计划的请求参数</summary>
 public sealed record CreateExpertPlanRequest(
@@ -33,4 +38,16 @@ public sealed record ExpertPlanStepDraft(
     string StepId,
     string Title,
     string? Description = null,
-    string? AgentName = null);
+    string? AgentName = null,
+    string? ExecutionPolicy = null,
+    string[]? ParallelTasks = null,
+    string CompletionMode = "tools",
+    string? ExpectedOutput = null);
+
+/// <summary>执行阶段的工具调用证据。</summary>
+public sealed record ExpertToolEvidence(
+    string AgentId,
+    string CallId,
+    string ToolId,
+    bool Success,
+    DateTimeOffset ObservedAt);

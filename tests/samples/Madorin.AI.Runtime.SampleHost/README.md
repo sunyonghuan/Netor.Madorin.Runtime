@@ -12,7 +12,7 @@ SampleHost 是只通过公开 Client SDK 和 Contracts 集成 Madorin AI Runtime
 
 `reference-host` 是阶段 7 的完整业务集成示例。调用方提供三个工作区、三个 Runtime 实例 ID 和三个 Pipe 端点，三个 handshake secret 继续通过 stdin 逐行传入。宿主随后：
 
-- 创建三个独立 `RuntimeClient`，并发运行 Expert、Meeting 和 Work。
+- 创建三个独立 `RuntimeClient`，在三个 Runtime 上并发运行 Expert 会话；不再依赖已移除的 Meeting/Work 模式。
 - 声明目录、资源、脚本和热刷新 Skills 能力；工作区存在 `.madorin/host-skills/` 时，将其作为有序补充来源传入。Runtime 仍先加载绑定工作区和 Runtime OS 用户全局来源。
 - 通过 Client SDK 查询并刷新每个 Runtime 的 Skills Catalog，输出实例、刷新前后版本、有效数量和实际来源 ID。
 - 按 `runtimeInstanceId`、`runId`、GSN 和 Run 序号校验、分流事件，并在处理成功后显式确认 GSN。

@@ -94,7 +94,7 @@ public sealed class ReverseRpcToolLoopTests
             Assert.AreEqual(1, host.ApprovalRequestCount);
             Assert.AreEqual(1, host.GetExecutionCount("host-call"));
             Assert.AreEqual(1, host.GetExecutionCount("mcp-call"));
-            Assert.IsTrue(provider.ObservedBlobResult);
+            Assert.IsTrue(provider.ObservedTextBlobPreview);
             await AssertApprovalChainAsync(workspace, timeout.Token);
 
             shutdown.Cancel();
@@ -330,7 +330,7 @@ public sealed class ReverseRpcToolLoopTests
 
         public int CallCount { get; private set; }
 
-        public bool ObservedBlobResult { get; private set; }
+        public bool ObservedTextBlobPreview { get; private set; }
 
         public async IAsyncEnumerable<RuntimeProviderEvent> CompleteStreamingAsync(
             RuntimeProviderRequest request,
@@ -367,9 +367,11 @@ public sealed class ReverseRpcToolLoopTests
                 .SelectMany(static message => message.Content)
                 .OfType<ToolResultContentBlock>()
                 .ToArray();
-            ObservedBlobResult |= toolResults.Any(result =>
+            ObservedTextBlobPreview |= toolResults.Any(result =>
                 result.CallId == "host-call"
-                && result.Content.OfType<BlobRefContentBlock>().Any());
+                && result.Content.OfType<TextContentBlock>().Any(block =>
+                    block.Text.Contains("[truncated:", StringComparison.Ordinal)
+                    && block.Text.Contains("complete tool result is stored as a blob", StringComparison.Ordinal)));
             if (CallCount == 2)
             {
                 Assert.HasCount(2, toolResults);

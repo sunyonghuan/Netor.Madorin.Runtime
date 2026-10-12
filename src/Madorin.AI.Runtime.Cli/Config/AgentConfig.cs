@@ -8,5 +8,6 @@ public sealed class AgentConfig
     public string SystemPrompt { get; set; } = string.Empty;
     public string? Provider { get; set; }
     public string? Model { get; set; }
+    public string[]? Capabilities { get; set; }
     public float Temperature { get; set; } = 0.7f;
 }

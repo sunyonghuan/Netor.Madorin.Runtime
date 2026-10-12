@@ -215,6 +215,52 @@ public sealed class StandaloneControlCommandsStage7Tests
 
     [TestMethod]
     [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task CtlStatus_TransientPidSharingViolation_PreservesAuthenticationError()
+    {
+        var workspace = CreateTemporaryDirectory();
+        var instanceId = Guid.NewGuid().ToString("N");
+        var secret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+        using var shutdown = CancellationTokenSource.CreateLinkedTokenSource(TestContext.CancellationToken);
+        using var wrongSecret = new EnvironmentVariableScope(RuntimeSecretEnvironmentVariable, "wrong-secret");
+        try
+        {
+            await using var server = await RuntimeServer.StartAsync(
+                CreateServerOptions(workspace, instanceId, secret), TestContext.CancellationToken);
+            var serverTask = server.RunAsync(shutdown.Token);
+            try
+            {
+                await using var owner = CreateClient(server, instanceId, secret);
+                await owner.ConnectAsync(TestContext.CancellationToken);
+                Task<int> command;
+                var output = new StringWriter();
+                using (var locked = new FileStream(Path.Combine(workspace, ".madorin", "runtime.pid"),
+                           FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                {
+                    command = Task.Run(() => CliApplication.Run(
+                        ["ctl", "status", "--workspace", workspace, "--json"],
+                        output, new StringReader(string.Empty), new StringWriter()), TestContext.CancellationToken);
+                    await Task.Delay(150, TestContext.CancellationToken);
+                    Assert.IsFalse(command.IsCompleted, "Discovery must wait for the metadata writer.");
+                }
+                Assert.AreEqual(ExitCodes.AuthenticationFailed, await command);
+                using var json = System.Text.Json.JsonDocument.Parse(output.ToString());
+                Assert.AreEqual("AuthenticationFailed", json.RootElement.GetProperty("error").GetProperty("code").GetString());
+                Assert.DoesNotContain("wrong-secret", output.ToString(), StringComparison.Ordinal);
+            }
+            finally
+            {
+                shutdown.Cancel();
+                await serverTask;
+            }
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(workspace);
+        }
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
     public async Task CtlStatus_WrongSecretAndInstance_ReturnStableErrors()
     {
         var workspace = CreateTemporaryDirectory();

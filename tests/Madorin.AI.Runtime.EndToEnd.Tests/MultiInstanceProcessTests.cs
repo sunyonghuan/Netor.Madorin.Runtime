@@ -14,7 +14,7 @@ public sealed class MultiInstanceProcessTests
     {
         var root = CreateTemporaryDirectory();
         var runtimePath = FindArtifact("src", "Madorin.AI.Runtime.Cli", "madorin-cli.dll");
-        var sampleHostPath = FindArtifact("samples", "Madorin.AI.Runtime.SampleHost", "Madorin.AI.Runtime.SampleHost.dll");
+        var sampleHostPath = FindArtifact("tests", "samples", "Madorin.AI.Runtime.SampleHost", "Madorin.AI.Runtime.SampleHost.dll");
         var hostA = CreateHostConfiguration(root, "a");
         var hostB = CreateHostConfiguration(root, "b");
         await using var processA = new HostProcess(sampleHostPath, runtimePath, hostA);

@@ -118,6 +118,8 @@ public sealed class ExpertModeOrchestrator(
     private IReadOnlyList<SkillScopeSourceRoot>? _hostScopeSourceRoots;
     private ExpertPlanManager? _planManager;
     private string? _conversationLanguage;
+    private readonly List<ExpertToolEvidence> _primaryToolEvidence = [];
+    private readonly object _primaryEvidenceGate = new();
 
     public RuntimeMode Mode => RuntimeMode.Expert;
 
@@ -148,13 +150,12 @@ public sealed class ExpertModeOrchestrator(
         }
 
         // 并行作业池：绑定本 Run 的子 Agent 执行器，供 mcli_agent_job_* 工具 create/wait/result 回收。
-        _agentJobCoordinator?.BindWorker(
-            (jobId, agentName, task, jobRunId, jobSessionId, parentAgentId, jobCt) =>
+        _agentJobCoordinator?.BindWorkerWithRequest(
+            (jobId, request, jobRunId, jobSessionId, parentAgentId, jobCt) =>
                 ExecuteAgentJobAsync(
                     expert,
                     jobId,
-                    agentName,
-                    task,
+                    request,
                     jobRunId,
                     jobSessionId,
                     parentAgentId,
@@ -252,8 +253,8 @@ public sealed class ExpertModeOrchestrator(
 
             // Invoke sub-agent with the delegated task
             long subAgentRunSequence = 1;
-            var (subAgentContent, success) = await InvokeSubAgentAsync(
-                delegatedAgentName!,
+            var (subAgentContent, success, _) = await InvokeSubAgentAsync(
+                targetAgent.AgentId,
                 targetAgent,
                 delegatedTask!,
                 runId,
@@ -272,7 +273,7 @@ public sealed class ExpertModeOrchestrator(
                 await AppendContentAsync(
                     sessionId,
                     invocationId,
-                    delegatedAgentName!,
+                    targetAgent.AgentId,
                     "assistant",
                     errorContent,
                     DateTimeOffset.UtcNow,
@@ -297,7 +298,7 @@ public sealed class ExpertModeOrchestrator(
             await AppendContentAsync(
                 sessionId,
                 invocationId,
-                delegatedAgentName!,
+                targetAgent.AgentId,
                 "assistant",
                 subAgentContent,
                 DateTimeOffset.UtcNow,
@@ -929,6 +930,7 @@ public sealed class ExpertModeOrchestrator(
                 {
                     toolResult = await RouteExpertPlanToolAsync(
                         toolCall,
+                        expert,
                         runId,
                         sessionId,
                         invocationId,
@@ -946,6 +948,29 @@ public sealed class ExpertModeOrchestrator(
                         toolCall.Name,
                         outputJson,
                         _hostSkillDiscoveryMode);
+                }
+
+                if (!IsExpertPlanTool(toolCall.ToolId) && !IsDelegateToAgentTool(toolCall.ToolId))
+                {
+                    var proof = new ExpertToolEvidence(
+                        expert.Agent.AgentId, toolCall.CallId, toolCall.ToolId,
+                        toolResult.Success, DateTimeOffset.UtcNow);
+                    lock (_primaryEvidenceGate)
+                    {
+                        _primaryToolEvidence.Add(proof);
+                    }
+                    if (_planManager is not null)
+                    {
+                        await _planManager.RecordToolEvidenceAsync([proof], ct).ConfigureAwait(false);
+                    }
+                }
+                else if (IsDelegateToAgentTool(toolCall.ToolId) && !toolResult.Success
+                    && _planManager is not null)
+                {
+                    var proof = new ExpertToolEvidence(expert.Agent.AgentId,
+                        toolCall.CallId, toolCall.ToolId, false, DateTimeOffset.UtcNow);
+                    lock (_primaryEvidenceGate) { _primaryToolEvidence.Add(proof); }
+                    await _planManager.RecordToolEvidenceAsync([proof], ct).ConfigureAwait(false);
                 }
 
                 var resultBytes = GetContentByteCount(toolResult);
@@ -1246,54 +1271,58 @@ public sealed class ExpertModeOrchestrator(
 
     private static bool IsExpertPlanTool(string toolId) =>
         string.Equals(toolId, ExpertCreatePlanToolId, StringComparison.Ordinal)
-        || string.Equals(toolId, ExpertExecuteStepToolId, StringComparison.Ordinal);
+        || string.Equals(toolId, ExpertExecuteStepToolId, StringComparison.Ordinal)
+        || string.Equals(toolId, ExpertGetPlanToolId, StringComparison.Ordinal)
+        || string.Equals(toolId, ExpertUpdateStepStatusToolId, StringComparison.Ordinal)
+        || string.Equals(toolId, ExpertAbandonPlanToolId, StringComparison.Ordinal);
 
     /// <summary>并行 Job Worker：解析 AvailableAgents 并复用 InvokeSubAgentAsync。</summary>
     private async Task<AgentJobWorkerResult> ExecuteAgentJobAsync(
         ExpertModeOptions expert,
         string jobId,
-        string agentName,
-        string task,
+        AgentJobCreateRequest request,
         string runId,
         string sessionId,
         string parentAgentId,
         CancellationToken ct)
     {
         _ = jobId;
-        if (string.Equals(agentName, expert.Agent.AgentId, StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(request.AgentName, expert.Agent.AgentId, StringComparison.OrdinalIgnoreCase))
         {
             return new AgentJobWorkerResult(
                 false,
                 null,
-                $"Cannot run parallel job as the primary agent '{agentName}'.");
+                $"Cannot run parallel job as the primary agent '{request.AgentName}'.");
         }
 
-        if (expert.AvailableAgents is not { Length: > 0 })
-        {
-            return new AgentJobWorkerResult(
-                false,
-                null,
-                "Expert mode has no AvailableAgents configured for parallel jobs.");
-        }
-
-        var targetAgent = Array.Find(
+        var targetAgent = FindExistingAgent(
             expert.AvailableAgents,
-            a => string.Equals(a.AgentId, agentName, StringComparison.OrdinalIgnoreCase));
+            request.AgentName,
+            request.Capabilities,
+            expert.Agent.AgentId);
+        if (targetAgent is null && request.CreateIfMissing && request.Temporary)
+        {
+            targetAgent = TemporaryAgentFactory.Create(
+                expert.Agent,
+                request.Role ?? request.AgentName,
+                request.Task,
+                request.Capabilities,
+                request.AllowedToolIds);
+        }
+
         if (targetAgent is null)
         {
-            var availableAgentIds = string.Join(
-                ", ",
-                expert.AvailableAgents.Select(static a => a.AgentId));
+            var availableAgentIds = string.Join(", ", expert.AvailableAgents?.Select(static a => a.AgentId) ?? []);
             return new AgentJobWorkerResult(
                 false,
                 null,
-                $"Sub-agent '{agentName}' not found in AvailableAgents. Available: [{availableAgentIds}]");
+                $"Sub-agent '{request.AgentName}' not found in AvailableAgents and temporary creation was not enabled. Available: [{availableAgentIds}]");
         }
 
-        var (content, success) = await InvokeSubAgentAsync(
+        var (content, success, evidence) = await InvokeSubAgentAsync(
             targetAgent.AgentId,
             targetAgent,
-            task,
+            request.Task,
             runId,
             sessionId,
             parentInvocationId: Guid.NewGuid().ToString("N"),
@@ -1308,7 +1337,7 @@ public sealed class ExpertModeOrchestrator(
                 $"Sub-agent '{targetAgent.AgentId}' failed to complete the task.");
         }
 
-        return new AgentJobWorkerResult(true, FlattenContentText(content), null);
+        return new AgentJobWorkerResult(true, FlattenContentText(content), null, evidence);
     }
 
     /// <summary>
@@ -1326,6 +1355,7 @@ public sealed class ExpertModeOrchestrator(
                 toolCall.Arguments.GetRawText(),
                 out var agentName,
                 out var task,
+                out var options,
                 out var parseError))
         {
             return CreateDelegateToolResult(
@@ -1350,46 +1380,56 @@ public sealed class ExpertModeOrchestrator(
                 resultText: null);
         }
 
-        if (expert.AvailableAgents is not { Length: > 0 })
+        var targetAgent = FindExistingAgent(
+            expert.AvailableAgents,
+            agentName,
+            options.Capabilities,
+            expert.Agent.AgentId);
+        if (targetAgent is null && options.CreateIfMissing && options.Temporary)
         {
-            return CreateDelegateToolResult(
-                toolCall,
-                success: false,
-                delegated: false,
-                agentName: agentName,
-                task: task,
-                message: "Expert mode has no AvailableAgents configured for delegation.",
-                resultText: null);
+            targetAgent = TemporaryAgentFactory.Create(
+                expert.Agent,
+                options.Role ?? agentName,
+                task,
+                options.Capabilities,
+                options.AllowedToolIds);
         }
 
-        var targetAgent = Array.Find(
-            expert.AvailableAgents,
-            a => string.Equals(a.AgentId, agentName, StringComparison.OrdinalIgnoreCase));
         if (targetAgent is null)
         {
-            var availableAgentIds = string.Join(
-                ", ",
-                expert.AvailableAgents.Select(static a => a.AgentId));
+            var availableAgentIds = string.Join(", ", expert.AvailableAgents?.Select(static a => a.AgentId) ?? []);
             return CreateDelegateToolResult(
                 toolCall,
                 success: false,
                 delegated: false,
                 agentName: agentName,
                 task: task,
-                message: $"Sub-agent '{agentName}' not found in AvailableAgents. Available: [{availableAgentIds}]",
+                message: $"Sub-agent '{agentName}' not found in AvailableAgents and temporary creation was not enabled. Available: [{availableAgentIds}]",
                 resultText: null);
         }
 
         var resolvedAgentName = targetAgent.AgentId;
-        var (subAgentContent, success) = await InvokeSubAgentAsync(
-            resolvedAgentName,
-            targetAgent,
-            task,
-            runId,
-            sessionId,
-            parentInvocationId,
-            expert.Agent.AgentId,
-            ct).ConfigureAwait(false);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        if (options.TimeoutMs is { } timeoutMs)
+        {
+            timeout.CancelAfter(timeoutMs);
+        }
+        ContentBlock[] subAgentContent;
+        bool success;
+        ExpertToolEvidence[] evidence;
+        try
+        {
+            (subAgentContent, success, evidence) = await InvokeSubAgentAsync(
+                resolvedAgentName, targetAgent, task, runId, sessionId,
+                parentInvocationId, expert.Agent.AgentId, timeout.Token).ConfigureAwait(false);
+            timeout.Token.ThrowIfCancellationRequested();
+        }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            return CreateDelegateToolResult(toolCall, success: false, delegated: true,
+                agentName: resolvedAgentName, task: task,
+                message: $"Sub-agent '{resolvedAgentName}' timed out.", resultText: null);
+        }
 
         if (!success)
         {
@@ -1413,6 +1453,14 @@ public sealed class ExpertModeOrchestrator(
             ct).ConfigureAwait(false);
 
         var resultText = FlattenContentText(subAgentContent);
+        lock (_primaryEvidenceGate)
+        {
+            _primaryToolEvidence.AddRange(evidence);
+        }
+        if (_planManager is not null)
+        {
+            await _planManager.RecordToolEvidenceAsync(evidence, ct).ConfigureAwait(false);
+        }
         return CreateDelegateToolResult(
             toolCall,
             success: true,
@@ -1423,14 +1471,56 @@ public sealed class ExpertModeOrchestrator(
             resultText: resultText);
     }
 
+    private sealed record DelegateAgentOptions(
+        bool CreateIfMissing,
+        bool Temporary,
+        string? Role,
+        string[]? Capabilities,
+        string[]? AllowedToolIds,
+        int? TimeoutMs = null);
+
+    private static AgentRef? FindExistingAgent(
+        AgentRef[]? agents,
+        string agentName,
+        string[]? capabilities,
+        string? excludedAgentId = null)
+    {
+        if (agents is not { Length: > 0 })
+        {
+            return null;
+        }
+
+        agents = agents.Where(agent => !string.Equals(
+            agent.AgentId, excludedAgentId, StringComparison.OrdinalIgnoreCase)).ToArray();
+        var exact = agents.FirstOrDefault(agent =>
+            string.Equals(agent.AgentId, agentName, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(agent.DisplayName, agentName, StringComparison.OrdinalIgnoreCase));
+        if (exact is not null)
+        {
+            return exact;
+        }
+
+        if (capabilities is not { Length: > 0 })
+        {
+            return null;
+        }
+
+        var requested = capabilities.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return agents.FirstOrDefault(agent =>
+            agent.Capabilities is { Length: > 0 }
+            && requested.IsSubsetOf(agent.Capabilities));
+    }
+
     private static bool TryParseDelegateAgentArguments(
         string argumentsJson,
         out string agentName,
         out string task,
+        out DelegateAgentOptions options,
         out string? error)
     {
         agentName = string.Empty;
         task = string.Empty;
+        options = new DelegateAgentOptions(false, false, null, null, null);
         error = null;
 
         try
@@ -1461,6 +1551,28 @@ public sealed class ExpertModeOrchestrator(
 
             agentName = agentNameElement.GetString()!.Trim();
             task = taskElement.GetString()!.Trim();
+            var createIfMissing = root.TryGetProperty("createIfMissing", out var createElement)
+                && createElement.ValueKind == JsonValueKind.True;
+            var temporary = root.TryGetProperty("temporary", out var temporaryElement)
+                && temporaryElement.ValueKind == JsonValueKind.True;
+            var role = root.TryGetProperty("role", out var roleElement)
+                && roleElement.ValueKind == JsonValueKind.String
+                ? roleElement.GetString()
+                : null;
+            var capabilities = ReadStringArray(root, "capabilities");
+            var allowedToolIds = ReadStringArray(root, "allowedToolIds");
+            int? timeoutMs = null;
+            if (root.TryGetProperty("timeoutMs", out var timeoutElement))
+            {
+                if (timeoutElement.ValueKind != JsonValueKind.Number
+                    || !timeoutElement.TryGetInt32(out var parsedTimeout) || parsedTimeout < 1_000)
+                {
+                    error = "'timeoutMs' must be an integer of at least 1000 milliseconds.";
+                    return false;
+                }
+                timeoutMs = parsedTimeout;
+            }
+            options = new DelegateAgentOptions(createIfMissing, temporary, role, capabilities, allowedToolIds, timeoutMs);
             return true;
         }
         catch (JsonException ex)
@@ -1468,6 +1580,20 @@ public sealed class ExpertModeOrchestrator(
             error = ex.Message;
             return false;
         }
+    }
+
+    private static string[]? ReadStringArray(JsonElement root, string propertyName)
+    {
+        if (!root.TryGetProperty(propertyName, out var value) || value.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        return value.EnumerateArray()
+            .Where(static item => item.ValueKind == JsonValueKind.String)
+            .Select(static item => item.GetString()!)
+            .Where(static item => !string.IsNullOrWhiteSpace(item))
+            .ToArray();
     }
 
     private static ToolResultContentBlock CreateDelegateToolResult(
@@ -1498,6 +1624,7 @@ public sealed class ExpertModeOrchestrator(
     /// </summary>
     private async Task<ToolResultContentBlock> RouteExpertPlanToolAsync(
         ToolCallContentBlock toolCall,
+        ExpertModeOptions expert,
         string runId,
         string sessionId,
         string invocationId,
@@ -1513,7 +1640,7 @@ public sealed class ExpertModeOrchestrator(
 
             if (string.Equals(toolCall.ToolId, ExpertExecuteStepToolId, StringComparison.Ordinal))
             {
-                return await HandleExecuteStepAsync(toolCall, runId, sessionId, invocationId, ct)
+                return await HandleExecuteStepAsync(toolCall, expert, runId, sessionId, invocationId, ct)
                     .ConfigureAwait(false);
             }
 
@@ -1539,12 +1666,32 @@ public sealed class ExpertModeOrchestrator(
                 toolCall,
                 $"Unknown plan tool: {toolCall.ToolId}");
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            await FailInterruptedStepAsync(toolCall, runId, "Step execution was cancelled; reconcile partial results before retrying.").ConfigureAwait(false);
+            throw;
+        }
         catch (Exception ex)
         {
+            await FailInterruptedStepAsync(toolCall, runId, ex.Message).ConfigureAwait(false);
             return CreatePlanToolErrorResult(
                 toolCall,
                 $"Plan tool execution failed: {ex.Message}");
         }
+    }
+
+    private async Task FailInterruptedStepAsync(ToolCallContentBlock toolCall, string runId, string error)
+    {
+        if (toolCall.ToolId != ExpertExecuteStepToolId
+            || !TryParseExecuteStepArguments(toolCall.Arguments.GetRawText(), out var index, out _)
+            || _planManager?.ActivePlan is not { } plan
+            || index < 0 || index >= plan.Steps.Length
+            || plan.Steps[index].Status != ExpertStepStatus.Running)
+        {
+            return;
+        }
+        await _planManager.UpdateStepStatusAsync(plan.Steps[index].StepId, runId,
+            ExpertStepStatus.Failed, notes: error, ct: CancellationToken.None).ConfigureAwait(false);
     }
 
     private async Task<ToolResultContentBlock> HandleCreatePlanAsync(
@@ -1575,6 +1722,7 @@ public sealed class ExpertModeOrchestrator(
 
     private async Task<ToolResultContentBlock> HandleExecuteStepAsync(
         ToolCallContentBlock toolCall,
+        ExpertModeOptions expert,
         string runId,
         string sessionId,
         string invocationId,
@@ -1582,7 +1730,7 @@ public sealed class ExpertModeOrchestrator(
     {
         if (!TryParseExecuteStepArguments(
                 toolCall.Arguments.GetRawText(),
-                out var stepId,
+                out var stepIndex,
                 out var parseError))
         {
             return CreatePlanToolErrorResult(toolCall, parseError ?? "Invalid execute_step arguments.");
@@ -1594,13 +1742,141 @@ public sealed class ExpertModeOrchestrator(
             return CreatePlanToolErrorResult(toolCall, "No active plan.");
         }
 
-        var plan = await _planManager.UpdateStepStatusAsync(
-            stepId,
-            runId,
-            ExpertStepStatus.Completed,
-            progress: 100,
-            notes: null,
-            ct).ConfigureAwait(false);
+        if (stepIndex < 0 || stepIndex >= activePlan.Steps.Length)
+        {
+            return CreatePlanToolErrorResult(toolCall, $"Step index {stepIndex} is out of range.");
+        }
+
+        var step = activePlan.Steps[stepIndex];
+        if (step.Status is ExpertStepStatus.Completed or ExpertStepStatus.Failed or ExpertStepStatus.Skipped)
+        {
+            return CreatePlanToolErrorResult(
+                toolCall,
+                $"Step {stepIndex} is already terminal ({step.Status}) and cannot be executed again.");
+        }
+
+        var stepId = step.StepId;
+        var executionPolicy = step.ExecutionPolicy ?? "PrimaryAgent";
+        if (!string.Equals(executionPolicy, "PrimaryAgent", StringComparison.OrdinalIgnoreCase))
+        {
+            if (step.Status == ExpertStepStatus.Running)
+            {
+                return CreatePlanToolErrorResult(toolCall, "Assigned step is already running; reconcile its outcome before retrying.");
+            }
+            await _planManager.UpdateStepStatusAsync(
+                stepId, runId, ExpertStepStatus.Running, ct: ct).ConfigureAwait(false);
+        }
+        string? executionResult = null;
+        ExpertToolEvidence[] stepEvidence = [];
+        if (string.Equals(executionPolicy, "PreferParallelTemporaryAgents", StringComparison.OrdinalIgnoreCase))
+        {
+            if (_agentJobCoordinator is null || step.ParallelTasks is not { Length: >= 2 and <= 5 })
+            {
+                var failed = await _planManager.UpdateStepStatusAsync(
+                    stepId, runId, ExpertStepStatus.Failed, progress: 0,
+                    notes: "PreferParallelTemporaryAgents requires 2-5 explicit parallelTasks and an Agent Job coordinator.", ct).ConfigureAwait(false);
+                return CreatePlanToolResult(toolCall, false, SerializeStepExecutionResult(failed, stepId));
+            }
+
+            var requests = step.ParallelTasks.Select((task, index) => new AgentJobCreateRequest(
+                step.AgentName ?? $"plan-worker-{index + 1}",
+                task,
+                CreateIfMissing: true,
+                Temporary: true,
+                Role: "parallel plan worker",
+                AllowedToolIds: (expert.Agent.AllowedToolIds ?? TemporaryAgentFactory.DefaultReadOnlyToolIds).ToArray())).ToArray();
+            var jobs = _agentJobCoordinator.CreateMany(requests, runId, sessionId, expert.Agent.AgentId);
+            AgentJobWaitResult wait;
+            try
+            {
+                wait = await _agentJobCoordinator.WaitAsync(
+                    jobs.Select(static job => job.JobId).ToArray(), 300_000, ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                foreach (var job in jobs)
+                {
+                    _agentJobCoordinator.TryCancel(job.JobId);
+                }
+            }
+            var results = _agentJobCoordinator.CollectMany(jobs.Select(static job => job.JobId).ToArray());
+            if (!wait.AllTerminal || !wait.AllSucceeded || results.Any(static result => !result.Ready || !result.Success || string.IsNullOrWhiteSpace(result.Result)))
+            {
+                var failed = await _planManager.UpdateStepStatusAsync(
+                    stepId, runId, ExpertStepStatus.Failed, progress: 0,
+                    notes: string.Join("; ", results.Select(static result => result.Error ?? result.Message)), ct).ConfigureAwait(false);
+                return CreatePlanToolResult(toolCall, false, SerializeStepExecutionResult(failed, stepId));
+            }
+
+            stepEvidence = wait.Jobs.SelectMany(static job => job.Evidence ?? []).ToArray();
+            executionResult = string.Join(Environment.NewLine, results.Select(static result => result.Result));
+        }
+        else if (!string.Equals(executionPolicy, "PrimaryAgent", StringComparison.OrdinalIgnoreCase))
+        {
+            var target = FindExistingAgent(expert.AvailableAgents, step.AgentName ?? string.Empty, null, expert.Agent.AgentId);
+            if (target is null && string.Equals(executionPolicy, "TemporaryAgentIfUnmatched", StringComparison.OrdinalIgnoreCase))
+            {
+                target = TemporaryAgentFactory.Create(
+                    expert.Agent,
+                    step.AgentName ?? "temporary-worker",
+                    step.Description ?? step.Title,
+                    null,
+                    expert.Agent.AllowedToolIds);
+            }
+
+            if (target is null)
+            {
+                var failed = await _planManager.UpdateStepStatusAsync(
+                    stepId, runId, ExpertStepStatus.Failed, progress: 0,
+                    notes: $"No agent matched execution policy '{executionPolicy}'.", ct).ConfigureAwait(false);
+                return CreatePlanToolResult(toolCall, false, SerializeStepExecutionResult(failed, stepId));
+            }
+
+            var (content, success, evidence) = await InvokeSubAgentAsync(
+                target.AgentId, target, step.Description ?? step.Title, runId, sessionId,
+                invocationId, expert.Agent.AgentId, ct).ConfigureAwait(false);
+            stepEvidence = evidence;
+            executionResult = FlattenContentText(content);
+            if (!success || string.IsNullOrWhiteSpace(executionResult))
+            {
+                var failed = await _planManager.UpdateStepStatusAsync(
+                    stepId, runId, ExpertStepStatus.Failed, progress: 0,
+                    notes: "Assigned Agent did not complete the step.", ct).ConfigureAwait(false);
+                return CreatePlanToolResult(toolCall, false, SerializeStepExecutionResult(failed, stepId));
+            }
+        }
+
+        if (string.Equals(executionPolicy, "PrimaryAgent", StringComparison.OrdinalIgnoreCase))
+        {
+            if (step.Status != ExpertStepStatus.Running || step.StartedAt is null)
+            {
+                return CreatePlanToolErrorResult(toolCall,
+                    "PrimaryAgent requires a running step with execution evidence.");
+            }
+            stepEvidence = step.Evidence ?? [];
+            using var executeArgs = JsonDocument.Parse(toolCall.Arguments.GetRawText());
+            executionResult = executeArgs.RootElement.TryGetProperty("result", out var resultElement)
+                && resultElement.ValueKind == JsonValueKind.String
+                ? resultElement.GetString() : null;
+        }
+
+        var evidenceError = ExpertExecutionEvidence.Validate(
+            step.CompletionMode, step.ExpectedOutput, executionResult, stepEvidence);
+        if (evidenceError is not null)
+        {
+            if (!string.Equals(executionPolicy, "PrimaryAgent", StringComparison.OrdinalIgnoreCase)
+                || stepEvidence.Any(static item => !item.Success))
+            {
+                await _planManager.UpdateStepStatusWithEvidenceAsync(
+                    stepId, runId, ExpertStepStatus.Failed, 0,
+                    evidenceError, stepEvidence, ct).ConfigureAwait(false);
+            }
+            return CreatePlanToolErrorResult(toolCall, evidenceError);
+        }
+
+        var plan = await _planManager.UpdateStepStatusWithEvidenceAsync(
+            stepId, runId, ExpertStepStatus.Completed, 100,
+            executionResult, stepEvidence, ct).ConfigureAwait(false);
 
         var outputJson = SerializeStepExecutionResult(plan, stepId);
         return new ToolResultContentBlock(
@@ -1609,6 +1885,16 @@ public sealed class ExpertModeOrchestrator(
             Success: true,
             [new TextContentBlock(outputJson)]);
     }
+
+    private static ToolResultContentBlock CreatePlanToolResult(
+        ToolCallContentBlock toolCall,
+        bool success,
+        string outputJson) =>
+        new(
+            toolCall.CallId,
+            toolCall.ToolId,
+            success,
+            [new TextContentBlock(outputJson)]);
 
     private static string BuildDelegateResultJson(
         bool delegated,
@@ -1704,8 +1990,35 @@ public sealed class ExpertModeOrchestrator(
                     && agentElement.ValueKind == JsonValueKind.String
                     ? agentElement.GetString()?.Trim()
                     : null;
+                var executionPolicy = stepElement.TryGetProperty("executionPolicy", out var policyElement)
+                    && policyElement.ValueKind == JsonValueKind.String
+                    ? policyElement.GetString()?.Trim()
+                    : null;
+                var parallelTasks = stepElement.TryGetProperty("parallelTasks", out var parallelElement)
+                    && parallelElement.ValueKind == JsonValueKind.Array
+                    ? parallelElement.EnumerateArray()
+                        .Where(static item => item.ValueKind == JsonValueKind.String)
+                        .Select(static item => item.GetString()!)
+                        .Where(static item => !string.IsNullOrWhiteSpace(item))
+                        .Take(6)
+                        .ToArray()
+                    : null;
 
-                stepList.Add(new ExpertPlanStepDraft(stepId, title, description, agentName));
+                var completionMode = stepElement.TryGetProperty("completionMode", out var modeElement)
+                    && modeElement.ValueKind == JsonValueKind.String
+                    ? modeElement.GetString()! : "tools";
+                var expectedOutput = stepElement.TryGetProperty("expectedOutput", out var expectedElement)
+                    && expectedElement.ValueKind == JsonValueKind.String
+                    ? expectedElement.GetString() : null;
+                if (completionMode is not ("tools" or "analysis")
+                    || (completionMode == "analysis" && string.IsNullOrWhiteSpace(expectedOutput)))
+                {
+                    error = $"Step {stepIndex} requires tools or analysis with non-empty expectedOutput.";
+                    return false;
+                }
+
+                stepList.Add(new ExpertPlanStepDraft(stepId, title, description, agentName,
+                    executionPolicy, parallelTasks, completionMode, expectedOutput));
                 stepIndex++;
             }
 
@@ -1728,26 +2041,25 @@ public sealed class ExpertModeOrchestrator(
 
     private static bool TryParseExecuteStepArguments(
         string argumentsJson,
-        out string stepId,
+        out int stepIndex,
         out string? error)
     {
-        stepId = string.Empty;
+        stepIndex = -1;
         error = null;
 
         try
         {
             using var document = JsonDocument.Parse(argumentsJson);
             var root = document.RootElement;
-
-            if (!root.TryGetProperty("stepId", out var stepIdElement)
-                || stepIdElement.ValueKind != JsonValueKind.String
-                || string.IsNullOrWhiteSpace(stepIdElement.GetString()))
+            if (!root.TryGetProperty("stepIndex", out var stepIndexElement)
+                || stepIndexElement.ValueKind != JsonValueKind.Number
+                || !stepIndexElement.TryGetInt32(out stepIndex)
+                || stepIndex < 0)
             {
-                error = "Missing or invalid 'stepId' parameter.";
+                error = "Missing or invalid non-negative 'stepIndex' parameter.";
                 return false;
             }
 
-            stepId = stepIdElement.GetString()!.Trim();
             return true;
         }
         catch (JsonException ex)
@@ -1894,7 +2206,26 @@ public sealed class ExpertModeOrchestrator(
 
         try
         {
-            var oldStatus = _planManager.ActivePlan.Steps[stepIndex].Status;
+            var targetStep = _planManager.ActivePlan.Steps[stepIndex];
+            var oldStatus = targetStep.Status;
+            if (newStatus == ExpertStepStatus.Running
+                && (targetStep.ExecutionPolicy is null
+                    || string.Equals(targetStep.ExecutionPolicy, "PrimaryAgent", StringComparison.OrdinalIgnoreCase))
+                && _planManager.ActivePlan.Steps.Any(step => step.StepId != targetStep.StepId
+                    && step.Status == ExpertStepStatus.Running
+                    && (step.ExecutionPolicy is null
+                        || string.Equals(step.ExecutionPolicy, "PrimaryAgent", StringComparison.OrdinalIgnoreCase))))
+            {
+                return CreatePlanToolErrorResult(toolCall,
+                    "Only one PrimaryAgent step may be running; finish or reset the current step before starting another.");
+            }
+            if (newStatus is ExpertStepStatus.Completed)
+            {
+                return CreatePlanToolErrorResult(
+                    toolCall,
+                    "A step can only become completed through mcli_expert_execute_step after its execution succeeds.");
+            }
+
             var updatedPlan = await _planManager.UpdateStepStatusByIndexAsync(
                 stepIndex,
                 runId,
@@ -3012,7 +3343,7 @@ public sealed class ExpertModeOrchestrator(
     /// <summary>
     /// Invokes a sub-agent with the delegated task, supporting full tool calling capabilities.
     /// </summary>
-    private async Task<(ContentBlock[] content, bool success)> InvokeSubAgentAsync(
+    private async Task<(ContentBlock[] content, bool success, ExpertToolEvidence[] evidence)> InvokeSubAgentAsync(
         string subAgentName,
         AgentRef subAgent,
         string task,
@@ -3024,8 +3355,11 @@ public sealed class ExpertModeOrchestrator(
     {
         var subInvocationId = Guid.NewGuid().ToString("N");
         var subAgentProviderId = subAgent.ProviderId ?? _provider.ProviderId;
+        var subAgentProvider = string.Equals(subAgentProviderId, _provider.ProviderId, StringComparison.Ordinal)
+            ? _provider
+            : _providerResolver(subAgentProviderId);
         var subAgentModelId = subAgent.ModelId
-            ?? (_provider.Models.Count > 0 ? _provider.Models[0].Id : "default");
+            ?? (subAgentProvider.Models.Count > 0 ? subAgentProvider.Models[0].Id : "default");
 
         // Compose sub-agent's system prompt with memory if available
         var subAgentContext = _agentContextComposer is null
@@ -3047,13 +3381,26 @@ public sealed class ExpertModeOrchestrator(
 
         var subAgentMessages = new List<RuntimeProviderMessage> { systemMessage, userTaskMessage };
 
+        ToolCatalogSnapshot? CaptureSubAgentCatalog()
+        {
+            var snapshot = CaptureCatalogSnapshot()?.FilterByMode("expert");
+            return snapshot is null || subAgent.AllowedToolIds is null
+                ? snapshot
+                : new ToolCatalogSnapshot(
+                    snapshot.HostCatalogVersion,
+                    snapshot.EffectiveVersion,
+                    snapshot.AllTools.Where(tool =>
+                        subAgent.AllowedToolIds.Contains(tool.ToolId, StringComparer.Ordinal)));
+        }
+
         // Capture tool catalog for sub-agent
-        var catalogSnapshot = CaptureCatalogSnapshot()?.FilterByMode("expert");
+        var catalogSnapshot = CaptureSubAgentCatalog();
         ToolDescriptor[]? tools = _toolGateway is not null && catalogSnapshot is not null
             ? [.. catalogSnapshot.Tools]
             : null;
 
         var assistantContent = new List<ContentBlock>();
+        var evidence = new List<ExpertToolEvidence>();
         var maxToolRounds = _runtimeLimits.MaxToolRounds ?? 10;
         var maxToolCallsPerRound = _runtimeLimits.MaxToolCallsPerRound ?? 64;
 
@@ -3079,7 +3426,7 @@ public sealed class ExpertModeOrchestrator(
             RuntimeError? failure = null;
 
             await foreach (var providerEvent in ProviderInvocationBoundary.CompleteStreamingAsync(
-                _provider,
+                subAgentProvider,
                 subAgentRequest,
                 ct).ConfigureAwait(false))
             {
@@ -3102,21 +3449,28 @@ public sealed class ExpertModeOrchestrator(
                 }
             }
 
-            if (failure is not null)
+            if (failure is not null || !completed)
             {
-                return ([], false);
+                return ([], false, evidence.ToArray());
             }
 
             // Check for tool calls
             var toolCalls = assistantContent.OfType<ToolCallContentBlock>().ToArray();
             if (toolCalls.Length == 0)
             {
-                return (assistantContent.ToArray(), true);
+                var hasOutput = assistantContent.Any(block => block switch
+                {
+                    TextContentBlock text => !string.IsNullOrWhiteSpace(text.Text),
+                    _ => false
+                });
+                return hasOutput && evidence.All(static item => item.Success)
+                    ? (assistantContent.ToArray(), true, evidence.ToArray())
+                    : ([], false, evidence.ToArray());
             }
 
             if (toolCalls.Length > maxToolCallsPerRound)
             {
-                return ([], false);
+                return ([], false, evidence.ToArray());
             }
 
             // Add assistant message to conversation
@@ -3127,10 +3481,10 @@ public sealed class ExpertModeOrchestrator(
             // Execute tool calls with ParentAgentId
             foreach (var toolCall in toolCalls)
             {
-                var liveCatalog = CaptureCatalogSnapshot()?.FilterByMode("expert") ?? catalogSnapshot;
+                var liveCatalog = CaptureSubAgentCatalog() ?? catalogSnapshot;
                 if (liveCatalog is null || _toolGateway is null)
                 {
-                    return ([], false);
+                    return ([], false, evidence.ToArray());
                 }
 
                 var invocation = new ToolInvocation(
@@ -3142,7 +3496,8 @@ public sealed class ExpertModeOrchestrator(
                     runId,
                     sessionId,
                     subInvocationId,
-                    ToolCatalogVersion: liveCatalog.EffectiveVersion);
+                    ToolCatalogVersion: liveCatalog.EffectiveVersion,
+                    ParentInvocationId: parentInvocationId);
 
                 ToolGatewayResult gatewayResult;
                 try
@@ -3155,7 +3510,7 @@ public sealed class ExpertModeOrchestrator(
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
-                    return ([], false);
+                    throw;
                 }
 
                 // Handle permission/approval if needed
@@ -3171,11 +3526,14 @@ public sealed class ExpertModeOrchestrator(
                     }
                     else
                     {
-                        return ([], false);
+                        return ([], false, evidence.ToArray());
                     }
                 }
 
                 var toolResult = CreateToolResultContent(toolCall, gatewayResult);
+                evidence.Add(new ExpertToolEvidence(
+                    subAgentName, toolCall.CallId, toolCall.ToolId,
+                    toolResult.Success, DateTimeOffset.UtcNow));
                 subAgentMessages.Add(new RuntimeProviderMessage(
                     RuntimeProviderRoles.Tool,
                     [toolResult]));
@@ -3183,7 +3541,7 @@ public sealed class ExpertModeOrchestrator(
         }
 
         // Exceeded max tool rounds
-        return ([], false);
+        return ([], false, evidence.ToArray());
     }
 
     private sealed class MemorySnapshotLease(

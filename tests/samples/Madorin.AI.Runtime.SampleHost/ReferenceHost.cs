@@ -477,6 +477,9 @@ internal static class ReferenceHost
             0 => CreateExpertSelection(
                 selectionVersion,
                 "Use both reference host tools before answering."),
+            1 or 2 => CreateExpertSelection(
+                selectionVersion,
+                $"Complete the reference task on runtime {index}."),
             _ => throw new ArgumentOutOfRangeException(nameof(index), index, null)
         };
 

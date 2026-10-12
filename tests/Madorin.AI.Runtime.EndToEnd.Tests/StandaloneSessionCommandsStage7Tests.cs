@@ -90,7 +90,7 @@ public sealed class StandaloneSessionCommandsStage7Tests
 
             foreach (var filter in new[]
                      {
-                         new[] { "--mode", "meeting" },
+                         new[] { "--mode", "expert", "--search", "missing-title" },
                          new[] { "--status", "archived" },
                          new[] { "--search", "missing-title" },
                          new[] { "--since", "2100-01-01T00:00:00Z" }
@@ -174,6 +174,8 @@ public sealed class StandaloneSessionCommandsStage7Tests
     }
 
     [TestMethod]
+    [DataRow("--mode", "meeting")]
+    [DataRow("--mode", "work")]
     [DataRow("--mode", "unsupported")]
     [DataRow("--status", "deleted")]
     [DataRow("--since", "2026-07-24")]

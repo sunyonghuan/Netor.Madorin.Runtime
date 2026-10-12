@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Madorin.AI.Runtime.Contracts.Expert;
 
 namespace Madorin.AI.Runtime.Services.AgentJobs;
 
@@ -24,12 +25,12 @@ public sealed class AgentJobCoordinator : IAgentJobCoordinator
     /// 串行化实际 Worker 调用：共享 Runtime 依赖（Provider/Gateway/SessionStore）暂非线程安全。
     /// 入队仍可并行 pending；真正 InvokeSubAgent 一次一个。
     /// </summary>
-    private readonly SemaphoreSlim _workerInvokeLock = new(1, 1);
     private readonly object _createGate = new();
     private readonly object _workerGate = new();
     private readonly int _maxConcurrent;
     private readonly int _maxJobsPerRun;
     private AgentJobWorker? _worker;
+    private AgentJobWorkerWithRequest? _workerWithRequest;
     private int _disposed;
 
     public AgentJobCoordinator(int? maxConcurrent = null, int? maxJobsPerRun = null)
@@ -53,6 +54,16 @@ public sealed class AgentJobCoordinator : IAgentJobCoordinator
         }
     }
 
+    public void BindWorkerWithRequest(AgentJobWorkerWithRequest worker)
+    {
+        ArgumentNullException.ThrowIfNull(worker);
+        ThrowIfDisposed();
+        lock (_workerGate)
+        {
+            _workerWithRequest = worker;
+        }
+    }
+
     public AgentJobSnapshot Create(
         AgentJobCreateRequest request,
         string runId,
@@ -67,7 +78,6 @@ public sealed class AgentJobCoordinator : IAgentJobCoordinator
 
         var normalized = NormalizeCreateRequest(request);
         EnsureWorkerBound();
-
         lock (_createGate)
         {
             ThrowIfDisposed();
@@ -344,7 +354,6 @@ public sealed class AgentJobCoordinator : IAgentJobCoordinator
         }
 
         _pool.Dispose();
-        _workerInvokeLock.Dispose();
     }
 
     private AgentJobSnapshot EnqueueCore(
@@ -396,6 +405,11 @@ public sealed class AgentJobCoordinator : IAgentJobCoordinator
             sessionId,
             parentAgentId,
             timeoutMs,
+            normalized.CreateIfMissing,
+            normalized.Temporary,
+            normalized.Role,
+            normalized.Capabilities,
+            normalized.AllowedToolIds,
             cts);
     }
 
@@ -416,12 +430,14 @@ public sealed class AgentJobCoordinator : IAgentJobCoordinator
     private async Task ExecuteJobAsync(JobEntry entry)
     {
         AgentJobWorker? worker;
+        AgentJobWorkerWithRequest? workerWithRequest;
         lock (_workerGate)
         {
             worker = _worker;
+            workerWithRequest = _workerWithRequest;
         }
 
-        if (worker is null)
+        if (worker is null && workerWithRequest is null)
         {
             entry.MarkFailed("Agent job worker is not bound.");
             return;
@@ -461,26 +477,27 @@ public sealed class AgentJobCoordinator : IAgentJobCoordinator
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(entry.Cancellation.Token);
             timeoutCts.CancelAfter(entry.TimeoutMs);
 
-            // 串行化 Worker，保护共享 Runtime 依赖。
-            await _workerInvokeLock.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+            if (entry.IsCancelRequested)
+            {
+                entry.MarkCancelled();
+                return;
+            }
+
             try
             {
-                if (entry.IsCancelRequested)
-                {
-                    entry.MarkCancelled();
-                    return;
-                }
-
-                try
-                {
-                    var result = await worker(
-                        entry.JobId,
-                        entry.AgentName,
-                        entry.Task,
-                        entry.RunId,
-                        entry.SessionId,
-                        entry.ParentAgentId,
-                        timeoutCts.Token).ConfigureAwait(false);
+                var result = workerWithRequest is not null
+                        ? await workerWithRequest(
+                            entry.JobId,
+                            new AgentJobCreateRequest(
+                                entry.AgentName, entry.Task, entry.TimeoutMs,
+                                entry.CreateIfMissing, entry.Temporary, entry.Role,
+                                entry.Capabilities, entry.AllowedToolIds),
+                            entry.RunId, entry.SessionId, entry.ParentAgentId,
+                            timeoutCts.Token).ConfigureAwait(false)
+                        : await worker!(
+                            entry.JobId, entry.AgentName, entry.Task,
+                            entry.RunId, entry.SessionId, entry.ParentAgentId,
+                            timeoutCts.Token).ConfigureAwait(false);
 
                     if (entry.IsCancelRequested)
                     {
@@ -488,31 +505,33 @@ public sealed class AgentJobCoordinator : IAgentJobCoordinator
                         return;
                     }
 
-                    if (result.Success)
+                    if (timeoutCts.IsCancellationRequested)
                     {
-                        entry.MarkCompleted(result.ResultText ?? string.Empty);
+                        entry.MarkTimedOut();
+                        return;
+                    }
+
+                    if (result.Success && !string.IsNullOrWhiteSpace(result.ResultText)
+                        && (result.Evidence is null || result.Evidence.All(static item => item.Success)))
+                    {
+                        entry.MarkCompleted(result.ResultText!, result.Evidence);
                     }
                     else
                     {
                         entry.MarkFailed(result.Error ?? "Sub-agent failed to complete the task.");
                     }
-                }
-                catch (OperationCanceledException) when (entry.IsCancelRequested)
-                {
-                    entry.MarkCancelled();
-                }
-                catch (OperationCanceledException)
-                {
-                    entry.MarkTimedOut();
-                }
-                catch (Exception ex)
-                {
-                    entry.MarkFailed(ex.Message);
-                }
             }
-            finally
+            catch (OperationCanceledException) when (entry.IsCancelRequested)
             {
-                _workerInvokeLock.Release();
+                entry.MarkCancelled();
+            }
+            catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
+            {
+                entry.MarkTimedOut();
+            }
+            catch (Exception ex)
+            {
+                entry.MarkFailed(ex.Message);
             }
         }
         catch (OperationCanceledException) when (entry.IsCancelRequested)
@@ -547,7 +566,7 @@ public sealed class AgentJobCoordinator : IAgentJobCoordinator
     {
         lock (_workerGate)
         {
-            if (_worker is null)
+            if (_worker is null && _workerWithRequest is null)
             {
                 throw new InvalidOperationException(
                     "Agent job worker is not bound. Parallel agent jobs require Expert mode with a bound worker.");
@@ -574,7 +593,15 @@ public sealed class AgentJobCoordinator : IAgentJobCoordinator
             throw new ArgumentException("Task description cannot be empty.", nameof(request));
         }
 
-        return new AgentJobCreateRequest(agentName, task, request.TimeoutMs);
+        return new AgentJobCreateRequest(
+            agentName,
+            task,
+            request.TimeoutMs,
+            request.CreateIfMissing,
+            request.Temporary,
+            request.Role,
+            request.Capabilities,
+            request.AllowedToolIds);
     }
 
     private static int NormalizeJobTimeout(int? timeoutMs)
@@ -603,6 +630,7 @@ public sealed class AgentJobCoordinator : IAgentJobCoordinator
         private readonly CancellationTokenSource _cts;
         private string _state = AgentJobStates.Pending;
         private string? _result;
+        private ExpertToolEvidence[]? _evidence;
         private string? _error;
         private DateTimeOffset? _startedAt;
         private DateTimeOffset? _completedAt;
@@ -617,6 +645,11 @@ public sealed class AgentJobCoordinator : IAgentJobCoordinator
             string sessionId,
             string parentAgentId,
             int timeoutMs,
+            bool createIfMissing,
+            bool temporary,
+            string? role,
+            string[]? capabilities,
+            string[]? allowedToolIds,
             CancellationTokenSource cts)
         {
             JobId = jobId;
@@ -626,6 +659,11 @@ public sealed class AgentJobCoordinator : IAgentJobCoordinator
             SessionId = sessionId;
             ParentAgentId = parentAgentId;
             TimeoutMs = timeoutMs;
+            CreateIfMissing = createIfMissing;
+            Temporary = temporary;
+            Role = role;
+            Capabilities = capabilities;
+            AllowedToolIds = allowedToolIds;
             _cts = cts;
             CreatedAt = DateTimeOffset.UtcNow;
         }
@@ -637,6 +675,11 @@ public sealed class AgentJobCoordinator : IAgentJobCoordinator
         public string SessionId { get; }
         public string ParentAgentId { get; }
         public int TimeoutMs { get; }
+        public bool CreateIfMissing { get; }
+        public bool Temporary { get; }
+        public string? Role { get; }
+        public string[]? Capabilities { get; }
+        public string[]? AllowedToolIds { get; }
         public DateTimeOffset CreatedAt { get; }
         public CancellationTokenSource Cancellation => _cts;
 
@@ -677,7 +720,7 @@ public sealed class AgentJobCoordinator : IAgentJobCoordinator
                     SessionId,
                     CreatedAt,
                     _startedAt,
-                    _completedAt);
+                    _completedAt, _evidence);
             }
         }
 
@@ -697,7 +740,7 @@ public sealed class AgentJobCoordinator : IAgentJobCoordinator
             }
         }
 
-        public void MarkCompleted(string result)
+        public void MarkCompleted(string result, ExpertToolEvidence[]? evidence)
         {
             lock (_gate)
             {
@@ -717,6 +760,7 @@ public sealed class AgentJobCoordinator : IAgentJobCoordinator
 
                 _state = AgentJobStates.Completed;
                 _result = result;
+                _evidence = evidence;
                 _error = null;
                 _completedAt = DateTimeOffset.UtcNow;
             }

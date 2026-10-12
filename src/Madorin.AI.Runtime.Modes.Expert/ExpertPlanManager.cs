@@ -48,7 +48,11 @@ internal sealed class ExpertPlanManager
             StartedAt: null,
             CompletedAt: null,
             Result: null,
-            ErrorMessage: null)).ToArray();
+            ErrorMessage: null,
+            ExecutionPolicy: draft.ExecutionPolicy,
+            ParallelTasks: draft.ParallelTasks,
+            CompletionMode: draft.CompletionMode,
+            ExpectedOutput: draft.ExpectedOutput)).ToArray();
 
         var plan = new ExpertPlan(
             planId,
@@ -75,7 +79,13 @@ internal sealed class ExpertPlanManager
         ExpertStepStatus newStatus,
         int? progress = null,
         string? notes = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default) =>
+        await UpdateStepStatusWithEvidenceAsync(stepId, runId, newStatus, progress, notes, null, ct)
+            .ConfigureAwait(false);
+
+    public async Task<ExpertPlan> UpdateStepStatusWithEvidenceAsync(
+        string stepId, string runId, ExpertStepStatus newStatus, int? progress,
+        string? notes, ExpertToolEvidence[]? evidence, CancellationToken ct = default)
     {
         if (_activePlan is null)
         {
@@ -89,12 +99,18 @@ internal sealed class ExpertPlanManager
         }
 
         var oldStep = _activePlan.Steps[stepIndex];
+        if (oldStep.Status is ExpertStepStatus.Completed or ExpertStepStatus.Failed or ExpertStepStatus.Skipped)
+        {
+            throw new InvalidOperationException($"Step '{stepId}' is already terminal ({oldStep.Status}).");
+        }
+
         var oldStatus = oldStep.Status;
         var now = DateTimeOffset.UtcNow;
 
         var newStep = oldStep with
         {
             Status = newStatus,
+            Evidence = evidence ?? oldStep.Evidence,
             Progress = progress ?? oldStep.Progress,
             StartedAt = oldStep.StartedAt ?? (newStatus == ExpertStepStatus.Running ? now : null),
             CompletedAt = newStatus is ExpertStepStatus.Completed or ExpertStepStatus.Failed or ExpertStepStatus.Skipped
@@ -108,6 +124,19 @@ internal sealed class ExpertPlanManager
                 : oldStep.ErrorMessage
         };
 
+        if (newStatus == ExpertStepStatus.Pending)
+        {
+            newStep = newStep with
+            {
+                Evidence = null,
+                Progress = 0,
+                StartedAt = null,
+                CompletedAt = null,
+                Result = null,
+                ErrorMessage = null
+            };
+        }
+
         var newSteps = _activePlan.Steps.ToArray();
         newSteps[stepIndex] = newStep;
 
@@ -115,14 +144,15 @@ internal sealed class ExpertPlanManager
         var oldPlanStatus = _activePlan.Status;
         var newPlanStatus = CalculatePlanStatus(newSteps);
 
-        _activePlan = _activePlan with
+        var updatedPlan = _activePlan with
         {
             Steps = newSteps,
             Status = newPlanStatus,
             UpdatedAt = now
         };
 
-        await _fileStore.SaveAsync(_activePlan, ct).ConfigureAwait(false);
+        await _fileStore.SaveAsync(updatedPlan, ct).ConfigureAwait(false);
+        _activePlan = updatedPlan;
 
         // 发送事件
         if (oldStatus != newStatus)
@@ -135,6 +165,28 @@ internal sealed class ExpertPlanManager
         }
 
         return _activePlan;
+    }
+
+    public async Task RecordToolEvidenceAsync(ExpertToolEvidence[] evidence, CancellationToken ct)
+    {
+        var plan = _activePlan;
+        if (plan is null || evidence.Length == 0)
+        {
+            return;
+        }
+        var index = Array.FindIndex(plan.Steps, step => step.Status == ExpertStepStatus.Running
+            && (step.ExecutionPolicy is null
+                || string.Equals(step.ExecutionPolicy, "PrimaryAgent", StringComparison.OrdinalIgnoreCase)));
+        if (index < 0)
+        {
+            return;
+        }
+        var steps = plan.Steps.ToArray();
+        steps[index] = steps[index] with { Evidence = (steps[index].Evidence ?? [])
+            .Concat(evidence).DistinctBy(static item => item.CallId).ToArray() };
+        var updated = plan with { Steps = steps, UpdatedAt = DateTimeOffset.UtcNow };
+        await _fileStore.SaveAsync(updated, ct).ConfigureAwait(false);
+        _activePlan = updated;
     }
 
     /// <summary>按索引更新步骤状态（用于 update_step_status 工具）</summary>
@@ -172,7 +224,7 @@ internal sealed class ExpertPlanManager
     /// <summary>计算整体计划状态</summary>
     private static ExpertPlanStatus CalculatePlanStatus(ExpertPlanStep[] steps)
     {
-        if (steps.All(s => s.Status == ExpertStepStatus.Completed))
+        if (steps.All(s => s.Status is ExpertStepStatus.Completed or ExpertStepStatus.Skipped))
         {
             return ExpertPlanStatus.Completed;
         }

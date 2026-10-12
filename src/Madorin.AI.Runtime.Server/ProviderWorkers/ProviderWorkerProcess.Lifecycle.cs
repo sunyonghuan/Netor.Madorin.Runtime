@@ -36,7 +36,15 @@ public sealed partial class ProviderWorkerProcess
                 }
             }
 
-            await StartAsync(cancellationToken).ConfigureAwait(false);
+            await StartupGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await StartAsync(cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                StartupGate.Release();
+            }
         }
         finally
         {

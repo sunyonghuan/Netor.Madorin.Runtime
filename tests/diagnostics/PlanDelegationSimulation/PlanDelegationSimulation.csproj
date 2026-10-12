@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PublishAot>false</PublishAot>
+    <IsAotCompatible>false</IsAotCompatible>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <EnableNETAnalyzers>false</EnableNETAnalyzers>
+    <NuGetAudit>false</NuGetAudit>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <ProjectReference Include="../../../src/Madorin.AI.Runtime.Client/Madorin.AI.Runtime.Client.csproj" />
+    <ProjectReference Include="../../../src/Madorin.AI.Runtime.Contracts/Madorin.AI.Runtime.Contracts.csproj" />
+    <ProjectReference Include="../../../src/Madorin.AI.Runtime.Entities/Madorin.AI.Runtime.Entities.csproj" />
+  </ItemGroup>
+</Project>

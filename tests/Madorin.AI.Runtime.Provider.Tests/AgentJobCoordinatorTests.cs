@@ -55,6 +55,32 @@ public sealed class AgentJobCoordinatorTests
     }
 
     [TestMethod]
+    public async Task CreateMany_ThreeWorkersOverlapBeforeAnyCompletes()
+    {
+        await using var coordinator = new AgentJobCoordinator(maxConcurrent: 3);
+        var allRunning = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = 0;
+        coordinator.BindWorker(async (_, _, _, _, _, _, ct) =>
+        {
+            if (Interlocked.Increment(ref entered) == 3)
+            {
+                allRunning.TrySetResult();
+            }
+            await allRunning.Task.WaitAsync(ct);
+            await Task.Delay(25, ct);
+            return new AgentJobWorkerResult(true, "read", null);
+        });
+        var jobs = coordinator.CreateMany([
+            new AgentJobCreateRequest("a", "a"), new AgentJobCreateRequest("b", "b"),
+            new AgentJobCreateRequest("c", "c")], "r", "s", "parent");
+        await allRunning.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.CancellationToken);
+        var wait = await coordinator.WaitAsync(jobs.Select(j => j.JobId).ToArray(),
+            5_000, TestContext.CancellationToken);
+        Assert.IsTrue(wait.AllSucceeded);
+        Assert.IsTrue(wait.Jobs.Max(j => j.StartedAt) < wait.Jobs.Min(j => j.CompletedAt));
+    }
+
+    [TestMethod]
     public async Task Collect_BeforeTerminal_ReturnsNotReady()
     {
         await using var coordinator = new AgentJobCoordinator(maxConcurrent: 1);
@@ -125,14 +151,14 @@ public sealed class AgentJobCoordinatorTests
             mid.State is AgentJobStates.Cancelling or AgentJobStates.Cancelled,
             $"unexpected state={mid.State}");
         var midCollect = coordinator.Collect(job.JobId);
-        if (string.Equals(mid.State, AgentJobStates.Cancelling, StringComparison.Ordinal))
+        if (midCollect.Ready)
         {
-            Assert.IsFalse(midCollect.Ready);
+            Assert.IsFalse(midCollect.Success);
+            Assert.IsTrue(midCollect.State is AgentJobStates.Cancelled or AgentJobStates.Failed);
         }
         else
         {
-            Assert.IsTrue(midCollect.Ready);
-            Assert.IsFalse(midCollect.Success);
+            Assert.AreEqual(AgentJobStates.Cancelling, mid.State);
         }
 
         var wait = await coordinator.WaitAsync([job.JobId], 5_000, TestContext.CancellationToken);
@@ -219,6 +245,65 @@ public sealed class AgentJobCoordinatorTests
         var wait = await coordinator.WaitAsync([job.JobId], 5_000, TestContext.CancellationToken);
         Assert.IsTrue(wait.AllTerminal);
         Assert.IsFalse(wait.AllSucceeded);
+    }
+
+    [TestMethod]
+    [DataRow(true)]
+    [DataRow(false)]
+    public async Task WorkerCancellation_ClassifiesOutcome_AndReleasesCapacity(bool timeout)
+    {
+        await using var coordinator = new AgentJobCoordinator(maxConcurrent: 1, maxJobsPerRun: 1);
+        coordinator.BindWorker(async (_, _, _, _, _, _, ct) =>
+        {
+            if (!timeout)
+            {
+                throw new OperationCanceledException("provider aborted independently");
+            }
+            try { await Task.Delay(Timeout.Infinite, ct); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+            return new AgentJobWorkerResult(true, "late success", null);
+        });
+        var job = coordinator.Create(new AgentJobCreateRequest("dev", "work", TimeoutMs: 1_000), "r", "s", "p");
+        var wait = await coordinator.WaitAsync([job.JobId], 5_000, TestContext.CancellationToken);
+        Assert.IsTrue(wait.AllTerminal);
+        Assert.IsFalse(wait.AllSucceeded);
+        Assert.AreEqual(timeout ? AgentJobStates.TimedOut : AgentJobStates.Failed, wait.Jobs.Single().State);
+        Assert.IsNull(coordinator.Collect(job.JobId).Result);
+        coordinator.BindWorker(static (_, _, _, _, _, _, _) =>
+            Task.FromResult(new AgentJobWorkerResult(true, "recovered", null)));
+        var next = coordinator.Create(new AgentJobCreateRequest("dev", "next"), "r", "s", "p");
+        Assert.IsTrue((await coordinator.WaitAsync([next.JobId], 5_000, TestContext.CancellationToken)).AllSucceeded);
+    }
+
+    [TestMethod]
+    public async Task WaitTimeout_AndQueuedCancellation_DoNotLeakPoolCapacity()
+    {
+        await using var coordinator = new AgentJobCoordinator(maxConcurrent: 1);
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        coordinator.BindWorker(async (_, _, _, _, _, _, ct) =>
+        {
+            Interlocked.Increment(ref calls);
+            started.TrySetResult();
+            await gate.Task.WaitAsync(ct);
+            return new AgentJobWorkerResult(true, "done", null);
+        });
+        var first = coordinator.Create(new AgentJobCreateRequest("dev", "first"), "r", "s", "p");
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.CancellationToken);
+        var second = coordinator.Create(new AgentJobCreateRequest("dev", "queued"), "r", "s", "p");
+        var wait = await coordinator.WaitAsync([first.JobId], 100, TestContext.CancellationToken);
+        Assert.IsTrue(wait.TimedOut);
+        Assert.IsFalse(wait.AllTerminal);
+        Assert.IsTrue(coordinator.TryCancel(second.JobId));
+        wait = await coordinator.WaitAsync([second.JobId], 5_000, TestContext.CancellationToken);
+        Assert.AreEqual(AgentJobStates.Cancelled, wait.Jobs.Single().State);
+        Assert.AreEqual(1, calls);
+        gate.SetResult();
+        Assert.IsTrue((await coordinator.WaitAsync([first.JobId], 5_000, TestContext.CancellationToken)).AllSucceeded);
+        var third = coordinator.Create(new AgentJobCreateRequest("dev", "next"), "r", "s", "p");
+        Assert.IsTrue((await coordinator.WaitAsync([third.JobId], 5_000, TestContext.CancellationToken)).AllSucceeded);
+        Assert.AreEqual(2, calls);
     }
 
     [TestMethod]

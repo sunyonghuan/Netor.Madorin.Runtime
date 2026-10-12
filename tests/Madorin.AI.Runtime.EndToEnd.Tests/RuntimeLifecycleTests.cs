@@ -27,7 +27,7 @@ public sealed class RuntimeLifecycleTests
             await using var first = await RuntimeServer.StartAsync(
                 CreateOptions(workspaceA, instanceA, prefix, secret));
 
-            var workspaceConflict = await Assert.ThrowsExactlyAsync<InvalidOperationException>(
+            var workspaceConflict = await Assert.ThrowsExactlyAsync<WorkspaceBusyException>(
                 async () => await RuntimeServer.StartAsync(
                     CreateOptions(workspaceA, instanceB, prefix + ".other", secret)));
             StringAssert.Contains(workspaceConflict.Message, "workspace");
@@ -136,6 +136,56 @@ public sealed class RuntimeLifecycleTests
                 RunStatus.Preparing,
                 RunStatus.Running,
                 TestContext.CancellationToken);
+        }
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    [DataRow(false)]
+    [DataRow(true)]
+    public async Task RunAsync_PublishesCompletePidAndRemovesItOnStop(bool replaceStale)
+    {
+        var workspace = CreateTemporaryDirectory();
+        using var shutdown = CancellationTokenSource.CreateLinkedTokenSource(TestContext.CancellationToken);
+        var secret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+        try
+        {
+            await using var server = await RuntimeServer.StartAsync(
+                CreateOptions(workspace, Guid.NewGuid().ToString("N"),
+                    $"madorin.pid.{Guid.NewGuid():N}", secret),
+                TestContext.CancellationToken);
+            var path = Path.Combine(workspace, ".madorin", "runtime.pid");
+            if (replaceStale)
+            {
+                await File.WriteAllTextAsync(path, "stale-reader", TestContext.CancellationToken);
+            }
+            var run = server.RunAsync(shutdown.Token);
+            try
+            {
+                await using var client = new Madorin.AI.Runtime.Client.RuntimeClient(
+                    new Madorin.AI.Runtime.Client.RuntimeClientOptions(server.PipeName,
+                        $"pid-observer-{Guid.NewGuid():N}", HandshakeSecret: secret,
+                        ExpectedRuntimeInstanceId: server.InstanceId, EnableBackgroundHeartbeat: false));
+                await client.ConnectAsync(TestContext.CancellationToken);
+                using var published = System.Text.Json.JsonDocument.Parse(
+                    await File.ReadAllTextAsync(path, TestContext.CancellationToken));
+                Assert.AreEqual(server.InstanceId, published.RootElement.GetProperty("instanceId").GetString());
+                Assert.AreEqual(Environment.ProcessId, published.RootElement.GetProperty("pid").GetInt32());
+                Assert.AreEqual(server.PipeName, published.RootElement.GetProperty("pipeName").GetString());
+                Assert.AreEqual(server.EventPipeName, published.RootElement.GetProperty("eventPipeName").GetString());
+            }
+            finally
+            {
+                shutdown.Cancel();
+                await run;
+            }
+            Assert.IsFalse(File.Exists(path));
+            Assert.IsEmpty(Directory.GetFiles(Path.GetDirectoryName(path)!, "runtime.pid.*.tmp"));
+
+        }
+        finally
+        {
+            TryDelete(workspace);
         }
     }
 

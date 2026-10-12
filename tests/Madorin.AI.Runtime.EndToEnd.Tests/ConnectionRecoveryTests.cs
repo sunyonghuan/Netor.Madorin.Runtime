@@ -53,16 +53,30 @@ public sealed class ConnectionRecoveryTests
             .GetAsyncEnumerator(timeout.Token);
         var nextEvent = events.MoveNextAsync().AsTask();
 
-        await fixture.Server.DisconnectEventChannelsAsync();
-        await WaitUntilAsync(
-            () => fixture.Server.ConnectedEventChannelCount == 1,
-            TimeSpan.FromSeconds(5));
-        var runId = await fixture.Client.StartNewSessionRunAsync(CreateRequest(), timeout.Token);
+        try
+        {
+            await fixture.Server.DisconnectEventChannelsAsync();
+            await WaitUntilAsync(
+                () => fixture.Server.ConnectedEventChannelCount == 1,
+                TimeSpan.FromSeconds(5));
+            var runId = await fixture.Client.StartNewSessionRunAsync(CreateRequest(), timeout.Token);
 
-        Assert.IsTrue(await nextEvent);
-        Assert.AreEqual(runId, events.Current.RunId);
-        Assert.AreEqual(1, fixture.Server.ConnectedSessionCount);
-        Assert.AreEqual(RuntimeClientState.Connected, fixture.Client.State);
+            Assert.IsTrue(await nextEvent);
+            Assert.AreEqual(runId, events.Current.RunId);
+            Assert.AreEqual(1, fixture.Server.ConnectedSessionCount);
+            Assert.AreEqual(RuntimeClientState.Connected, fixture.Client.State);
+        }
+        finally
+        {
+            await timeout.CancelAsync();
+            try
+            {
+                await nextEvent;
+            }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+            {
+            }
+        }
     }
 
     private static NewSessionRunRequest CreateRequest() =>
@@ -73,7 +87,7 @@ public sealed class ConnectionRecoveryTests
             new NextTurnSelection(
                 1,
                 RuntimeMode.Expert,
-                new DefaultSelection("missing", "missing"),
+                new DefaultSelection("test-provider", "test-model"),
                 new ExpertModeOptions(new AgentRef("agent", "v1", "test"))),
             [new TextContentBlock("test")]);
 
@@ -126,7 +140,8 @@ public sealed class ConnectionRecoveryTests
                     InstanceId = Guid.NewGuid().ToString("N"),
                     PipePrefix = $"madorin.recovery.{Guid.NewGuid():N}",
                     HandshakeSecret = secret,
-                    HeartbeatIntervalSeconds = 1
+                    HeartbeatIntervalSeconds = 1,
+                    ProviderResolver = _ => new HttpRuntimeFixture.HttpTestProvider()
                 });
             var shutdown = new CancellationTokenSource();
             var serverTask = server.RunAsync(shutdown.Token);

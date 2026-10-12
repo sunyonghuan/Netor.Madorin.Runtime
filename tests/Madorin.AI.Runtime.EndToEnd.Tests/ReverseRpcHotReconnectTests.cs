@@ -272,7 +272,7 @@ public sealed class ReverseRpcHotReconnectTests
     [TestMethod]
     [DoNotParallelize]
     [Timeout(30_000, CooperativeCancellation = true)]
-    public async Task WorkRun_PureModelStepsContinueOfflineAndReplayBufferedOutbox()
+    public async Task ExpertRun_PureModelContinuesOfflineAndReplaysBufferedOutbox()
     {
         var workspace = CreateTemporaryDirectory();
         var instanceId = Guid.NewGuid().ToString("N");
@@ -809,20 +809,10 @@ public sealed class ReverseRpcHotReconnectTests
             RuntimeProviderRequest request,
             [EnumeratorCancellation] CancellationToken ct = default)
         {
-            if (string.Equals(request.AgentId, "offline-manager", StringComparison.Ordinal))
-            {
-                Interlocked.Increment(ref _managerCallCount);
-                _managerStarted.TrySetResult();
-                await _releaseManager.Task.WaitAsync(ct);
-                // 返回新格式的工作计划（二级步骤结构）
-                yield return new TextDeltaProviderEvent(
-                    request.InvocationId,
-                    """{"planVersion":"1","goal":"Finish locally","steps":[{"stepId":"offline-step","title":"Local Work","description":"Produce the local result","subSteps":[{"subStepId":"offline-step.1","goal":"Produce the local result","instruction":"Execute the local work","targetAgentId":"offline-worker","expectedOutput":"Local result"}]}]}""");
-                yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
-                yield break;
-            }
-
-            Assert.AreEqual("offline-worker", request.AgentId);
+            Assert.AreEqual("offline-agent", request.AgentId);
+            Interlocked.Increment(ref _managerCallCount);
+            _managerStarted.TrySetResult();
+            await _releaseManager.Task.WaitAsync(ct);
             Interlocked.Increment(ref _workerCallCount);
             try
             {

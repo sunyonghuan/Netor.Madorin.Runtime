@@ -286,7 +286,7 @@ public sealed class BuiltinAgentJobToolExecutor(IAgentJobCoordinator coordinator
             writer.WriteStartArray("jobs");
             foreach (var item in collects)
             {
-                WriteCollectObject(writer, item);
+                WriteCollectObject(writer, item, wait.Jobs.FirstOrDefault(job => job.JobId == item.JobId));
             }
 
             writer.WriteEndArray();
@@ -404,11 +404,40 @@ public sealed class BuiltinAgentJobToolExecutor(IAgentJobCoordinator coordinator
             timeoutMs = parsed;
         }
 
+        var createIfMissing = root.TryGetProperty("createIfMissing", out var createElement)
+            && createElement.ValueKind == JsonValueKind.True;
+        var temporary = root.TryGetProperty("temporary", out var temporaryElement)
+            && temporaryElement.ValueKind == JsonValueKind.True;
+        var role = root.TryGetProperty("role", out var roleElement)
+            && roleElement.ValueKind == JsonValueKind.String
+            ? roleElement.GetString()
+            : null;
+        var capabilities = ReadStringArray(root, "capabilities");
+        var allowedToolIds = ReadStringArray(root, "allowedToolIds");
         request = new AgentJobCreateRequest(
             agentNameElement.GetString()!.Trim(),
             taskElement.GetString()!.Trim(),
-            timeoutMs);
+            timeoutMs,
+            createIfMissing,
+            temporary,
+            role,
+            capabilities,
+            allowedToolIds);
         return true;
+    }
+
+    private static string[]? ReadStringArray(JsonElement root, string propertyName)
+    {
+        if (!root.TryGetProperty(propertyName, out var value) || value.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        return value.EnumerateArray()
+            .Where(static item => item.ValueKind == JsonValueKind.String)
+            .Select(static item => item.GetString()!)
+            .Where(static item => !string.IsNullOrWhiteSpace(item))
+            .ToArray();
     }
 
     private static bool TryReadJobId(JsonElement root, out string jobId, out string? error)
@@ -449,6 +478,14 @@ public sealed class BuiltinAgentJobToolExecutor(IAgentJobCoordinator coordinator
         writer.WriteString("state", snapshot.State);
         writer.WriteString("agentName", snapshot.AgentName);
         writer.WriteString("task", snapshot.Task);
+        if (snapshot.StartedAt is { } started)
+        {
+            writer.WriteString("startedAt", started);
+        }
+        if (snapshot.CompletedAt is { } completed)
+        {
+            writer.WriteString("completedAt", completed);
+        }
         writer.WriteBoolean("terminal", AgentJobStates.IsTerminal(snapshot.State));
         if (includeResult && snapshot.Result is not null)
         {
@@ -468,10 +505,28 @@ public sealed class BuiltinAgentJobToolExecutor(IAgentJobCoordinator coordinator
         writer.WriteEndObject();
     }
 
-    private static void WriteCollectObject(Utf8JsonWriter writer, AgentJobCollectResult collected)
+    private static void WriteCollectObject(Utf8JsonWriter writer, AgentJobCollectResult collected,
+        AgentJobSnapshot? snapshot = null)
     {
         writer.WriteStartObject();
         WriteCollectFields(writer, collected);
+        if (snapshot is not null)
+        {
+            if (snapshot.StartedAt is { } started)
+            {
+                writer.WriteString("startedAt", started);
+            }
+            if (snapshot.CompletedAt is { } completed)
+            {
+                writer.WriteString("completedAt", completed);
+            }
+            writer.WriteStartArray("childAgentIds");
+            foreach (var id in (snapshot.Evidence ?? []).Select(static item => item.AgentId).Distinct())
+            {
+                writer.WriteStringValue(id);
+            }
+            writer.WriteEndArray();
+        }
         writer.WriteEndObject();
     }
 

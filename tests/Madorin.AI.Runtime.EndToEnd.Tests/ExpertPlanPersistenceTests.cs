@@ -152,6 +152,51 @@ public sealed class ExpertPlanPersistenceTests
         Assert.AreEqual(newPlan.PlanId, restored?.PlanId);
     }
 
+    [TestMethod]
+    public async Task RestoreActivePlan_PreservesEvidenceAndRejectsTerminalReexecution()
+    {
+        var manager = new ExpertPlanManager(_workspaceRoot);
+        await manager.CreatePlanAsync("session-a", "run-a", CreateRequest("evidence"));
+        await manager.UpdateStepStatusAsync("step-1", "run-a", ExpertStepStatus.Running);
+        var evidence = new ExpertToolEvidence("planner", "write-call", "mcli_fs_write",
+            true, DateTimeOffset.UtcNow);
+        await manager.RecordToolEvidenceAsync([evidence], TestContext.CancellationToken);
+        var restored = new ExpertPlanManager(_workspaceRoot);
+        var plan = await restored.RestoreActivePlanAsync("session-a");
+        Assert.AreEqual("write-call", Assert.ContainsSingle(plan!.Steps[0].Evidence!).CallId);
+        await restored.UpdateStepStatusWithEvidenceAsync("step-1", "run-b", ExpertStepStatus.Completed,
+            100, "done", [evidence], TestContext.CancellationToken);
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() =>
+            restored.UpdateStepStatusAsync("step-1", "run-b", ExpertStepStatus.Running));
+        Assert.AreEqual(ExpertStepStatus.Completed, restored.ActivePlan!.Steps[0].Status);
+        Assert.AreEqual("done", restored.ActivePlan.Steps[0].Result);
+    }
+
+    [TestMethod]
+    public async Task RestoreActivePlan_FailedEvidenceCannotBeOverwritten()
+    {
+        var manager = new ExpertPlanManager(_workspaceRoot);
+        await manager.CreatePlanAsync("session-a", "run-a", CreateRequest("failed"));
+        await manager.UpdateStepStatusAsync("step-1", "run-a", ExpertStepStatus.Failed,
+            notes: "permission denied");
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() =>
+            manager.UpdateStepStatusAsync("step-1", "run-b", ExpertStepStatus.Completed, 100, "fake"));
+        Assert.AreEqual("permission denied", manager.ActivePlan!.Steps[0].ErrorMessage);
+    }
+
+    [TestMethod]
+    public async Task Plan_CompletesWhenRemainingStepsAreSkipped()
+    {
+        var manager = new ExpertPlanManager(_workspaceRoot);
+        await manager.CreatePlanAsync("session-a", "run-a", CreateRequest("skip"));
+        await manager.UpdateStepStatusAsync("step-1", "run-a", ExpertStepStatus.Completed, 100, "done");
+        var plan = await manager.UpdateStepStatusAsync("step-2", "run-a", ExpertStepStatus.Skipped, notes: "not needed");
+
+        Assert.AreEqual(ExpertPlanStatus.Completed, plan.Status);
+    }
+
+    public TestContext TestContext { get; set; } = null!;
+
     private static CreateExpertPlanRequest CreateRequest(string goal) => new(
         goal,
         [new("step-1", "First"), new("step-2", "Second")]);

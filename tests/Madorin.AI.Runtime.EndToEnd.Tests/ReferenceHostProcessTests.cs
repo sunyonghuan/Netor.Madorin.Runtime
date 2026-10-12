@@ -25,7 +25,8 @@ public sealed class ReferenceHostProcessTests
     private static readonly string[] ExpectedProjectReferences =
     [
         "Madorin.AI.Runtime.Client",
-        "Madorin.AI.Runtime.Contracts"
+        "Madorin.AI.Runtime.Contracts",
+        "Madorin.AI.Runtime.Entities"
     ];
 
     private readonly TestContext _testContext;
@@ -36,11 +37,12 @@ public sealed class ReferenceHostProcessTests
     }
 
     [TestMethod]
-    public void SampleHost_ProjectReferencesOnlyClientAndContracts()
+    public void SampleHost_ProjectReferencesOnlyClientContractsAndEntities()
     {
         var runtimeRoot = FindRuntimeRoot();
         var projectPath = Path.Combine(
             runtimeRoot,
+            "tests",
             "samples",
             "Madorin.AI.Runtime.SampleHost",
             "Madorin.AI.Runtime.SampleHost.csproj");
@@ -80,6 +82,7 @@ public sealed class ReferenceHostProcessTests
         {
             await Task.WhenAll(endpoints.Select(endpoint => endpoint.StartAsync()));
             var sampleHostPath = FindArtifact(
+                "tests",
                 "samples",
                 "Madorin.AI.Runtime.SampleHost",
                 "Madorin.AI.Runtime.SampleHost.dll");

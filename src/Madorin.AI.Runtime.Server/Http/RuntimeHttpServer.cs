@@ -11,6 +11,7 @@ using Microsoft.Extensions.Logging;
 using Madorin.AI.Runtime.Client;
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Contracts.Http;
+using Madorin.AI.Runtime.Contracts.Serialization;
 using Madorin.AI.Runtime.Entities;
 
 namespace Madorin.AI.Runtime.Server.Http;
@@ -187,6 +188,11 @@ internal sealed partial class RuntimeHttpServer : IAsyncDisposable
             var events = new List<RuntimeEventEnvelope>();
             await foreach (var envelope in client.ReadEventsAsync(0, effectiveCt))
             {
+                if (!string.Equals(envelope.RunId, actualRunId, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
                 events.Add(envelope);
                 if (IsTerminalEvent(envelope.MessageType))
                 {
@@ -195,11 +201,11 @@ internal sealed partial class RuntimeHttpServer : IAsyncDisposable
             }
 
             sw.Stop();
-
+            var run = await client.QueryRunAsync(actualRunId, effectiveCt);
             var response = new HttpRunResponse
             {
-                RunId = ExtractRunId(events) ?? actualRunId,
-                SessionId = sessionId,
+                RunId = actualRunId,
+                SessionId = run.SessionId,
                 Output = ExtractFinalContent(events),
                 Status = ExtractFinalStatus(events) ?? "Unknown",
                 ErrorMessage = ExtractErrorMessage(events),
@@ -264,14 +270,6 @@ internal sealed partial class RuntimeHttpServer : IAsyncDisposable
         || string.Equals(messageType, "run.failed", StringComparison.Ordinal)
         || string.Equals(messageType, "run.cancelled", StringComparison.Ordinal);
 
-    private static string? ExtractRunId(IReadOnlyList<RuntimeEventEnvelope> events)
-    {
-        // The actual run id is already returned by Start* methods.
-        // We can try to locate an invocation-started or similar envelope if needed.
-        // For now we rely on the value we already captured.
-        return null;
-    }
-
     private static string ExtractFinalContent(List<RuntimeEventEnvelope> events)
     {
         var sb = new StringBuilder();
@@ -281,7 +279,7 @@ internal sealed partial class RuntimeHttpServer : IAsyncDisposable
             {
                 try
                 {
-                    var delta = JsonSerializer.Deserialize<TextDeltaEvent>(evt.Payload.GetRawText());
+                    var delta = JsonSerializer.Deserialize(evt.Payload, RuntimeJsonContext.Default.TextDeltaEvent);
                     if (delta?.Delta != null)
                     {
                         sb.Append(delta.Delta);
@@ -329,7 +327,7 @@ internal sealed partial class RuntimeHttpServer : IAsyncDisposable
             {
                 try
                 {
-                    var failed = JsonSerializer.Deserialize<RunFailedEvent>(evt.Payload.GetRawText());
+                    var failed = JsonSerializer.Deserialize(evt.Payload, RuntimeJsonContext.Default.RunFailedEvent);
                     return failed?.Error.Message;
                 }
                 catch
@@ -350,7 +348,7 @@ internal sealed partial class RuntimeHttpServer : IAsyncDisposable
             {
                 try
                 {
-                    var usage = JsonSerializer.Deserialize<UsageUpdatedEvent>(evt.Payload.GetRawText());
+                    var usage = JsonSerializer.Deserialize(evt.Payload, RuntimeJsonContext.Default.UsageUpdatedEvent);
                     return usage?.InputTokens;
                 }
                 catch
@@ -371,7 +369,7 @@ internal sealed partial class RuntimeHttpServer : IAsyncDisposable
             {
                 try
                 {
-                    var usage = JsonSerializer.Deserialize<UsageUpdatedEvent>(evt.Payload.GetRawText());
+                    var usage = JsonSerializer.Deserialize(evt.Payload, RuntimeJsonContext.Default.UsageUpdatedEvent);
                     return usage?.OutputTokens;
                 }
                 catch

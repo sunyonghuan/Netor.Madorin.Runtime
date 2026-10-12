@@ -15,7 +15,7 @@ public sealed class SkillScriptRunnerTests
     [TestInitialize]
     public void Initialize()
     {
-        _root = Path.Combine(Path.GetTempPath(), "madorin-script-tests", Guid.NewGuid().ToString("N"));
+        _root = Path.Combine(Path.GetTempPath(), "ms", Guid.NewGuid().ToString("N")[..16]);
         Directory.CreateDirectory(_root);
     }
 
@@ -303,7 +303,7 @@ public sealed class SkillScriptRunnerTests
             ("arguments", ".py") => "import sys\nprint('|'.join(sys.argv[1:]))\n",
             ("arguments", ".js") => "console.log(process.argv.slice(2).join('|'));\n",
             ("arguments", ".cs") => "System.Console.WriteLine(string.Join(\"|\", args));\n",
-            ("arguments", ".csx") => "System.Console.WriteLine(string.Join(\"|\", Args));\n",
+            ("arguments", ".csx") => "System.Console.OutputEncoding = new System.Text.UTF8Encoding(false);\nSystem.Console.WriteLine(string.Join(\"|\", Args));\n",
             ("nonzero", ".ps1") => "[Console]::Error.WriteLine('expected-error')\nexit 7\n",
             ("nonzero", ".sh") => "printf 'expected-error\\n' >&2\nexit 7\n",
             ("nonzero", ".py") => "import sys\nsys.stderr.write('expected-error\\n')\nsys.exit(7)\n",

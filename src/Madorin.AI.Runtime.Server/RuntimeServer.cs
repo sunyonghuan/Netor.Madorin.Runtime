@@ -3442,7 +3442,16 @@ public sealed class RuntimeServer : IAsyncDisposable
         var json = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(
             info,
             RuntimePidInfoContext.Default.RuntimePidInfo);
-        await File.WriteAllBytesAsync(path, json, ct).ConfigureAwait(false);
+        var temporaryPath = path + $".{Guid.NewGuid():N}.tmp";
+        try
+        {
+            await File.WriteAllBytesAsync(temporaryPath, json, ct).ConfigureAwait(false);
+            File.Move(temporaryPath, path, overwrite: true);
+        }
+        finally
+        {
+            TryDeletePidFile(temporaryPath);
+        }
     }
 
     private static void TryDeletePidFile(string path)

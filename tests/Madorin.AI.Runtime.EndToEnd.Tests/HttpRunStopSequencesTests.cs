@@ -1,12 +1,9 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
-using System.Text;
 using System.Text.Json;
-using Madorin.AI.Runtime.Client;
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Contracts.Http;
-using Madorin.AI.Runtime.Server;
 using Madorin.AI.Runtime.Server.Http;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -18,6 +15,7 @@ namespace Madorin.AI.Runtime.EndToEnd.Tests;
 [TestClass]
 public class HttpRunStopSequencesTests
 {
+    private static readonly JsonSerializerOptions HttpJsonOptions = new(JsonSerializerDefaults.Web);
     /// <summary>
     /// Test that /v1/run endpoint respects stopSequences parameter and terminates early when encountering STOP or END.
     /// </summary>
@@ -25,26 +23,11 @@ public class HttpRunStopSequencesTests
     [Timeout(30_000, CooperativeCancellation = true)]
     public async Task RunEndpoint_WithStopSequences_TerminatesEarly()
     {
-        // Arrange: Set up HTTP server and mock runtime
-        var port = GetAvailablePort();
-        var pipeName = $"test-pipe-{Guid.NewGuid():N}";
-        var instanceId = Guid.NewGuid().ToString("N");
-        var handshakeSecret = Guid.NewGuid().ToString("N");
-
-        await using var httpServer = new RuntimeHttpServer(
-            "localhost",
-            port,
-            pipeName,
-            instanceId,
-            handshakeSecret,
-            NullLoggerFactory.Instance);
-
-        await httpServer.StartAsync();
-
-        // Create HTTP client to call /v1/run
+        await using var runtime = await HttpRuntimeFixture.StartAsync();
         using var client = new HttpClient
         {
-            BaseAddress = new Uri($"http://localhost:{port}")
+            BaseAddress = runtime.Address,
+            Timeout = TimeSpan.FromSeconds(15)
         };
 
         var request = new HttpRunRequest
@@ -67,18 +50,19 @@ public class HttpRunStopSequencesTests
         Assert.AreEqual(HttpStatusCode.OK, response.StatusCode);
 
         var content = await response.Content.ReadAsStringAsync();
-        var runResponse = JsonSerializer.Deserialize<HttpRunResponse>(content);
+        var runResponse = JsonSerializer.Deserialize<HttpRunResponse>(content, HttpJsonOptions);
 
         Assert.IsNotNull(runResponse);
         Assert.IsNotNull(runResponse.RunId);
         Assert.IsNotNull(runResponse.SessionId);
         Assert.IsNotNull(runResponse.Output);
 
-        // Verify that output terminated early (should not contain full counting to 100)
-        // The model should stop when it encounters "STOP" or "END"
-        Assert.IsTrue(
-            runResponse.Output.Contains("STOP") || runResponse.Output.Contains("END"),
-            "Output should contain at least one stop sequence");
+        Assert.AreEqual("1 2 3 ", runResponse.Output, $"{content}; calls={runtime.Provider.Requests.Count}");
+        Assert.IsFalse(runResponse.Output.Contains("STOP", StringComparison.Ordinal));
+        Assert.IsFalse(runResponse.Output.Contains("100", StringComparison.Ordinal));
+        var providerRequest = Assert.ContainsSingle(runtime.Provider.Requests);
+        CollectionAssert.AreEqual(request.RequestControl.StopSequences, providerRequest.RequestControl?.StopSequences);
+        Assert.IsFalse(providerRequest.Stream);
 
         // Verify status is Completed
         Assert.AreEqual("Completed", runResponse.Status);
@@ -86,7 +70,7 @@ public class HttpRunStopSequencesTests
         // Verify token counts are available
         Assert.IsTrue(runResponse.InputTokens.HasValue, "Input tokens should be tracked");
         Assert.IsTrue(runResponse.OutputTokens.HasValue, "Output tokens should be tracked");
-        Assert.IsGreaterThan(runResponse.ElapsedMs, 0L, "Elapsed time should be positive");
+        Assert.IsGreaterThan(0L, runResponse.ElapsedMs, "Elapsed time should be positive");
     }
 
     /// <summary>
@@ -96,26 +80,11 @@ public class HttpRunStopSequencesTests
     [Timeout(30_000, CooperativeCancellation = true)]
     public async Task RunEndpoint_WithInvalidProviderId_ReturnsError()
     {
-        // Arrange: Set up HTTP server and mock runtime
-        var port = GetAvailablePort();
-        var pipeName = $"test-pipe-{Guid.NewGuid():N}";
-        var instanceId = Guid.NewGuid().ToString("N");
-        var handshakeSecret = Guid.NewGuid().ToString("N");
-
-        await using var httpServer = new RuntimeHttpServer(
-            "localhost",
-            port,
-            pipeName,
-            instanceId,
-            handshakeSecret,
-            NullLoggerFactory.Instance);
-
-        await httpServer.StartAsync();
-
-        // Create HTTP client to call /v1/run
+        await using var runtime = await HttpRuntimeFixture.StartAsync(configured: false);
         using var client = new HttpClient
         {
-            BaseAddress = new Uri($"http://localhost:{port}")
+            BaseAddress = runtime.Address,
+            Timeout = TimeSpan.FromSeconds(15)
         };
 
         var request = new HttpRunRequest

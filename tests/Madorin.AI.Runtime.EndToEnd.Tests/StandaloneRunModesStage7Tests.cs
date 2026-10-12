@@ -34,7 +34,7 @@ public sealed class StandaloneRunModesStage7Tests
 
     [TestMethod]
     [Timeout(60_000, CooperativeCancellation = true)]
-    public async Task RunForTests_ThreeModes_RouteConfiguredAgentsAndComplete()
+    public async Task RunForTests_ExpertRunsAndRetiredModesAreRejected()
     {
         var root = CreateTemporaryDirectory();
         try
@@ -84,16 +84,11 @@ public sealed class StandaloneRunModesStage7Tests
                 meetingManager,
                 meetingWorker);
 
-            Assert.AreEqual(ExitCodes.Success, meeting.ExitCode, meeting.Output);
-            Assert.Contains("meeting:manager", meeting.Output, StringComparison.Ordinal);
-            Assert.Contains("meeting:worker", meeting.Output, StringComparison.Ordinal);
-            AssertAgentRoute(meetingManager, ManagerAgentId);
-            AssertAgentRoute(meetingWorker, WorkerAgentId);
-            Assert.IsNotEmpty(meetingManager.Requests.Where(static request =>
-                request.AgentId == "meeting.selector"));
-            AssertProviderRoute(meetingManager);
-            AssertProviderRoute(meetingWorker);
-            await AssertPersistedCompletedRunAsync(Path.Combine(root, "meeting-data"));
+            Assert.AreEqual(ExitCodes.InvalidArguments, meeting.ExitCode, meeting.Output);
+            Assert.Contains("Mode must be expert or standalone.", meeting.Output, StringComparison.Ordinal);
+            Assert.IsEmpty(meetingManager.Requests);
+            Assert.IsEmpty(meetingWorker.Requests);
+            Assert.IsFalse(Directory.Exists(Path.Combine(root, "meeting-data")));
 
             var workManager = CreateProvider(
                 ManagerProviderId,
@@ -111,11 +106,11 @@ public sealed class StandaloneRunModesStage7Tests
                 workManager,
                 workWorker);
 
-            Assert.AreEqual(ExitCodes.Success, work.ExitCode, work.Output);
-            Assert.Contains("work:worker", work.Output, StringComparison.Ordinal);
-            AssertAgentRoute(workManager, ManagerAgentId);
-            AssertAgentRoute(workWorker, WorkerAgentId);
-            await AssertPersistedCompletedRunAsync(Path.Combine(root, "work-data"));
+            Assert.AreEqual(ExitCodes.InvalidArguments, work.ExitCode, work.Output);
+            Assert.Contains("Mode must be expert or standalone.", work.Output, StringComparison.Ordinal);
+            Assert.IsEmpty(workManager.Requests);
+            Assert.IsEmpty(workWorker.Requests);
+            Assert.IsFalse(Directory.Exists(Path.Combine(root, "work-data")));
         }
         finally
         {
@@ -175,7 +170,7 @@ public sealed class StandaloneRunModesStage7Tests
     }
 
     [TestMethod]
-    public async Task RunForTests_WorkWithOneAgent_RejectsBeforeDataDirectoryCreation()
+    public async Task RunForTests_RetiredWorkWithOneAgent_RejectsBeforeDataDirectoryCreation()
     {
         var root = CreateTemporaryDirectory();
         try
@@ -204,12 +199,42 @@ public sealed class StandaloneRunModesStage7Tests
 
             Assert.AreEqual(ExitCodes.InvalidArguments, result.ExitCode, result.Output);
             Assert.Contains(
-                "at least two configured Agents",
+                "Mode must be expert or standalone.",
                 result.Output,
                 StringComparison.Ordinal);
             Assert.IsEmpty(manager.Requests);
             Assert.IsEmpty(worker.Requests);
             Assert.IsFalse(Directory.Exists(dataDirectory));
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [TestMethod]
+    [Timeout(60_000, CooperativeCancellation = true)]
+    public async Task RunForTests_ExpertDelegation_UsesWorkerProviderAndCompletesRun()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var config = Path.Combine(root, "config");
+            var workspace = Path.Combine(root, "workspace");
+            var data = Path.Combine(root, "data");
+            Directory.CreateDirectory(workspace);
+            await WriteConfigurationAsync(config, includeWorker: true);
+            var manager = CreateProvider(ManagerProviderId, ManagerModelId, _ => "manager completed");
+            var worker = CreateProvider(WorkerProviderId, WorkerModelId, _ => "worker completed");
+            var inputFile = Path.Combine(root, "input.txt");
+            await File.WriteAllTextAsync(inputFile, "@WORKER review the code", _testContext.CancellationToken);
+            var result = RunMode(config, workspace, data, "expert", manager, worker, inputFile);
+            Assert.AreEqual(ExitCodes.Success, result.ExitCode, result.Output);
+            AssertAgentRoute(worker, WorkerAgentId);
+            AssertAgentRoute(manager, ManagerAgentId);
+            Assert.IsTrue(manager.Requests.Single().Messages.SelectMany(message => message.Content)
+                .OfType<TextContentBlock>().Any(block => block.Text.Contains("worker completed", StringComparison.Ordinal)));
+            await AssertPersistedCompletedRunAsync(data);
         }
         finally
         {
@@ -284,7 +309,8 @@ public sealed class StandaloneRunModesStage7Tests
         string dataDirectory,
         string mode,
         DeterministicProvider manager,
-        DeterministicProvider worker)
+        DeterministicProvider worker,
+        string? inputFile = null)
     {
         var output = new StringWriter();
         var exitCode = CliApplication.RunForTests(
@@ -293,7 +319,7 @@ public sealed class StandaloneRunModesStage7Tests
                 "--workspace", workspace,
                 "--data-dir", dataDirectory,
                 "--mode", mode,
-                "--input", $"Run {mode} mode"
+                inputFile is null ? "--input" : "--input-file", inputFile ?? $"Run {mode} mode"
             ],
             output,
             new StringReader(string.Empty),

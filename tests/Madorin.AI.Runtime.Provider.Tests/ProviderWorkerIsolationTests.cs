@@ -79,10 +79,15 @@ public sealed class ProviderWorkerIsolationTests
     public async Task KillDuringInvoke_FailsPendingInvocation()
     {
         var directory = RequireWorkerDirectory();
+        var invocationStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         await using var server = await FakeProviderServer.StartAsync(
-            _ => ProviderProtocolScripts.SlowText(
-                ProviderAdapterKind.OpenAICompatible,
-                TimeSpan.FromSeconds(2)),
+            _ =>
+            {
+                invocationStarted.TrySetResult();
+                return ProviderProtocolScripts.SlowText(
+                    ProviderAdapterKind.OpenAICompatible,
+                    TimeSpan.FromSeconds(2));
+            },
             TestContext.CancellationToken);
         await using var supervisor = new ProviderWorkerSupervisor(directory);
         var adapter = supervisor.CreateAdapter(
@@ -92,7 +97,7 @@ public sealed class ProviderWorkerIsolationTests
             adapter,
             ProviderAdapterTestFactory.CreateRequest() with { InvocationId = "inv-kill" },
             TestContext.CancellationToken);
-        await Task.Delay(300, TestContext.CancellationToken);
+        await invocationStarted.Task.WaitAsync(TestContext.CancellationToken);
         Assert.IsTrue(supervisor.TryGetProcess("openai-compatible", out var worker));
         Assert.IsTrue(worker.ProcessId.HasValue);
         await KillPidAsync(worker.ProcessId.Value);
@@ -132,13 +137,14 @@ public sealed class ProviderWorkerIsolationTests
             Assert.AreNotEqual(firstId, process.ProcessId);
             Assert.IsFalse(process.IsFused);
 
-            var conflict = await Assert.ThrowsExactlyAsync<InvalidOperationException>(
+            var conflict = await Assert.ThrowsExactlyAsync<WorkspaceBusyException>(
                 () => WorkspaceWriteLock.AcquireAsync(
                     workspace,
                     "runtime-lock-other",
                     TimeSpan.Zero,
                     TestContext.CancellationToken));
             Assert.Contains("active Runtime instance", conflict.Message, StringComparison.Ordinal);
+            Assert.AreEqual(workspaceLock.LockPath, conflict.LockPath);
             Assert.IsTrue(File.Exists(workspaceLock.LockPath));
         }
         finally

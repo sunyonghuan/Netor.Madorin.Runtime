@@ -48,7 +48,7 @@ public sealed class SessionResumeRecoveryTests
     [TestMethod]
     [DoNotParallelize]
     [Timeout(60_000, CooperativeCancellation = true)]
-    public async Task ThreeModes_AfterRestartResumeUnifiedStateAndContinueMonotonicGsn()
+    public async Task ExpertSessions_AfterRestartResumeUnifiedStateAndContinueMonotonicGsn()
     {
         var workspace = CreateTemporaryDirectory();
         var secret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
@@ -73,17 +73,12 @@ public sealed class SessionResumeRecoveryTests
                     TestContext.CancellationToken);
                 timeout.CancelAfter(TimeSpan.FromSeconds(30));
                 await client.ConnectAsync(timeout.Token);
-                foreach (var mode in new[]
-                         {
-                             RuntimeMode.Expert,
-                             RuntimeMode.Expert,
-                             RuntimeMode.Expert
-                         })
+                foreach (var key in new[] { "first", "second", "third" })
                 {
                     captures.Add(await StartAndCompleteAsync(
                         client,
-                        mode,
-                        "initial",
+                        RuntimeMode.Expert,
+                        key,
                         timeout.Token));
                 }
 
@@ -164,13 +159,13 @@ public sealed class SessionResumeRecoveryTests
             }
 
             var continuedGsns = new List<long>();
-            foreach (var capture in captures)
+            foreach (var (capture, index) in captures.Select((capture, index) => (capture, index)))
             {
                 var previousLastGsn = resumeBySession[capture.SessionId].LastGsn;
                 var runId = await secondClient.StartExistingSessionRunAsync(
                     new ExistingSessionRunRequest(
                         capture.SessionId,
-                        $"resume-{capture.Mode}-continued",
+                        $"resume-{capture.Mode}-{index}-continued",
                         InputOverride: [new TextContentBlock("continue")]),
                     secondTimeout.Token);
                 var terminal = await ReadTerminalAsync(

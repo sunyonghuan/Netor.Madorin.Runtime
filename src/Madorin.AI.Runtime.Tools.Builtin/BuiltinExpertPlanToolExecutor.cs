@@ -58,10 +58,10 @@ public sealed class BuiltinExpertPlanToolExecutor : IToolExecutor
                 return Task.FromResult(CreateErrorResult(invocation, "Tool arguments must be a JSON object."));
             }
 
-            if (!root.TryGetProperty("title", out var titleElement)
+            if (!root.TryGetProperty("goal", out var titleElement)
                 || titleElement.ValueKind != JsonValueKind.String)
             {
-                return Task.FromResult(CreateErrorResult(invocation, "Missing or invalid 'title' parameter."));
+                return Task.FromResult(CreateErrorResult(invocation, "Missing or invalid 'goal' parameter."));
             }
 
             if (!root.TryGetProperty("steps", out var stepsElement)
@@ -77,9 +77,9 @@ public sealed class BuiltinExpertPlanToolExecutor : IToolExecutor
             }
 
             var stepCount = stepsElement.GetArrayLength();
-            if (stepCount == 0)
+            if (stepCount is < 2 or > 15)
             {
-                return Task.FromResult(CreateErrorResult(invocation, "Plan must contain at least one step."));
+                return Task.FromResult(CreateErrorResult(invocation, "Plan must contain 2-15 steps."));
             }
 
             // Validate each step has required fields
@@ -93,11 +93,18 @@ public sealed class BuiltinExpertPlanToolExecutor : IToolExecutor
                     return Task.FromResult(CreateErrorResult(invocation, $"Step {i} missing valid title."));
                 }
 
-                if (!step.TryGetProperty("description", out var stepDesc)
-                    || stepDesc.ValueKind != JsonValueKind.String
-                    || string.IsNullOrWhiteSpace(stepDesc.GetString()))
+                if (step.TryGetProperty("description", out var stepDesc)
+                    && (stepDesc.ValueKind != JsonValueKind.String
+                        || string.IsNullOrWhiteSpace(stepDesc.GetString())))
                 {
-                    return Task.FromResult(CreateErrorResult(invocation, $"Step {i} missing valid description."));
+                    return Task.FromResult(CreateErrorResult(invocation, $"Step {i} has an invalid description."));
+                }
+
+                if (step.TryGetProperty("agentName", out var agentName)
+                    && (agentName.ValueKind != JsonValueKind.String
+                        || string.IsNullOrWhiteSpace(agentName.GetString())))
+                {
+                    return Task.FromResult(CreateErrorResult(invocation, $"Step {i} has an invalid agentName."));
                 }
             }
 
@@ -105,11 +112,20 @@ public sealed class BuiltinExpertPlanToolExecutor : IToolExecutor
             {
                 writer.WriteStartObject();
                 writer.WriteBoolean("success", true);
-                writer.WriteString("title", title.Trim());
-                writer.WriteNumber("stepCount", stepCount);
-                writer.WriteString(
-                    "message",
-                    $"Plan '{title.Trim()}' with {stepCount} steps accepted. Expert orchestrator will create the plan.");
+                writer.WriteString("planId", "pending-orchestrator");
+                writer.WriteString("goal", title.Trim());
+                writer.WriteNumber("totalSteps", stepCount);
+                writer.WriteStartArray("steps");
+                for (var i = 0; i < stepCount; i++)
+                {
+                    writer.WriteStartObject();
+                    writer.WriteNumber("index", i);
+                    writer.WriteString("stepId", $"step-{i + 1}");
+                    writer.WriteString("title", stepsElement[i].GetProperty("title").GetString());
+                    writer.WriteString("status", "pending");
+                    writer.WriteEndObject();
+                }
+                writer.WriteEndArray();
                 writer.WriteEndObject();
             });
 
@@ -136,15 +152,11 @@ public sealed class BuiltinExpertPlanToolExecutor : IToolExecutor
             }
 
             if (!root.TryGetProperty("stepIndex", out var stepIndexElement)
-                || stepIndexElement.ValueKind != JsonValueKind.Number)
+                || stepIndexElement.ValueKind != JsonValueKind.Number
+                || !stepIndexElement.TryGetInt32(out var stepIndex)
+                || stepIndex < 0)
             {
-                return Task.FromResult(CreateErrorResult(invocation, "Missing or invalid 'stepIndex' parameter."));
-            }
-
-            var stepIndex = stepIndexElement.GetInt32();
-            if (stepIndex < 0)
-            {
-                return Task.FromResult(CreateErrorResult(invocation, "Step index must be non-negative."));
+                return Task.FromResult(CreateErrorResult(invocation, "Missing or invalid non-negative 'stepIndex' parameter."));
             }
 
             var outputJson = ToolJson.Write(writer =>
@@ -174,10 +186,9 @@ public sealed class BuiltinExpertPlanToolExecutor : IToolExecutor
         var outputJson = ToolJson.Write(writer =>
         {
             writer.WriteStartObject();
-            writer.WriteBoolean("success", false);
-            writer.WriteString(
-                "message",
-                "Get plan request accepted. Expert orchestrator will return the active plan.");
+            writer.WriteBoolean("success", true);
+            writer.WriteBoolean("hasPlan", false);
+            writer.WriteString("message", "Get plan request accepted. Expert orchestrator will return the active plan.");
             writer.WriteEndObject();
         });
 
@@ -199,15 +210,11 @@ public sealed class BuiltinExpertPlanToolExecutor : IToolExecutor
             }
 
             if (!root.TryGetProperty("stepIndex", out var stepIndexElement)
-                || stepIndexElement.ValueKind != JsonValueKind.Number)
+                || stepIndexElement.ValueKind != JsonValueKind.Number
+                || !stepIndexElement.TryGetInt32(out var stepIndex)
+                || stepIndex < 0)
             {
-                return Task.FromResult(CreateErrorResult(invocation, "Missing or invalid 'stepIndex' parameter."));
-            }
-
-            var stepIndex = stepIndexElement.GetInt32();
-            if (stepIndex < 0)
-            {
-                return Task.FromResult(CreateErrorResult(invocation, "Step index must be non-negative."));
+                return Task.FromResult(CreateErrorResult(invocation, "Missing or invalid non-negative 'stepIndex' parameter."));
             }
 
             if (!root.TryGetProperty("newStatus", out var statusElement)
@@ -229,6 +236,7 @@ public sealed class BuiltinExpertPlanToolExecutor : IToolExecutor
                 writer.WriteStartObject();
                 writer.WriteBoolean("success", false);
                 writer.WriteNumber("stepIndex", stepIndex);
+                writer.WriteString("oldStatus", "unknown");
                 writer.WriteString("newStatus", newStatus);
                 writer.WriteString(
                     "message",
