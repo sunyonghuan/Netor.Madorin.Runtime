@@ -1,4 +1,4 @@
 interface:
   display_name: "Madorin CLI"
-  short_description: "Operate and integrate Madorin Runtime CLI"
-  default_prompt: "Use $madorin-cli to operate or integrate the Madorin Runtime CLI."
+  short_description: "Operate the Expert-only Madorin Runtime CLI"
+  default_prompt: "Use $madorin-cli to operate or integrate the current Madorin Runtime CLI. Mode is expert. Prefer the matching platform publish under releases/Madorin-Cli."

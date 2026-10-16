@@ -6,20 +6,19 @@ Resolve the standard executable from the skill directory. Do not select a stale 
 
 | Location | Use |
 | --- | --- |
-| `skills/madorin-cli/bin/madorin-cli.exe` | Fixed skill executable entry point; publish output and its runtime dependencies belong in `skills/madorin-cli/bin/` |
+| `releases/Madorin-Cli/<rid>/madorin-cli/bin/` | Current platform publish. RIDs are `win-x64`, `linux-x64`, and `osx-arm64`. CLI, Provider workers, `providers.manifest.json`, and the SQLite native library belong here |
+| `skills/madorin-cli/bin/madorin-cli.exe` | Packaged Windows skill snapshot. Use it only when its `version` matches `MadorinCliVersion` |
 | `src/Madorin.AI.Runtime.Cli/` | CLI project source, commands, configuration, built-in tool wiring, and project-specific publishing inputs |
 | `src/Madorin.AI.Runtime.Cli/Commands/` | Command implementations; inspect when a help contract or behavior needs source-level confirmation |
 | `src/Madorin.AI.Runtime.Cli/Tools/` | CLI tool-related implementation source; not a user script directory |
-| `src/Madorin.AI.Runtime.Cli/bin/Debug/net10.0/madorin-cli.exe` | Development-only Debug output; do not use as the skill entry point |
-| `src/Madorin.AI.Runtime.Cli/bin/Release/net10.0/win-x64/native/madorin-cli.exe` | Development-only Native AOT output; do not use as the skill entry point |
-| `src/Madorin.AI.Runtime.Cli/publish/` | Project-level publish staging or packaging inputs; verify contents before use |
+| `src/Madorin.AI.Runtime.Cli/bin/` | Development build output; do not use as the skill entry point |
+| `build/madorin-cli.publish.ps1` | Publish entry. No argument publishes all three platforms; `win`, `linux`, `mac`, and `list` select or print platforms |
 | `tools/` | Repository engineering utilities; inspect each tool's own documentation before executing it |
-| `publish/` | Repository release and verification artifacts; do not treat every file as a distributable CLI |
 
-Invoke the skill-local executable during normal skill use:
+Invoke the current platform publish during normal repository use:
 
 ```powershell
-.\skills\madorin-cli\bin\madorin-cli.exe --help
+.\releases\Madorin-Cli\win-x64\madorin-cli\bin\madorin-cli.exe version --json
 ```
 
 Use a source invocation only during explicit development or troubleshooting:
@@ -28,7 +27,7 @@ Use a source invocation only during explicit development or troubleshooting:
 dotnet run --project .\src\Madorin.AI.Runtime.Cli --no-build -- --help
 ```
 
-The release pipeline owns publication into `skills/madorin-cli/bin/`. Do not make the Skill switch to any other output location. Verify the published program with `skills/madorin-cli/bin/madorin-cli.exe version --json` before relying on it.
+`build/madorin-cli.publish.ps1` writes each platform under `releases/Madorin-Cli/<rid>/`. It does not refresh `skills/madorin-cli/bin/`. Verify the chosen executable with `version --json` before relying on it. Provider workers are loaded from the CLI directory, or from `MADORIN_PROVIDER_DIR` when that variable is set.
 
 ## Runtime Data And Skill Sources
 
@@ -56,7 +55,7 @@ Use the `mcli_fs_*` tools only inside the workspace root and the effective Grant
 
 | Operation | Tool | Required permission |
 | --- | --- | --- |
-| Discover or inspect | `mcli_fs_inspect`, `mcli_fs_read`, `mcli_fs_search` | `filesystem.read` |
+| Discover or inspect | `mcli_fs_inspect`, `mcli_fs_list`, `mcli_fs_stat`, `mcli_fs_read`, `mcli_fs_search` | `filesystem.read` |
 | Create or update text | `mcli_fs_write` (`create`/`overwrite`/`append`/`mkdir`), `mcli_fs_edit`, `mcli_fs_copy` | `filesystem.write`; overwrite/append additionally require `overwrite` |
 | Move or remove | `mcli_fs_move`, `mcli_fs_delete` | `filesystem.write` and `filesystem.destructive` |
 
@@ -64,7 +63,9 @@ For text edits, read first, preserve the returned encoding and `expectedHash`, t
 
 ## Model Memory Tools
 
-`mcli_memory_read` and `mcli_memory_write` (`operation=append|update|delete`) operate only on `global` or `project` memory, never an arbitrary file path.
+`mcli_memory_read` and `mcli_memory_write` (`operation=append|update|delete`) operate only on `global` or `project` memory, never an arbitrary file path. The same mutations are also exposed as `mcli_memory_append`, `mcli_memory_update`, and `mcli_memory_delete`.
+
+Expert also exposes `mcli_delegate_agent`, `mcli_agent_job_*`, and `mcli_expert_*` plan tools. Use the live tool catalog from the Runtime instead of inventing tool ids.
 
 Read first and carry the returned `expectedHash` for every mutation. The content takes effect on the next Agent invocation, requires approval, and shares the Runtime's write lock with file modification. Re-read on a hash conflict; do not force an overwrite.
 

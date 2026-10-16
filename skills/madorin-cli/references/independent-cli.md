@@ -55,7 +55,8 @@ Rules:
 
 - `--input` and `--input-file` are mutually exclusive.
 - `--output-file` requires `--input` or `--input-file`.
-- `--mode` is `expert` by default; use `meeting` or `work` only after configuring enough standalone Agents.
+- `--mode` accepts `expert` or its alias `standalone`. The default is `expert`. `meeting` and `work` are removed.
+- Optional request controls are `--temperature`, `--top-p`, `--top-k`, `--max-tokens`, `--frequency-penalty`, `--presence-penalty`, `--seed`, repeatable `--stop`, and `--response-format text|json`.
 - Do not use `--json`, `--output-format json|jsonl`, or `--no-stream` while starting an interactive `run` without input.
 - Do not combine `--json` with a non-JSON `--output-format`.
 
@@ -68,14 +69,11 @@ Run `madorin` in the target workspace, or run `madorin run` without input. The f
 | selection | `/model [modelId]`, `/provider [providerId]`, `/agent [agentId]`, `/mode` |
 | session | `/session`, `/new`, `/resume [sessionId]`, `/history [n|all]`, `/export [path]` |
 | context | `/compact`, `/context`, `/tools` |
-| meeting | `/pause`, `/interrupt <text>` |
 | skill | `/skill <list\|show <name>\|refresh>` |
 | memory | `/memory [global|project|effective]`, `/remember <global|project>` |
 | utility | `/status`, `/clear`, `/cd [path]`, `/help [command]`, `/exit`, `/quit` |
 
-Selection changes affect the next turn only. Session mode cannot change in place; create a new Session for a different mode.
-
-**Meeting mode**: First Ctrl+C requests cooperative pause; second Ctrl+C hard-cancels. Use `/pause` to request pause explicitly, or `/interrupt <text>` to enqueue input for the next safe point. During a paused Meeting, the next message continues the session with Host recovery first.
+Selection changes affect the next turn only. `/mode` only displays the current mode. `/pause` and `/interrupt` are removed with Meeting mode.
 
 **Workspace switching**: Use `/cd [path]` to switch workspace in the REPL. The current session resets, but Provider/Model/Agent selection is preserved. Relative paths and `~` (home directory) are supported.
 
@@ -119,7 +117,7 @@ Session export accepts `markdown` (default), `txt`, or `jsonl`; include reasonin
 
 ```powershell
 # The server owns the workspace write lock until it stops.
-madorin serve --workspace <workspace> --instance runtime-1 --max-runs 4
+madorin serve --workspace <workspace> --instance runtime-1 --max-runs 4 --http-port 5080
 
 # Use a separately configured terminal to inspect or control the service.
 madorin ctl status --workspace <workspace> --instance runtime-1

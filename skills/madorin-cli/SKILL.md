@@ -9,21 +9,17 @@ Use the current CLI help and frozen command matrix. Do not infer commands, optio
 
 ## Select An Entry Point
 
-Use the skill-local executable as the standard entry point:
+Resolve the executable in this order:
 
-```text
-<skill-root>/bin/madorin-cli.exe
-```
+1. `releases/Madorin-Cli/<rid>/madorin-cli/bin/madorin-cli` (`.exe` on Windows) when `version --json` matches `MadorinCliVersion` in `Directory.Build.props`.
+2. `<skill-root>/bin/madorin-cli.exe` when that packaged binary is the same version.
+3. `dotnet run --project .\src\Madorin.AI.Runtime.Cli --no-build -- <command>` only while developing and no current publish exists.
 
-For this repository, the resolved path is `skills/madorin-cli/bin/madorin-cli.exe`. The release process supplies this directory; invoke that executable directly whenever it exists. Do not select a repository-level Debug or Release output as the normal execution target.
+Current publish RIDs are `win-x64`, `linux-x64`, and `osx-arm64`. Publish with `build/madorin-cli.publish.ps1`. Provider workers must sit in the same directory as the CLI. Do not use a Debug build, a project `bin/Release` output, or an older `skills/madorin-cli/bin` snapshot when a matching platform publish exists.
 
-Use the source invocation only for explicit development or troubleshooting when the skill-local executable has not been published:
+The only runtime mode is `expert`. `standalone` is an alias. `meeting` and `work` are removed.
 
-```powershell
-dotnet run --project .\src\Madorin.AI.Runtime.Cli --no-build -- <command> [options]
-```
-
-The documentation below uses `madorin` as an executable placeholder. Replace it with `skills/madorin-cli/bin/madorin-cli.exe` for normal skill use, or with the source command prefix only during development. First run `<executable> --help`; obtain local options with `<executable> <group> <command> --help`.
+The documentation below uses `madorin` as an executable placeholder. Replace it with the resolved executable. First run `<executable> --help`; obtain local options with `<executable> <group> <command> --help`.
 
 ## Standalone CLI
 
@@ -48,7 +44,7 @@ Read [Host Integration](references/host-integration.md) for APIs, C# setup, call
 ## Resources, Scripts, And Executables
 
 - Treat this package as repository source at `skills/madorin-cli/`.
-- Use `skills/madorin-cli/bin/madorin-cli.exe` as the skill's fixed executable path. The `bin/` directory is reserved for the CLI publish output and its runtime dependencies.
+- Prefer `releases/Madorin-Cli/<rid>/madorin-cli/bin/` for the current CLI and Provider workers. `skills/madorin-cli/bin/` is the packaged Windows snapshot and can lag the source version.
 - Runtime discovers Skills only from `<workspace>/.madorin/skills/` and `~/.madorin/skills/`. Deploy this directory to one of those sources, then run `madorin skill validate` and `madorin skill refresh` when Runtime loading is required.
 - Do not edit `<workspace>/.madorin/state.db`, `messages/`, `blobs/`, `checkpoints/`, or instance files directly. Use `session`, `db`, `storage`, `ctl`, and the Client SDK.
 - File, memory, HTTP, process, and Skill scripts each require authorization. Put executable Skill content only in `scripts/`; it never bypasses Runtime policies.
