@@ -2,13 +2,12 @@
 # Madorin AI CLI Native AOT publish script
 
 param(
-    [Parameter(Position = 0)]
-    [string]$Target = "",
+    [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
+    [string[]]$Target,
     [switch]$Rebuild,
     [switch]$NoBump,
     [switch]$SkipProviders,
-    [ValidateSet("win-x64", "win-arm64", "linux-x64", "linux-arm64", "osx-x64", "osx-arm64")]
-    [string]$Rid = "win-x64",
+    [string]$Rid = "",
     [ValidateSet("patch", "minor", "major")]
     [string]$Bump = "patch"
 )
@@ -44,19 +43,32 @@ $ProviderAbbreviations = @{
     'ollama' = 'ollama'
 }
 
+$PlatformCatalog = @(
+    [pscustomobject]@{ Name = 'win'; Aliases = @('win', 'windows'); Rid = 'win-x64'; Note = 'Windows x64' }
+    [pscustomobject]@{ Name = 'linux'; Aliases = @('linux'); Rid = 'linux-x64'; Note = 'Linux x64 (glibc 2.35)' }
+    [pscustomobject]@{ Name = 'mac'; Aliases = @('mac', 'osx', 'macos'); Rid = 'osx-arm64'; Note = 'macOS Apple Silicon' }
+)
+
 function Show-PublishHelp {
     Write-Host ""
     Write-Host "Madorin CLI Publish Script" -ForegroundColor Cyan
     Write-Host "========================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Usage:" -ForegroundColor Yellow
-    Write-Host "  .\madorin-cli.publish.ps1 [target]" -ForegroundColor White
+    Write-Host "  .\madorin-cli.publish.ps1 [platform|target]" -ForegroundColor White
     Write-Host ""
-    Write-Host "Available publish targets:" -ForegroundColor Yellow
+    Write-Host "Platforms:" -ForegroundColor Yellow
+    Write-Host "  (none)                   - Publish win, linux, and mac" -ForegroundColor White
+    Write-Host "  win (windows)            - Windows x64           -> releases/Madorin-Cli/win-x64" -ForegroundColor White
+    Write-Host "  linux                    - Linux x64             -> releases/Madorin-Cli/linux-x64" -ForegroundColor White
+    Write-Host "  mac (osx, macos)         - macOS Apple Silicon   -> releases/Madorin-Cli/osx-arm64" -ForegroundColor White
+    Write-Host "  list, help               - Print this list" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Content targets (optional, comma-separated, can follow a platform):" -ForegroundColor Yellow
     Write-Host "  cli (c, 主程序)           - Publish CLI only" -ForegroundColor White
-    Write-Host "  all (a, 全部)            - Publish everything (default)" -ForegroundColor White
+    Write-Host "  all (a, 全部)            - Publish CLI and every provider" -ForegroundColor White
     Write-Host ""
-    Write-Host "Available providers (specify one or more, comma-separated):" -ForegroundColor Yellow
+    Write-Host "Providers:" -ForegroundColor Yellow
     Write-Host "  openai (o, oa)           - OpenAI" -ForegroundColor White
     Write-Host "  anthropic (ant, a)       - Anthropic" -ForegroundColor White
     Write-Host "  openai-compatible (oc)   - OpenAI Compatible" -ForegroundColor White
@@ -69,68 +81,113 @@ function Show-PublishHelp {
     Write-Host "  ollama (ol)              - Ollama" -ForegroundColor White
     Write-Host ""
     Write-Host "Examples:" -ForegroundColor Yellow
-    Write-Host "  .\madorin-cli.publish.ps1                    # 发布全部" -ForegroundColor Green
-    Write-Host "  .\madorin-cli.publish.ps1 cli                # 只发布 CLI" -ForegroundColor Green
-    Write-Host "  .\madorin-cli.publish.ps1 c                  # 同上（缩写）" -ForegroundColor Green
-    Write-Host "  .\madorin-cli.publish.ps1 openai             # 只发布 openai provider" -ForegroundColor Green
-    Write-Host "  .\madorin-cli.publish.ps1 o                  # 同上（缩写）" -ForegroundColor Green
-    Write-Host "  .\madorin-cli.publish.ps1 openai,anthropic   # 发布多个 providers" -ForegroundColor Green
-    Write-Host "  .\madorin-cli.publish.ps1 o,ant              # 同上（缩写）" -ForegroundColor Green
-    Write-Host "  .\madorin-cli.publish.ps1 all                # 发布全部" -ForegroundColor Green
+    Write-Host "  .\madorin-cli.publish.ps1                    # 三个平台，CLI 和全部 provider" -ForegroundColor Green
+    Write-Host "  .\madorin-cli.publish.ps1 win                # 只发 Windows" -ForegroundColor Green
+    Write-Host "  .\madorin-cli.publish.ps1 linux,mac          # Linux 和 macOS" -ForegroundColor Green
+    Write-Host "  .\madorin-cli.publish.ps1 win cli            # Windows，只发 CLI" -ForegroundColor Green
+    Write-Host "  .\madorin-cli.publish.ps1 list               # 打印可发布平台" -ForegroundColor Green
     Write-Host ""
     Write-Host "Additional options:" -ForegroundColor Yellow
     Write-Host "  -Rebuild                 - Clean and rebuild" -ForegroundColor White
     Write-Host "  -NoBump                  - Don't bump version" -ForegroundColor White
-    Write-Host "  -Rid <rid>               - Target runtime (default: win-x64)" -ForegroundColor White
+    Write-Host "  -SkipProviders           - Publish CLI only" -ForegroundColor White
+    Write-Host "  -Rid <rid>               - Override the platform RID" -ForegroundColor White
     Write-Host "  -Bump <patch|minor|major> - Version bump type (default: patch)" -ForegroundColor White
     Write-Host ""
     exit 0
 }
 
-function Resolve-PublishTarget {
-    param([string]$InputTarget)
+function Resolve-PlatformToken {
+    param([string]$Token)
 
-    if ([string]::IsNullOrWhiteSpace($InputTarget) -or $InputTarget -eq 'all' -or $InputTarget -eq 'a' -or $InputTarget -eq '全部') {
-        return @{ Type = 'all'; Providers = @() }
+    $normalized = $Token.ToLowerInvariant()
+    foreach ($platform in $PlatformCatalog) {
+        if ($platform.Aliases -contains $normalized -or $platform.Rid -eq $normalized) {
+            return $platform.Rid
+        }
     }
 
-    if ($InputTarget -eq 'list') {
+    return $null
+}
+
+function Resolve-PublishRequest {
+    param(
+        [string]$InputTarget,
+        [string]$ExplicitRid
+    )
+
+    $tokens = @()
+    if (-not [string]::IsNullOrWhiteSpace($InputTarget)) {
+        $tokens = @($InputTarget -split '[,\s]+' | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    }
+
+    if ($tokens.Count -eq 1 -and @('list', 'help', '-h', '--help', '/?') -contains $tokens[0].ToLowerInvariant()) {
         Show-PublishHelp
     }
 
-    if ($InputTarget -eq 'cli' -or $InputTarget -eq 'c' -or $InputTarget -eq '主程序') {
-        return @{ Type = 'cli'; Providers = @() }
-    }
+    $platforms = [System.Collections.Generic.List[string]]::new()
+    $providers = [System.Collections.Generic.List[string]]::new()
+    $content = 'all'
 
-    $providerNames = $InputTarget -split ',' | ForEach-Object { $_.Trim() }
-    $resolvedProviders = @()
-
-    foreach ($name in $providerNames) {
-        if ([string]::IsNullOrWhiteSpace($name)) {
+    foreach ($token in $tokens) {
+        $normalized = $token.ToLowerInvariant()
+        $platformRid = Resolve-PlatformToken -Token $normalized
+        if ($null -ne $platformRid) {
+            if (-not $platforms.Contains($platformRid)) {
+                $platforms.Add($platformRid)
+            }
             continue
         }
 
-        $normalized = $name.ToLowerInvariant()
-        if ($ProviderAbbreviations.ContainsKey($normalized)) {
-            $slug = $ProviderAbbreviations[$normalized]
-            if ($resolvedProviders -notcontains $slug) {
-                $resolvedProviders += $slug
-            }
-        } else {
-            Write-Host "Unknown provider: '$name'. Use 'list' to see available providers." -ForegroundColor Red
-            exit 1
+        if ($normalized -eq 'all' -or $normalized -eq 'a' -or $normalized -eq '全部') {
+            $content = 'all'
+            continue
         }
-    }
 
-    if ($resolvedProviders.Count -eq 0) {
-        Write-Host "No valid providers specified. Use 'list' to see available providers." -ForegroundColor Red
+        if ($normalized -eq 'cli' -or $normalized -eq 'c' -or $normalized -eq '主程序') {
+            $content = 'cli'
+            continue
+        }
+
+        if ($ProviderAbbreviations.ContainsKey($normalized)) {
+            $content = 'providers'
+            $slug = $ProviderAbbreviations[$normalized]
+            if (-not $providers.Contains($slug)) {
+                $providers.Add($slug)
+            }
+            continue
+        }
+
+        Write-Host "Unknown publish argument: '$token'. Use 'list' to see platforms and providers." -ForegroundColor Red
         exit 1
     }
 
-    return @{ Type = 'providers'; Providers = $resolvedProviders }
+    if (-not [string]::IsNullOrWhiteSpace($ExplicitRid)) {
+        $explicitPlatform = Resolve-PlatformToken -Token $ExplicitRid
+        if ($null -eq $explicitPlatform) {
+            Write-Host "Unsupported RID '$ExplicitRid'. Use 'list' to see platforms." -ForegroundColor Red
+            exit 1
+        }
+
+        $platforms = [System.Collections.Generic.List[string]]::new()
+        $platforms.Add($explicitPlatform)
+    }
+
+    if ($platforms.Count -eq 0) {
+        foreach ($platform in $PlatformCatalog) {
+            $platforms.Add($platform.Rid)
+        }
+    }
+
+    return @{
+        Type = $content
+        Providers = @($providers)
+        Rids = @($platforms)
+    }
 }
 
-$PublishConfig = Resolve-PublishTarget -InputTarget $Target
+$TargetText = if ($null -eq $Target -or $Target.Count -eq 0) { '' } else { $Target -join ' ' }
+$PublishConfig = Resolve-PublishRequest -InputTarget $TargetText -ExplicitRid $Rid
 
 $BuildDir = [System.IO.Path]::GetFullPath($PSScriptRoot)
 $SolutionDir = [System.IO.Path]::GetFullPath((Join-Path $BuildDir '..'))
@@ -146,14 +203,13 @@ $ReleasesDir = Join-Path $SolutionDir 'releases'
 $OutputDir = Join-Path $ReleasesDir $BrandReleaseDirectoryName
 $PackagesDir = Join-Path $ReleasesDir $PackagesDirectoryName
 $CliName = 'madorin-cli'
-$exeFileName = $CliName
-if ($Rid.StartsWith('win')) { $exeFileName = "$CliName.exe" }
 $PackageName = 'Madorin.Cli'
 $SkillDirectoryName = 'madorin-cli'
 $SkillSourceDir = Join-Path $SolutionDir "skills/$SkillDirectoryName"
-$SkillOutputDir = Join-Path $OutputDir $SkillDirectoryName
-$BinDir = Join-Path $SkillOutputDir 'bin'
 $ProviderWorkersManifestFile = Join-Path $BuildDir 'provider-workers.json'
+$script:CurrentRid = ''
+$script:SkillOutputDir = ''
+$script:BinDir = ''
 
 if (-not (Test-Path -LiteralPath $SolutionFile -PathType Leaf)) {
     throw "Solution file was not found: $SolutionFile"
@@ -310,7 +366,7 @@ function Invoke-DotNetPublishWithRetry {
         'publish',
         $ProjectPath,
         '-c', 'Release',
-        '-r', $Rid,
+        '-r', $script:CurrentRid,
         '--self-contained', 'true',
         '-o', $OutputPath,
         '--disable-build-servers',
@@ -321,7 +377,8 @@ function Invoke-DotNetPublishWithRetry {
         "-p:InformationalVersion=$NewVersion",
         "-p:MadorinRuntimeContractsVersion=$NewVersion",
         "-p:RestoreConfigFile=$ReleaseNuGetConfigFile",
-        "-p:RestorePackagesPath=$RestorePackagesDir"
+        "-p:RestorePackagesPath=$RestorePackagesDir",
+        '-p:UsePublishAotCross=true'
     )
     if ($Rebuild) {
         $publishArgs += '-t:Rebuild;Publish'
@@ -393,7 +450,7 @@ function Get-ProviderWorkerFileName {
         [string]$Slug
     )
 
-    if ($Rid.StartsWith('win')) {
+    if ($script:CurrentRid.StartsWith('win')) {
         return "madorin-provider-$Slug.exe"
     }
 
@@ -432,7 +489,7 @@ function Publish-ProviderWorkers {
         Write-Host "  [$index/$($workersToPublish.Count)] $($worker.protocol) ($($worker.slug))" -ForegroundColor Cyan
         Invoke-DotNetPublishWithRetry `
             -ProjectPath $projectPath `
-            -OutputPath $BinDir `
+            -OutputPath $script:BinDir `
             -Name "Provider $($worker.slug)"
 
         if ($LASTEXITCODE -ne 0) {
@@ -440,7 +497,7 @@ function Publish-ProviderWorkers {
             exit $LASTEXITCODE
         }
 
-        $workerFile = Join-Path $BinDir (Get-ProviderWorkerFileName -Slug $worker.slug)
+        $workerFile = Join-Path $script:BinDir (Get-ProviderWorkerFileName -Slug $worker.slug)
         if (-not (Test-Path -LiteralPath $workerFile -PathType Leaf)) {
             throw "Provider worker output was not found: $workerFile"
         }
@@ -474,11 +531,11 @@ function Write-ProvidersRuntimeManifest {
 
     $manifest = [pscustomobject]@{
         version = $NewVersion
-        rid     = $Rid
+        rid     = $script:CurrentRid
         workers = $entries
     }
 
-    $manifestPath = Join-Path $BinDir 'providers.manifest.json'
+    $manifestPath = Join-Path $script:BinDir 'providers.manifest.json'
     $json = $manifest | ConvertTo-Json -Depth 5
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($manifestPath, $json, $utf8NoBom)
@@ -490,6 +547,7 @@ Write-Host "  Madorin AI CLI Native AOT Publish" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Target:    $($PublishConfig.Type)" -ForegroundColor Yellow
+Write-Host "Platforms: $($PublishConfig.Rids -join ', ')" -ForegroundColor Yellow
 if ($PublishConfig.Providers.Count -gt 0) {
     Write-Host "Providers: $($PublishConfig.Providers -join ', ')" -ForegroundColor Yellow
 }
@@ -497,7 +555,7 @@ Write-Host "Project:   $ProjectFile"
 Write-Host "Contracts: $ContractsProjectFile"
 Write-Host "Client:    $ClientProjectFile"
 Write-Host "Skill:     $SkillSourceDir"
-Write-Host "Output:    $SkillOutputDir"
+Write-Host "Output:    $OutputDir\<rid>\$SkillDirectoryName"
 Write-Host "Packages:  $PackagesDir"
 Write-Host "Version:   $NewVersion"
 Write-Host ""
@@ -525,17 +583,10 @@ foreach ($ext in $cleanExts) {
         Remove-Item -Force
 }
 
-Write-Host "[1/7] Copying skill files..." -ForegroundColor Green
-
-if (Test-Path $SkillOutputDir) {
-    Remove-Item $SkillOutputDir -Recurse -Force
-}
-Copy-Item -Path $SkillSourceDir -Destination $SkillOutputDir -Recurse -Force
-
-if (Test-Path $BinDir) {
-    Get-ChildItem -Path $BinDir -Force | Remove-Item -Recurse -Force
-} else {
-    New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+$legacySkillOutputDir = Join-Path $OutputDir $SkillDirectoryName
+if (Test-Path -LiteralPath $legacySkillOutputDir -PathType Container) {
+    Write-Host "[*] Removing legacy shared output: $legacySkillOutputDir" -ForegroundColor Yellow
+    Remove-Item -LiteralPath $legacySkillOutputDir -Recurse -Force
 }
 
 if (Test-Path -LiteralPath $RestorePackagesDir -PathType Container) {
@@ -597,37 +648,168 @@ if (-not (Test-Path -LiteralPath $contractsPackagePath -PathType Leaf)) {
     throw "Expected Contracts NuGet package was not found: $contractsPackagePath"
 }
 
-if ($shouldPublishCli) {
-    Write-Host "[3/7] Publishing CLI (Release | $Rid | AOT)..." -ForegroundColor Green
+function Initialize-PlatformOutput {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PlatformRid
+    )
 
-    Invoke-DotNetPublishWithRetry `
-        -ProjectPath $ProjectFile `
-        -OutputPath $BinDir `
-        -Name 'CLI'
+    $script:CurrentRid = $PlatformRid
+    $platformDir = Join-Path $OutputDir $PlatformRid
+    $script:SkillOutputDir = Join-Path $platformDir $SkillDirectoryName
+    $script:BinDir = Join-Path $script:SkillOutputDir 'bin'
 
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "CLI publish failed, exit code: $LASTEXITCODE" -ForegroundColor Red
-        exit $LASTEXITCODE
+    if (Test-Path -LiteralPath $script:SkillOutputDir) {
+        Remove-Item -LiteralPath $script:SkillOutputDir -Recurse -Force
     }
-} else {
-    Write-Host "[3/7] Skipping CLI (target: $($PublishConfig.Type))." -ForegroundColor Yellow
+
+    Copy-Item -Path $SkillSourceDir -Destination $script:SkillOutputDir -Recurse -Force
+    if (Test-Path -LiteralPath $script:BinDir) {
+        Get-ChildItem -LiteralPath $script:BinDir -Force | Remove-Item -Recurse -Force
+    } else {
+        New-Item -ItemType Directory -Path $script:BinDir -Force | Out-Null
+    }
 }
 
-if ($shouldPublishProviders) {
-    if ($SkipProviders) {
-        Write-Host "[4/7] Skipping provider workers (-SkipProviders)." -ForegroundColor Yellow
-    } else {
-        Write-Host "[4/7] Publishing provider workers (Release | $Rid | AOT)..." -ForegroundColor Green
-        if ($PublishConfig.Type -eq 'providers') {
-            Publish-ProviderWorkers -ProviderFilter $PublishConfig.Providers
-        } else {
-            Publish-ProviderWorkers
+function Assert-NativePublishOutput {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PlatformRid
+    )
+
+    $unexpected = @()
+    if ($PlatformRid.StartsWith('linux')) {
+        $unexpected = @(Get-ChildItem -LiteralPath $script:BinDir -File -Filter '*.dll' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match 'e_sqlite3' })
+        $expected = Join-Path $script:BinDir 'libe_sqlite3.so'
+        if (-not (Test-Path -LiteralPath $expected -PathType Leaf)) {
+            throw "Linux publish is missing libe_sqlite3.so: $expected"
+        }
+    } elseif ($PlatformRid.StartsWith('osx')) {
+        $unexpected = @(Get-ChildItem -LiteralPath $script:BinDir -File -Filter '*.dll' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match 'e_sqlite3' })
+        $expected = @(Get-ChildItem -LiteralPath $script:BinDir -File -Filter 'libe_sqlite3*.dylib' -ErrorAction SilentlyContinue)
+        if ($expected.Count -eq 0) {
+            throw "macOS publish is missing libe_sqlite3 dylib under: $script:BinDir"
+        }
+    } elseif ($PlatformRid.StartsWith('win')) {
+        $expected = Join-Path $script:BinDir 'e_sqlite3.dll'
+        if (-not (Test-Path -LiteralPath $expected -PathType Leaf)) {
+            throw "Windows publish is missing e_sqlite3.dll: $expected"
         }
     }
-} else {
-    Write-Host "[4/7] Skipping provider workers (target: cli)." -ForegroundColor Yellow
+
+    if ($unexpected.Count -gt 0) {
+        $names = ($unexpected | ForEach-Object { $_.Name }) -join ', '
+        throw "Publish for $PlatformRid contains the wrong SQLite native library: $names"
+    }
 }
 
+$platformIndex = 0
+foreach ($platformRid in $PublishConfig.Rids) {
+    $platformIndex++
+    Write-Host ""
+    Write-Host "======== Platform $platformIndex/$($PublishConfig.Rids.Count): $platformRid ========" -ForegroundColor Cyan
+    Initialize-PlatformOutput -PlatformRid $platformRid
+    Write-Host "[1/7] Copied skill files to $script:SkillOutputDir" -ForegroundColor Green
+
+    if ($shouldPublishCli) {
+        Write-Host "[3/7] Publishing CLI (Release | $platformRid | AOT)..." -ForegroundColor Green
+
+        Invoke-DotNetPublishWithRetry `
+            -ProjectPath $ProjectFile `
+            -OutputPath $script:BinDir `
+            -Name 'CLI'
+
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "CLI publish failed, exit code: $LASTEXITCODE" -ForegroundColor Red
+            exit $LASTEXITCODE
+        }
+    } else {
+        Write-Host "[3/7] Skipping CLI (target: $($PublishConfig.Type))." -ForegroundColor Yellow
+    }
+
+    if ($shouldPublishProviders) {
+        if ($SkipProviders) {
+            Write-Host "[4/7] Skipping provider workers (-SkipProviders)." -ForegroundColor Yellow
+        } else {
+            Write-Host "[4/7] Publishing provider workers (Release | $platformRid | AOT)..." -ForegroundColor Green
+            if ($PublishConfig.Type -eq 'providers') {
+                Publish-ProviderWorkers -ProviderFilter $PublishConfig.Providers
+            } else {
+                Publish-ProviderWorkers
+            }
+        }
+    } else {
+        Write-Host "[4/7] Skipping provider workers (target: cli)." -ForegroundColor Yellow
+    }
+
+    Write-Host "[6/7] Cleaning extra files..." -ForegroundColor Green
+    $junkExts = @('*.pdb', '*.xml', '*.deps.json', '*.runtimeconfig.dev.json')
+    foreach ($ext in $junkExts) {
+        Get-ChildItem -Path $script:BinDir -Filter $ext -File -ErrorAction SilentlyContinue |
+            Remove-Item -Force
+    }
+
+    if ($shouldPublishCli) {
+        $exeFileName = if ($platformRid.StartsWith('win')) { "$CliName.exe" } else { $CliName }
+        $exePath = Join-Path $script:BinDir $exeFileName
+        if (Test-Path $exePath) {
+            $size = [math]::Round((Get-Item $exePath).Length / 1MB, 2)
+            Write-Host ""
+            Write-Host "CLI published." -ForegroundColor Green
+            Write-Host "  Path: $exePath"
+            Write-Host "  Size: ${size} MB"
+        } else {
+            throw "CLI output was not found: $exePath"
+        }
+    }
+
+    if ($shouldPublishProviders -and -not $SkipProviders) {
+        if ($PublishConfig.Type -eq 'providers') {
+            Write-ProvidersRuntimeManifest -ProviderFilter $PublishConfig.Providers
+        } else {
+            Write-ProvidersRuntimeManifest
+        }
+    }
+
+    if ($shouldPublishCli) {
+        Assert-NativePublishOutput -PlatformRid $platformRid
+    }
+
+    if (-not $platformRid.StartsWith('win') -and (Get-Command chmod -ErrorAction SilentlyContinue)) {
+        Get-ChildItem -Path $script:BinDir -File -ErrorAction SilentlyContinue |
+            Where-Object { [string]::IsNullOrEmpty($_.Extension) } |
+            ForEach-Object {
+                & chmod 755 -- $_.FullName
+            }
+    }
+
+    if ($shouldPublishCli) {
+        Write-Host "[7/7] Packaging CLI to zip..." -ForegroundColor Green
+
+        $zipFileName = "$PackageName-v$NewVersion-$platformRid.zip"
+        $hashFileName = "$PackageName-v$NewVersion-$platformRid.sha256"
+        $zipPath = Join-Path $ReleasesDir $zipFileName
+        $hashPath = Join-Path $ReleasesDir $hashFileName
+
+        if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+        if (Test-Path $hashPath) { Remove-Item $hashPath -Force }
+
+        Compress-Archive -Path $script:SkillOutputDir -DestinationPath $zipPath -CompressionLevel Optimal
+        $hash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        "$hash *$zipFileName" | Set-Content -Path $hashPath -Encoding Ascii
+
+        $zipSizeMb = [math]::Round((Get-Item $zipPath).Length / 1MB, 2)
+        Write-Host "  Zip:     $zipPath" -ForegroundColor Cyan
+        Write-Host "  Size:    ${zipSizeMb} MB" -ForegroundColor Cyan
+        Write-Host "  SHA256:  $hashPath" -ForegroundColor Cyan
+    } else {
+        Write-Host "[7/7] Skipping packaging (target: $($PublishConfig.Type))." -ForegroundColor Yellow
+    }
+}
+
+Write-Host ""
 Write-Host "[5/7] Packing Client NuGet package (Release | v$NewVersion)..." -ForegroundColor Green
 
 Invoke-DotNetPackWithRetry `
@@ -650,73 +832,7 @@ foreach ($packagePath in $expectedPackages) {
     Write-Host "  Package: $packagePath (${packageSizeKb} KB)" -ForegroundColor Cyan
 }
 
-Write-Host "[6/7] Cleaning extra files..." -ForegroundColor Green
-$junkExts = @('*.pdb', '*.xml', '*.deps.json', '*.runtimeconfig.dev.json')
-foreach ($ext in $junkExts) {
-    Get-ChildItem -Path $BinDir -Filter $ext -File -ErrorAction SilentlyContinue |
-        Remove-Item -Force
-}
-
-if ($shouldPublishCli) {
-    $exePath = Join-Path $BinDir $exeFileName
-    if (Test-Path $exePath) {
-        $size = [math]::Round((Get-Item $exePath).Length / 1MB, 2)
-        Write-Host ""
-        Write-Host "CLI published." -ForegroundColor Green
-        Write-Host "  Path: $exePath"
-        Write-Host "  Size: ${size} MB"
-    } else {
-        Write-Host "Warning: $exeFileName was not found. Check publish output." -ForegroundColor Yellow
-    }
-}
-
-if ($shouldPublishProviders -and -not $SkipProviders) {
-    if ($PublishConfig.Type -eq 'providers') {
-        Write-ProvidersRuntimeManifest -ProviderFilter $PublishConfig.Providers
-    } else {
-        Write-ProvidersRuntimeManifest
-    }
-}
-
-if (-not $Rid.StartsWith('win') -and (Get-Command chmod -ErrorAction SilentlyContinue)) {
-    Get-ChildItem -Path $BinDir -File -ErrorAction SilentlyContinue |
-        Where-Object { [string]::IsNullOrEmpty($_.Extension) } |
-        ForEach-Object {
-            & chmod 755 -- $_.FullName
-        }
-}
-
-if ($shouldPublishCli) {
-    Write-Host "[7/7] Packaging CLI to zip..." -ForegroundColor Green
-
-    $zipFileName = "$PackageName-v$NewVersion-$Rid.zip"
-    $hashFileName = "$PackageName-v$NewVersion-$Rid.sha256"
-    $zipPath = Join-Path $ReleasesDir $zipFileName
-    $hashPath = Join-Path $ReleasesDir $hashFileName
-
-    if (-not (Test-Path $ReleasesDir)) {
-        New-Item -ItemType Directory -Path $ReleasesDir -Force | Out-Null
-    }
-
-    if (Test-Path $SkillOutputDir) {
-        if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-        if (Test-Path $hashPath) { Remove-Item $hashPath -Force }
-
-        Compress-Archive -Path $SkillOutputDir -DestinationPath $zipPath -CompressionLevel Optimal
-        $hash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        "$hash *$zipFileName" | Set-Content -Path $hashPath -Encoding Ascii
-
-        $zipSizeMb = [math]::Round((Get-Item $zipPath).Length / 1MB, 2)
-        Write-Host "  Zip:     $zipPath" -ForegroundColor Cyan
-        Write-Host "  Size:    ${zipSizeMb} MB" -ForegroundColor Cyan
-        Write-Host "  SHA256:  $hashPath" -ForegroundColor Cyan
-    } else {
-        Write-Host "Warning: Skill output directory was not found: $SkillOutputDir. Skipping package." -ForegroundColor Yellow
-    }
-} else {
-    Write-Host "[7/7] Skipping packaging (target: $($PublishConfig.Type))." -ForegroundColor Yellow
-}
-
 Write-Host ""
 Write-Host "Publish completed successfully!" -ForegroundColor Green
+Write-Host "Platforms: $($PublishConfig.Rids -join ', ')" -ForegroundColor Green
 Write-Host ""

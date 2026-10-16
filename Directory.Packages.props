@@ -1,7 +1,7 @@
 <Project>
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
-    <MadorinRuntimeContractsVersion>0.1.69</MadorinRuntimeContractsVersion>
+    <MadorinRuntimeContractsVersion>0.1.72</MadorinRuntimeContractsVersion>
   </PropertyGroup>
 
   <ItemGroup>
@@ -14,6 +14,7 @@
     <PackageVersion Include="Microsoft.Extensions.Http" Version="10.0.8" />
     <PackageVersion Include="JsonSchema.Net" Version="8.0.5" />
     <PackageVersion Include="MSTest" Version="4.0.2" />
+    <PackageVersion Include="PublishAotCross.Tools" Version="1.0.2.13" />
     <PackageVersion Include="Netor.Anthropic.Minimal" Version="0.1.5" />
     <PackageVersion Include="Netor.Anthropic.Minimal.Extensions" Version="0.1.5" />
     <PackageVersion Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />

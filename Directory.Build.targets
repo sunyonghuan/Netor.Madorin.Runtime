@@ -10,4 +10,19 @@
     <DebugType>none</DebugType>
     <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>
+
+  <!-- 发布脚本传入 UsePublishAotCross 时引入交叉编译工具链。条件不能再要求 RuntimeIdentifier，否则 restore 阶段还没有 RID，包不会进入资源文件。 -->
+  <ItemGroup Condition="'$(UsePublishAotCross)' == 'true'">
+    <PackageReference Include="PublishAotCross.Tools">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <PropertyGroup Condition="'$(UsePublishAotCross)' == 'true'">
+    <PublishAotCrossDebug Condition="'$(PublishAotCrossDebug)' == ''">false</PublishAotCrossDebug>
+    <!-- 宿主与目标相同的时候继续用本机工具链，交叉 RID 才走包内 Zig/xwin。 -->
+    <AotPreferCustom Condition="'$(RuntimeIdentifier)' == '$(NETCoreSdkPortableRuntimeIdentifier)'">false</AotPreferCustom>
+    <GlibcVersion Condition="$(RuntimeIdentifier.StartsWith('linux-')) and !$(RuntimeIdentifier.Contains('musl')) and '$(GlibcVersion)' == ''">2.35</GlibcVersion>
+  </PropertyGroup>
 </Project>

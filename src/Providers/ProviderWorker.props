@@ -26,5 +26,6 @@
 
   <PropertyGroup>
     <Description>$(AssemblyName) $(WorkerProtocolDisplayName) Provider 工作进程</Description>
+    <UsePublishAotCross>true</UsePublishAotCross>
   </PropertyGroup>
 </Project>

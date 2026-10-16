@@ -34,6 +34,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <PublishAot>true</PublishAot>
+    <UsePublishAotCross>true</UsePublishAotCross>
     <InvariantGlobalization>true</InvariantGlobalization>
     <UseAgentFrameworkRuntimeDirectives>true</UseAgentFrameworkRuntimeDirectives>
     <!-- CLI no longer references Provider OpenAI; keep Skills + Extensions.AI roots only. -->

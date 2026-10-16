@@ -9,14 +9,16 @@ DEFAULT_RID="${MADORIN_PUBLISH_DEFAULT_RID:-linux-x64}"
 RID_REGEX="${MADORIN_PUBLISH_RID_REGEX:-^(linux-x64|linux-arm64)$}"
 HASH_CMD="${MADORIN_PUBLISH_HASH_CMD:-sha256sum}"
 
-RID="$DEFAULT_RID"
+RID=""
 REBUILD=0
 NO_BUMP=0
 BUMP=patch
 SKIP_PROVIDERS=0
+POSITIONAL=()
 
 usage() {
-  echo "Usage: $0 [--rid linux-x64|linux-arm64] [--rebuild] [--no-bump] [--bump patch|minor|major] [--skip-providers]" >&2
+  echo "Usage: $0 [linux|win|mac|list] [--rid linux-x64] [--rebuild] [--no-bump] [--bump patch|minor|major] [--skip-providers]" >&2
+  echo "No platform argument publishes linux-x64. Pass win, linux, or mac to select platforms when pwsh is available." >&2
 }
 
 while [[ $# -gt 0 ]]; do
@@ -24,6 +26,11 @@ while [[ $# -gt 0 ]]; do
     --rid)
       RID="${2:-}"
       shift 2
+      ;;
+    --)
+      shift
+      POSITIONAL+=("$@")
+      break
       ;;
     --rebuild)
       REBUILD=1
@@ -46,14 +53,13 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     *)
-      echo "Unknown argument: $1" >&2
-      usage
-      exit 1
+      POSITIONAL+=("$1")
+      shift
       ;;
   esac
 done
 
-if [[ ! "$RID" =~ $RID_REGEX ]]; then
+if [[ -n "$RID" && ! "$RID" =~ $RID_REGEX ]]; then
   echo "Unsupported RID '$RID'." >&2
   exit 1
 fi
@@ -69,7 +75,16 @@ if [[ ! -f "$PS1" ]]; then
 fi
 
 if command -v pwsh >/dev/null 2>&1; then
-  pwsh_args=(-NoProfile -File "$PS1" -Rid "$RID" -Bump "$BUMP")
+  if [[ ${#POSITIONAL[@]} -eq 0 && -z "$RID" ]]; then
+    POSITIONAL=("linux")
+  fi
+  pwsh_args=(-NoProfile -File "$PS1" -Bump "$BUMP")
+  if [[ -n "$RID" ]]; then
+    pwsh_args+=(-Rid "$RID")
+  fi
+  if [[ ${#POSITIONAL[@]} -gt 0 ]]; then
+    pwsh_args+=("${POSITIONAL[@]}")
+  fi
   if [[ "$REBUILD" -eq 1 ]]; then
     pwsh_args+=(-Rebuild)
   fi
@@ -83,6 +98,10 @@ if command -v pwsh >/dev/null 2>&1; then
 fi
 
 echo "pwsh was not found; using native bash publish."
+if [[ ${#POSITIONAL[@]} -gt 0 ]]; then
+  echo "Native bash publish only supports one RID. Install pwsh to publish win, linux, and mac from one command." >&2
+  exit 1
+fi
 
 PROJECT_FILE="$SOLUTION_DIR/src/Madorin.AI.Runtime.Cli/Madorin.AI.Runtime.Cli.csproj"
 CONTRACTS_PROJECT="$SOLUTION_DIR/src/Madorin.AI.Runtime.Contracts/Madorin.AI.Runtime.Contracts.csproj"
@@ -91,7 +110,10 @@ PACKAGE_VERSIONS="$SOLUTION_DIR/Directory.Packages.props"
 DIRECTORY_BUILD_PROPS="$SOLUTION_DIR/Directory.Build.props"
 SKILL_SOURCE="$SOLUTION_DIR/skills/madorin-cli"
 RELEASES_DIR="$SOLUTION_DIR/releases"
-OUTPUT_DIR="$RELEASES_DIR/Madorin-Cli"
+if [[ -z "$RID" ]]; then
+  RID="$DEFAULT_RID"
+fi
+OUTPUT_DIR="$RELEASES_DIR/Madorin-Cli/$RID"
 PACKAGES_DIR="$RELEASES_DIR/Packages"
 SKILL_OUTPUT_DIR="$OUTPUT_DIR/madorin-cli"
 BIN_DIR="$SKILL_OUTPUT_DIR/bin"
@@ -162,8 +184,8 @@ RESTORE_PACKAGES_ROOT="$SOLUTION_DIR/obj/release-packages"
 RESTORE_PACKAGES_DIR="$RESTORE_PACKAGES_ROOT/$NEW_VERSION"
 NUGET_CONFIG="$RESTORE_PACKAGES_DIR/NuGet.Config"
 
-mkdir -p "$OUTPUT_DIR" "$PACKAGES_DIR"
-rm -rf "$SKILL_OUTPUT_DIR"
+mkdir -p "$RELEASES_DIR/Madorin-Cli" "$PACKAGES_DIR"
+rm -rf "$OUTPUT_DIR"
 cp -a "$SKILL_SOURCE" "$SKILL_OUTPUT_DIR"
 mkdir -p "$BIN_DIR"
 rm -rf "$RESTORE_PACKAGES_DIR"
@@ -220,6 +242,7 @@ dotnet pack "$CONTRACTS_PROJECT" -c Release -o "$PACKAGES_DIR" \
 
 echo "[3/7] Publishing CLI"
 dotnet publish "$PROJECT_FILE" -c Release -r "$RID" --self-contained true -o "$BIN_DIR" \
+  -p:UsePublishAotCross=true \
   "${dotnet_common[@]}"
 
 if [[ "$SKIP_PROVIDERS" -eq 1 ]]; then
@@ -231,6 +254,7 @@ else
     project_path="$SOLUTION_DIR/$project"
     echo "  $protocol ($slug)"
     dotnet publish "$project_path" -c Release -r "$RID" --self-contained true -o "$BIN_DIR" \
+      -p:UsePublishAotCross=true \
       "${dotnet_common[@]}"
     worker_path="$BIN_DIR/$(worker_file_name "$slug")"
     if [[ ! -f "$worker_path" ]]; then
@@ -274,6 +298,19 @@ manifest="$BIN_DIR/providers.manifest.json"
   echo "}"
 } > "$manifest"
 echo "  Manifest: $manifest"
+
+if [[ "$RID" == linux* && ! -f "$BIN_DIR/libe_sqlite3.so" ]]; then
+  echo "Linux publish is missing libe_sqlite3.so: $BIN_DIR/libe_sqlite3.so" >&2
+  exit 1
+fi
+if [[ "$RID" == osx* && ! -f "$BIN_DIR"/libe_sqlite3*.dylib ]]; then
+  echo "macOS publish is missing libe_sqlite3 dylib under: $BIN_DIR" >&2
+  exit 1
+fi
+if [[ -f "$BIN_DIR/e_sqlite3.dll" && "$RID" != win* ]]; then
+  echo "Publish for $RID contains the Windows SQLite library e_sqlite3.dll" >&2
+  exit 1
+fi
 
 echo "[7/7] Packaging zip"
 zip_name="$PACKAGE_NAME-v$NEW_VERSION-$RID.zip"
