@@ -352,12 +352,19 @@ public sealed class ExpertModeOrchestrator(
             ? modelId
             : contextPolicy.SummaryModelId;
         var compactionProvider = _provider;
+        Exception? compactionProviderError = null;
         if (useSummaryStrategy)
         {
-            compactionProvider = _providerResolver(compactionProviderId);
-            ValidateCompactionModel(compactionProvider, compactionModelId);
+            try
+            {
+                compactionProvider = _providerResolver(compactionProviderId);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                compactionProviderError = ex;
+            }
         }
-        var summaryModelVersion = useSummaryStrategy
+        var summaryModelVersion = useSummaryStrategy && compactionProviderError is null
             ? ResolveModelVersion(compactionProvider!, compactionModelId)
             : $"{compactionProviderId}:{compactionModelId}";
         var systemMessage = new RuntimeProviderMessage(
@@ -446,6 +453,14 @@ public sealed class ExpertModeOrchestrator(
         {
             try
             {
+                // 仅在确需压缩时校验摘要模型，避免无效摘要选型阻断普通对话。
+                if (compactionProviderError is not null)
+                {
+                    throw new InvalidOperationException(
+                        $"Summary Provider '{compactionProviderId}' is unavailable.",
+                        compactionProviderError);
+                }
+                ValidateCompactionModel(compactionProvider, compactionModelId);
                 var fullProjection = await ContextProjectionBuilder.BuildAsync(
                         history,
                         int.MaxValue,

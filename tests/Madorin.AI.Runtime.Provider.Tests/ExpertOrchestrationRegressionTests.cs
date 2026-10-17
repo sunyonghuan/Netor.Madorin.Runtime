@@ -3,6 +3,7 @@ using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Contracts.Expert;
+using Madorin.AI.Runtime.Contracts.Serialization;
 using Madorin.AI.Runtime.Entities;
 using Madorin.AI.Runtime.Modes.Expert;
 using Madorin.AI.Runtime.Persistence.Files;
@@ -324,6 +325,69 @@ public sealed class ExpertOrchestrationRegressionTests
             """{"stepIndex":1,"newStatus":"running"}""")).Success);
     }
 
+    [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public async Task Summary_UnavailableModel_DoesNotBlockShortConversation(bool missingProvider)
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var events = await fixture.RunWithSummaryAsync(
+            missingProvider ? "missing" : "child", "host-internal-model-id",
+            required: true, oversized: false);
+
+        Assert.IsTrue(events.Any(item => item.MessageType == MessageTypes.InvocationCompleted));
+        Assert.HasCount(1, fixture.Primary.Requests);
+        Assert.HasCount(0, fixture.Child.Requests);
+    }
+
+    [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public async Task Summary_UnavailableModel_FallsBackForOptionalCompaction(bool missingProvider)
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var events = await fixture.RunWithSummaryAsync(
+            missingProvider ? "missing" : "child", "host-internal-model-id",
+            required: false, oversized: true);
+
+        Assert.IsTrue(events.Any(item => item.MessageType == MessageTypes.InvocationCompleted));
+        Assert.HasCount(1, fixture.Primary.Requests);
+        Assert.HasCount(0, fixture.Child.Requests);
+    }
+
+    [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public async Task Summary_UnavailableModel_FailsWhenCompactionIsRequired(bool missingProvider)
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        if (missingProvider)
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.RunWithSummaryAsync(
+                "missing", "host-internal-model-id", required: true, oversized: true));
+        }
+        else
+        {
+            await Assert.ThrowsAsync<KeyNotFoundException>(() => fixture.RunWithSummaryAsync(
+                "child", "host-internal-model-id", required: true, oversized: true));
+        }
+        Assert.HasCount(0, fixture.Primary.Requests);
+        Assert.HasCount(0, fixture.Child.Requests);
+    }
+
+    [TestMethod]
+    public async Task Summary_ValidCrossProvider_StillGeneratesSummary()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var events = await fixture.RunWithSummaryAsync(
+            "child", "child-model", required: true, oversized: true);
+
+        Assert.IsTrue(events.Any(item => item.MessageType == MessageTypes.InvocationCompleted));
+        Assert.HasCount(1, fixture.Primary.Requests);
+        Assert.HasCount(1, fixture.Child.Requests);
+        Assert.AreEqual("child-model", fixture.Child.Requests.Single().ModelId);
+    }
+
     private sealed class Fixture : IAsyncDisposable
     {
         public string Root { get; } = Path.Combine(Path.GetTempPath(), "expert-regression-" + Guid.NewGuid().ToString("N"));
@@ -373,6 +437,40 @@ public sealed class ExpertOrchestrationRegressionTests
                 [new TextContentBlock("@rEVIEWER review")]);
             await using var events = Orchestrator.RunAsync("r", "s", request, "runtime").GetAsyncEnumerator();
             Assert.IsTrue(await events.MoveNextAsync());
+        }
+
+        public async Task<List<RuntimeEventEnvelope>> RunWithSummaryAsync(
+            string summaryProvider, string summaryModel, bool required, bool oversized)
+        {
+            var repository = new SqliteSessionRepository(_connection);
+            var sessionId = await repository.CreateSessionAsync(
+                RuntimeMode.Expert, "summary-session", TimeSpan.FromHours(1));
+            var runId = await repository.CreateRunAsync(sessionId, "summary-run", TimeSpan.FromHours(1));
+            await repository.TransitionRunStatusAsync(runId, RunStatus.Accepted, RunStatus.Preparing);
+            await repository.TransitionRunStatusAsync(runId, RunStatus.Preparing, RunStatus.Running);
+            if (oversized)
+            {
+                await new ConversationStore(Root).AppendMessageAsync(sessionId,
+                    new ConversationMessageDraft("previous", "primary", "user",
+                        JsonSerializer.SerializeToElement<ContentBlock[]>(
+                            [new TextContentBlock(new string('x', 40_000))],
+                            RuntimeJsonContext.Default.ContentBlockArray), DateTimeOffset.UtcNow));
+            }
+            var options = Options with
+            {
+                ContextPolicy = new ExpertContextPolicy(Strategy: "Summary", MaxTokens: 2_000,
+                    SummaryProviderId: summaryProvider, SummaryModelId: summaryModel,
+                    SummaryRequired: required)
+            };
+            var request = new NewSessionRunRequest("s", "r", RuntimeMode.Expert,
+                new NextTurnSelection(1, RuntimeMode.Expert, new("primary", "primary-model"), options),
+                [new TextContentBlock("hello")]);
+            var events = new List<RuntimeEventEnvelope>();
+            await foreach (var item in Orchestrator.RunAsync(runId, sessionId, request, "runtime"))
+            {
+                events.Add(item);
+            }
+            return events;
         }
 
         // The routes remain private; invoke production methods without duplicating their logic.
