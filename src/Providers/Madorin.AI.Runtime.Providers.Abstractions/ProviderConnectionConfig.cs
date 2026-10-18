@@ -16,4 +16,5 @@ public sealed record ProviderConnectionConfig(
     string? ConfigurationVersion = null,
     ProviderCapabilities? Capabilities = null,
     string? ProbePath = null,
-    int? MaxTools = null);
+    int? MaxTools = null,
+    IReadOnlyList<ProviderModel>? ModelDescriptors = null);

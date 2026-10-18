@@ -8,7 +8,7 @@ namespace Madorin.AI.Runtime.Providers.WorkerHost;
 /// </summary>
 public static partial class ProviderWorkerHost
 {
-    public static async Task<int> RunAsync(
+    public static Task<int> RunAsync(
         string protocol,
         string slug,
         Func<ProviderConnectionConfig, IRuntimeProviderAdapter> adapterFactory,
@@ -16,6 +16,19 @@ public static partial class ProviderWorkerHost
         Stream stdout,
         TextWriter stderr,
         ProviderCapabilities? declaredCapabilities = null,
+        CancellationToken cancellationToken = default) => RunAsync(
+            protocol, slug, adapterFactory, stdin, stdout, stderr,
+            declaredCapabilities, declaredModels: null, cancellationToken);
+
+    public static async Task<int> RunAsync(
+        string protocol,
+        string slug,
+        Func<ProviderConnectionConfig, IRuntimeProviderAdapter> adapterFactory,
+        Stream stdin,
+        Stream stdout,
+        TextWriter stderr,
+        ProviderCapabilities? declaredCapabilities,
+        IReadOnlyList<ProviderModel>? declaredModels,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(protocol);
@@ -33,6 +46,7 @@ public static partial class ProviderWorkerHost
             stdout,
             stderr,
             declaredCapabilities,
+            declaredModels,
             cancellationToken);
         return await session.RunAsync().ConfigureAwait(false);
     }
@@ -45,6 +59,7 @@ public static partial class ProviderWorkerHost
         Stream stdout,
         TextWriter stderr,
         ProviderCapabilities? declaredCapabilities,
+        IReadOnlyList<ProviderModel>? declaredModels,
         CancellationToken cancellationToken) : IDisposable
     {
         private readonly SemaphoreSlim _writeLock = new(1, 1);

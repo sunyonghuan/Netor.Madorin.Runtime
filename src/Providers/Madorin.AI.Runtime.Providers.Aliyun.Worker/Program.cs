@@ -28,7 +28,9 @@ return await ProviderWorkerHost.RunAsync(
     BuildAdapter,
     streams.Stdin,
     streams.Stdout,
-    streams.Stderr);
+    streams.Stderr,
+    declaredCapabilities: null,
+    declaredModels: Madorin.AI.Runtime.Providers.Aliyun.AliyunModelCatalog.All);
 
 static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config)
 {
@@ -41,13 +43,8 @@ static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config)
                 ? AliyunModelCatalog.DefaultBaseUrl
                 : config.BaseUrl.Trim(),
             config.Capabilities,
-            ToProviderModels(config.Models),
+            ProviderConnectionModels.Resolve(config, Madorin.AI.Runtime.Providers.Aliyun.AliyunModelCatalog.All),
             string.IsNullOrWhiteSpace(config.ConfigurationVersion)
                 ? "1"
                 : config.ConfigurationVersion.Trim()));
 }
-
-static List<ProviderModel> ToProviderModels(IReadOnlyList<string>? ids) =>
-    ids is null || ids.Count == 0
-        ? []
-        : ids.Select(static id => new ProviderModel(id, id)).ToList();

@@ -31,6 +31,7 @@ public sealed partial class ProviderWorkerProcess : IAsyncDisposable
     private Task? _reader;
     private TaskCompletionSource<HelloFrameResult>? _hello;
     private ProviderCapabilities? _negotiatedCapabilities;
+    private IReadOnlyList<ProviderModel>? _negotiatedModels;
     private bool _disposed;
     private int _stopping;
     private int _crashRecorded;
@@ -79,6 +80,9 @@ public sealed partial class ProviderWorkerProcess : IAsyncDisposable
 
     /// <summary>hello.ok 协商到的 Worker 能力声明；配置未写 capabilities 时供宿主投影使用。</summary>
     public ProviderCapabilities? NegotiatedCapabilities => _negotiatedCapabilities;
+
+    /// <summary>Worker 已知目录，仅按精确模型 ID 补齐旧客户端缺少的限制。</summary>
+    public IReadOnlyList<ProviderModel>? NegotiatedModels => _negotiatedModels;
 
     internal bool IsFused => _fuse.IsFused;
 

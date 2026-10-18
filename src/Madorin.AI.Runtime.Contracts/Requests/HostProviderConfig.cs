@@ -14,4 +14,5 @@ public sealed record HostProviderConfig(
     string? UserAgent = null,
     string? ApiVersion = null,
     IReadOnlyList<string>? Models = null,
-    string? ConfigurationVersion = null);
+    string? ConfigurationVersion = null,
+    IReadOnlyList<HostProviderModelConfig>? ModelDescriptors = null);

@@ -28,7 +28,9 @@ return await ProviderWorkerHost.RunAsync(
     BuildAdapter,
     streams.Stdin,
     streams.Stdout,
-    streams.Stderr);
+    streams.Stderr,
+    declaredCapabilities: null,
+    declaredModels: Madorin.AI.Runtime.Providers.GLM.GlmModelCatalog.All);
 
 static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config)
 {
@@ -39,14 +41,9 @@ static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config)
             config.ApiKey,
             string.IsNullOrWhiteSpace(config.BaseUrl) ? string.Empty : config.BaseUrl.Trim(),
             config.Capabilities,
-            ToProviderModels(config.Models),
+            ProviderConnectionModels.Resolve(config, Madorin.AI.Runtime.Providers.GLM.GlmModelCatalog.All),
             string.IsNullOrWhiteSpace(config.ConfigurationVersion)
                 ? "1"
                 : config.ConfigurationVersion.Trim(),
             config.ProbePath));
 }
-
-static List<ProviderModel> ToProviderModels(IReadOnlyList<string>? ids) =>
-    ids is null || ids.Count == 0
-        ? []
-        : ids.Select(static id => new ProviderModel(id, id)).ToList();

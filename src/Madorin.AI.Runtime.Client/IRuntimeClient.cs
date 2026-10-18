@@ -98,6 +98,11 @@ public interface IRuntimeClient : IAsyncDisposable
         CancellationToken cancellationToken = default) =>
         throw new NotSupportedException("This Runtime client implementation does not support Session compaction.");
 
+    public ValueTask<SessionContextStatusDto> GetSessionContextStatusAsync(
+        SessionContextStatusRequest request,
+        CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("Upgrade Runtime to query Session context metadata.");
+
     public ValueTask<NextTurnSelection> UpdateSessionSelectionAsync(
         SessionSelectionUpdateParameters parameters,
         CancellationToken cancellationToken = default);

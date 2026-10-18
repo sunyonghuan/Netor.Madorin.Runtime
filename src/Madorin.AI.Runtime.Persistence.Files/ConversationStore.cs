@@ -1287,7 +1287,8 @@ public sealed class ConversationStore
                 .ConfigureAwait(false);
             return new ConversationCompactionSource(
                 scan.Records.Select(static item => item.Record).ToArray(),
-                historySha256);
+                historySha256,
+                await ComputePrefixHashesAsync(canonicalPath, scan.Records, ct).ConfigureAwait(false));
         }
         finally
         {
@@ -1316,7 +1317,7 @@ public sealed class ConversationStore
                 {
                     Mode = FileMode.Open,
                     Access = FileAccess.Read,
-                    Share = FileShare.Read,
+                    Share = FileShare.Read | FileShare.Delete,
                     BufferSize = 16 * 1024,
                     Options = FileOptions.Asynchronous | FileOptions.SequentialScan
                 });
@@ -1325,7 +1326,7 @@ public sealed class ConversationStore
                         ConversationJsonContext.Default.ConversationCompactCacheV1,
                         ct)
                     .ConfigureAwait(false);
-                return IsValidCompactCache(cache, sessionId) ? cache : null;
+                return IsValidCompactCache(cache, sessionId, allowLegacy: true) ? cache : null;
             }
             catch (JsonException)
             {
@@ -1367,6 +1368,17 @@ public sealed class ConversationStore
                 throw new InvalidOperationException(
                     $"Session '{sessionId}' changed while its projection was being generated.");
             }
+            if (cache.SummaryValidated)
+            {
+                var scan = await ScanAsync(sessionId, canonicalPath, ct).ConfigureAwait(false);
+                var prefixes = await ComputePrefixHashesAsync(canonicalPath, scan.Records, ct).ConfigureAwait(false);
+                if (!prefixes.TryGetValue(cache.CoveredThroughSequence, out var prefixHash)
+                    || !string.Equals(prefixHash, cache.PrefixHistorySha256, StringComparison.OrdinalIgnoreCase)
+                    || cache.ProjectionMessages.Length != 1 || string.IsNullOrWhiteSpace(cache.ProjectionRevision))
+                {
+                    throw new InvalidOperationException("The summary coverage does not match the canonical history prefix.");
+                }
+            }
 
             var temporaryPath = cachePath + ".tmp-" + Guid.NewGuid().ToString("N");
             try
@@ -1390,6 +1402,7 @@ public sealed class ConversationStore
                     stream.Flush(flushToDisk: true);
                 }
 
+                ct.ThrowIfCancellationRequested();
                 File.Move(temporaryPath, cachePath, overwrite: true);
             }
             finally
@@ -1408,10 +1421,10 @@ public sealed class ConversationStore
 
     private static bool IsValidCompactCache(
         ConversationCompactCacheV1? cache,
-        string sessionId) =>
+        string sessionId,
+        bool allowLegacy = false) =>
         cache is
         {
-            Schema: ConversationCompactCacheV1.CurrentSchema,
             SessionId.Length: > 0,
             SourceHistorySha256.Length: 64,
             Strategy.Length: > 0,
@@ -1424,10 +1437,12 @@ public sealed class ConversationStore
             EstimateSource.Length: > 0,
             ProjectionMessages: not null
         }
+        && (cache.Schema == ConversationCompactCacheV1.CurrentSchema
+            || (allowLegacy && cache.Schema == "madorin.conversation.compact.v2"))
         && string.Equals(cache.SessionId, sessionId, StringComparison.Ordinal)
         && cache.DroppedMessageCount <= cache.SourceMessageCount
         && cache.ProjectionMessages.All(static message =>
-            !string.IsNullOrWhiteSpace(message.Role)
+            message is not null && !string.IsNullOrWhiteSpace(message.Role)
             && message.Content.ValueKind is JsonValueKind.Array);
 
     private static async Task<string> ComputeHistorySha256Async(
@@ -1449,6 +1464,47 @@ public sealed class ConversationStore
         });
         var hash = await SHA256.HashDataAsync(stream, ct).ConfigureAwait(false);
         return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    // Hash the exact UTF-8 JSONL bytes, including its header and each record's newline.
+    private static async Task<IReadOnlyDictionary<long, string>> ComputePrefixHashesAsync(
+        string canonicalPath,
+        IReadOnlyList<IndexedRecord> records,
+        CancellationToken ct)
+    {
+        var hashes = new Dictionary<long, string>(records.Count);
+        if (records.Count == 0)
+        {
+            return hashes;
+        }
+
+        await using var stream = new FileStream(canonicalPath, FileMode.Open, FileAccess.Read,
+            FileShare.Read, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var buffer = ArrayPool<byte>.Shared.Rent(64 * 1024);
+        try
+        {
+            foreach (var record in records)
+            {
+                var end = record.Offset + record.Length;
+                while (stream.Position < end)
+                {
+                    var count = (int)Math.Min(buffer.Length, end - stream.Position);
+                    var read = await stream.ReadAsync(buffer.AsMemory(0, count), ct).ConfigureAwait(false);
+                    if (read == 0)
+                    {
+                        throw new EndOfStreamException("Conversation changed while hashing its prefix.");
+                    }
+                    hash.AppendData(buffer.AsSpan(0, read));
+                }
+                hashes.Add(record.Record.Sequence, Convert.ToHexString(hash.GetCurrentHash()).ToLowerInvariant());
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+        return hashes;
     }
 
     public ConversationBlobStore BlobStore => _blobStore;

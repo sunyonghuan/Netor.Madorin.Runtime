@@ -226,7 +226,7 @@ public sealed class ExpertModeOrchestrator(
         var userInputText = string.Concat(
             request.InitialInput.OfType<TextContentBlock>().Select(block => block.Text));
         var (isDelegation, delegatedAgentName, delegatedTask) = TryParseDelegationSyntax(userInputText);
-        var preTurnSource = await _store.ReadCompactionSourceAsync(sessionId, ct).ConfigureAwait(false);
+        var preTurnRecordCount = (await _store.ReadAllAsync(sessionId, ct).ConfigureAwait(false)).Count;
 
         if (isDelegation && expert.AvailableAgents is { Length: > 0 })
         {
@@ -332,18 +332,19 @@ public sealed class ExpertModeOrchestrator(
                 ct).ConfigureAwait(false);
         }
 
-        var history = await _store.ReadAllAsync(sessionId, ct).ConfigureAwait(false);
+        var source = await _store.ReadCompactionSourceAsync(sessionId, ct).ConfigureAwait(false);
+        var history = source.Records;
         var contextPolicy = expert.ContextPolicy ?? new ExpertContextPolicy();
         var model = _provider.Models.FirstOrDefault(candidate =>
             string.Equals(candidate.Id, modelId, StringComparison.Ordinal)
             || string.Equals(candidate.ProviderModelId, modelId, StringComparison.Ordinal));
-        var modelContextLimit = model?.ContextWindow is > 0
-            ? Math.Max(1, (int)(model.ContextWindow.Value * 0.9))
-            : int.MaxValue;
-        var configuredLimit = contextPolicy.MaxTokens;
-        var tokenLimit = configuredLimit is > 0
-            ? Math.Min(configuredLimit.Value, modelContextLimit)
-            : modelContextLimit;
+        if (model?.ContextWindow is not > 0 && _provider is IRuntimeProviderModelCatalogSource catalogSource)
+        {
+            model = (await catalogSource.FetchModelsAsync(ct).ConfigureAwait(false))
+                .FirstOrDefault(candidate => candidate.Id == modelId || candidate.ProviderModelId == modelId) ?? model;
+        }
+        var budget = ContextTokenBudget.Resolve(model, contextPolicy.MaxTokens, expert.RequestControl?.MaxTokens);
+        var tokenLimit = budget.InputLimit;
         var useSummaryStrategy = IsSummaryStrategy(contextPolicy.Strategy);
         var compactionProviderId = string.IsNullOrWhiteSpace(contextPolicy.SummaryProviderId)
             ? providerId
@@ -364,9 +365,6 @@ public sealed class ExpertModeOrchestrator(
                 compactionProviderError = ex;
             }
         }
-        var summaryModelVersion = useSummaryStrategy && compactionProviderError is null
-            ? ResolveModelVersion(compactionProvider!, compactionModelId)
-            : $"{compactionProviderId}:{compactionModelId}";
         var systemMessage = new RuntimeProviderMessage(
             RuntimeProviderRoles.System,
             [new TextContentBlock(agentContext.Instructions)]);
@@ -374,11 +372,12 @@ public sealed class ExpertModeOrchestrator(
         ToolDescriptor[]? tools = _toolGateway is not null && catalogSnapshot is not null
             ? [.. catalogSnapshot.Tools]
             : null;
-        ValueTask<ProviderTokenEstimate> EstimateProjectionAsync(
+        var usedFallbackEstimate = false;
+        async ValueTask<ProviderTokenEstimate> EstimateProjectionAsync(
             RuntimeProviderMessage[] candidateMessages,
-            CancellationToken token) =>
-            _provider.EstimateTokensAsync(
-                new RuntimeProviderRequest(
+            CancellationToken token)
+        {
+            var estimateRequest = new RuntimeProviderRequest(
                     invocationId,
                     expert.Agent.AgentId,
                     providerId,
@@ -386,59 +385,28 @@ public sealed class ExpertModeOrchestrator(
                     [systemMessage, .. candidateMessages],
                     Tools: tools,
                     CancellationToken: token,
-                    Skills: CreateSkillsContext(snapshot, runId, sessionId)),
-                token);
+                    Skills: CreateSkillsContext(snapshot, runId, sessionId));
+            var estimate = await _provider.EstimateTokensAsync(estimateRequest, token).ConfigureAwait(false);
+            usedFallbackEstimate = estimate.InputTokens is null;
+            return estimate.InputTokens is null ? ProviderTokenEstimator.Estimate(estimateRequest) : estimate;
+        }
         var contextPolicyHash = CompactionCacheKeyFactory.ComputeContextPolicyHash(contextPolicy);
         var agentPromptHash = CompactionCacheKeyFactory.ComputeAgentPromptHash(expert.Agent.SystemPrompt);
-        var cachedProjection = useSummaryStrategy
-            ? await TryReadProjectionCacheAsync(
-                    sessionId,
-                    preTurnSource,
-                    compactionProviderId,
-                    compactionModelId,
-                    contextPolicyHash,
-                    agentPromptHash,
-                    request.Selection.ToolCatalogVersion,
-                    summaryModelVersion,
-                    ct)
-                .ConfigureAwait(false)
-            : (Projection: (ContextProjectionBuilder.Result?)null, CacheHit: false, CacheMissReason: (string?)null);
-        var projectionCacheHit = cachedProjection.CacheHit;
-        var projection = cachedProjection.Projection;
+        var cachedProjection = SummaryProjectionResolver.Resolve(source,
+            await _store.ReadCompactCacheAsync(sessionId, ct).ConfigureAwait(false),
+            agentPromptHash, request.Selection.ToolCatalogVersion);
+        var projectionCacheHit = cachedProjection.IsApplied;
         var projectionCacheMissReason = cachedProjection.CacheMissReason;
-        if (projection is not null && history.Count > preTurnSource.Records.Count)
+        ContextProjectionBuilder.Result? projection = null;
+        if (cachedProjection.IsApplied)
         {
-            var currentTurnMessages = history
-                .Skip(preTurnSource.Records.Count)
-                .Select(ToRuntimeProviderMessage)
-                .ToArray();
-            RuntimeProviderMessage[] mergedMessages = [.. projection.Messages, .. currentTurnMessages];
-            var mergedEstimate = await EstimateProjectionAsync(mergedMessages, ct).ConfigureAwait(false);
-            var mergedTokens = mergedEstimate.InputTokens
-                ?? ProviderTokenEstimator.Estimate(new RuntimeProviderRequest(
-                    "compact-cache-turn-estimate-" + Guid.NewGuid().ToString("N"),
-                    expert.Agent.AgentId,
-                    providerId,
-                    modelId,
-                    [systemMessage, .. mergedMessages])).InputTokens
-                ?? int.MaxValue;
-            if (mergedTokens <= tokenLimit)
-            {
-                projection = projection with
-                {
-                    Messages = mergedMessages,
-                    EstimatedTokens = mergedTokens,
-                    EstimateSource = mergedEstimate.InputTokens is null
-                        ? "runtime.utf8-bytes/4"
-                        : $"provider.{mergedEstimate.Accuracy.ToString().ToLowerInvariant()}"
-                };
-            }
-            else
-            {
-                projection = null;
-                projectionCacheHit = false;
-                projectionCacheMissReason = "cache-current-turn-over-budget";
-            }
+            var estimate = await EstimateProjectionAsync(cachedProjection.Messages, ct).ConfigureAwait(false);
+            projection = new ContextProjectionBuilder.Result(cachedProjection.Messages, "Summary",
+                history.Count(record => record.Sequence <= cachedProjection.Cache!.CoveredThroughSequence),
+                estimate.InputTokens ?? ProviderTokenEstimator.Estimate(new RuntimeProviderRequest(
+                    invocationId, expert.Agent.AgentId, providerId, modelId,
+                    [systemMessage, .. cachedProjection.Messages], Tools: tools)).InputTokens ?? 0,
+                usedFallbackEstimate ? "runtime.utf8-bytes/4" : $"provider.{estimate.Accuracy.ToString().ToLowerInvariant()}");
         }
 
         projection ??= await ContextProjectionBuilder.BuildAsync(
@@ -447,13 +415,20 @@ public sealed class ExpertModeOrchestrator(
                 EstimateProjectionAsync,
                 ct)
             .ConfigureAwait(false);
-        if (!projectionCacheHit
-            && useSummaryStrategy
-            && projection.IsAdjusted)
+        if (usedFallbackEstimate)
+        {
+            projection = projection with { EstimateSource = "runtime.utf8-bytes/4" };
+        }
+        if ((projectionCacheHit && projection.EstimatedTokens > tokenLimit)
+            || (!projectionCacheHit && useSummaryStrategy && projection.IsAdjusted))
         {
             try
             {
                 // 仅在确需压缩时校验摘要模型，避免无效摘要选型阻断普通对话。
+                if (!useSummaryStrategy && !string.Equals(compactionProviderId, providerId, StringComparison.Ordinal))
+                {
+                    compactionProvider = _providerResolver(compactionProviderId);
+                }
                 if (compactionProviderError is not null)
                 {
                     throw new InvalidOperationException(
@@ -461,45 +436,53 @@ public sealed class ExpertModeOrchestrator(
                         compactionProviderError);
                 }
                 ValidateCompactionModel(compactionProvider, compactionModelId);
-                var fullProjection = await ContextProjectionBuilder.BuildAsync(
-                        history,
-                        int.MaxValue,
-                        EstimateProjectionAsync,
-                        ct)
-                    .ConfigureAwait(false);
-                var summaryMessage = await GenerateSummaryMessageAsync(
+                var prefixCount = SummaryProjectionResolver.GetCompressiblePrefixCount(source,
+                    Math.Max(history.Count - preTurnRecordCount, Math.Max(1, contextPolicy.TailMessageCount ?? 8)));
+                if (prefixCount == 0 || (cachedProjection.Cache is { } existing
+                    && history[prefixCount - 1].Sequence == existing.CoveredThroughSequence))
+                {
+                    throw new InvalidDataException("context_budget_exhausted: No additional historical prefix can be compacted safely.");
+                }
+                var summaryInput = SummaryProjectionResolver.CreateSummaryInput(source, cachedProjection, prefixCount);
+                var summaryMessage = await StrictConversationSummarizer.GenerateAsync(
                         compactionProvider!,
                         compactionProviderId,
                         compactionModelId,
-                        fullProjection.Messages,
-                        ct)
+                        summaryInput,
+                        ct: ct)
                     .ConfigureAwait(false);
-                var summaryProjection = await BuildSummaryProjectionAsync(
-                        history,
-                        summaryMessage,
-                        contextPolicy.TailMessageCount,
-                        tokenLimit,
-                        EstimateProjectionAsync,
-                        ct)
-                    .ConfigureAwait(false);
-                if (summaryProjection is null)
+                RuntimeProviderMessage[] candidateMessages = [summaryMessage,
+                    .. history.Skip(prefixCount).Select(SummaryProjectionResolver.ToMessage)];
+                var after = await EstimateProjectionAsync(candidateMessages, ct).ConfigureAwait(false);
+                var afterEstimateSource = usedFallbackEstimate ? "runtime.utf8-bytes/4"
+                    : $"provider.{after.Accuracy.ToString().ToLowerInvariant()}";
+                var before = await EstimateProjectionAsync(cachedProjection.Messages, ct).ConfigureAwait(false);
+                if (after.InputTokens is not { } afterTokens || afterTokens > tokenLimit
+                    || before.InputTokens is not { } beforeTokens || afterTokens >= beforeTokens)
                 {
-                    if (contextPolicy.SummaryRequired)
-                    {
-                        throw new InvalidDataException(
-                            "The configured summary did not fit within the active context window.");
-                    }
+                    throw new InvalidDataException("summary_not_reduced: The summary did not reduce input enough to fit the active context budget.");
                 }
-                else
+                var summaryProjection = new ContextProjectionBuilder.Result(candidateMessages, "Summary", prefixCount,
+                    afterTokens, afterEstimateSource);
+                var historyEstimateRequest = new RuntimeProviderRequest(invocationId, expert.Agent.AgentId,
+                    providerId, modelId, cachedProjection.Messages, CancellationToken: ct);
+                var beforeHistoryEstimate = await _provider.EstimateTokensAsync(historyEstimateRequest, ct).ConfigureAwait(false);
+                var beforeHistoryTokens = beforeHistoryEstimate.InputTokens
+                    ?? ProviderTokenEstimator.Estimate(historyEstimateRequest).InputTokens ?? 0;
+                historyEstimateRequest = historyEstimateRequest with { Messages = candidateMessages };
+                var afterHistoryEstimate = await _provider.EstimateTokensAsync(historyEstimateRequest, ct).ConfigureAwait(false);
+                var historyProjection = summaryProjection with
                 {
-                    projection = summaryProjection;
-                    var source = await _store.ReadCompactionSourceAsync(sessionId, ct)
-                        .ConfigureAwait(false);
-                    await WriteProjectionCacheAsync(
+                    EstimatedTokens = afterHistoryEstimate.InputTokens
+                        ?? ProviderTokenEstimator.Estimate(historyEstimateRequest).InputTokens ?? 0,
+                    EstimateSource = afterHistoryEstimate.InputTokens is null ? "runtime.utf8-bytes/4"
+                        : $"provider.{afterHistoryEstimate.Accuracy.ToString().ToLowerInvariant()}"
+                };
+                await WriteProjectionCacheAsync(
                             sessionId,
                             source,
-                            projection,
-                            fullProjection.EstimatedTokens,
+                            historyProjection,
+                            beforeHistoryTokens,
                             compactionProvider!,
                             compactionProviderId,
                             compactionModelId,
@@ -509,12 +492,18 @@ public sealed class ExpertModeOrchestrator(
                             projectionCacheMissReason,
                             ct)
                         .ConfigureAwait(false);
-                }
+                projection = summaryProjection;
+                projectionCacheHit = false;
             }
-            catch (Exception) when (!contextPolicy.SummaryRequired && !ct.IsCancellationRequested)
+            catch (Exception) when (!projectionCacheHit && !contextPolicy.SummaryRequired && !ct.IsCancellationRequested)
             {
                 projectionCacheMissReason = "summary-failed";
             }
+        }
+        if (projection.EstimatedTokens > tokenLimit
+            || (projection.Strategy == "TailWindow" && projection.Messages.Length < history.Count - preTurnRecordCount))
+        {
+            throw new InvalidDataException("context_budget_exhausted: Required system, tools, or current-turn content exceeds the input budget.");
         }
         snapshot = snapshot with
         {
@@ -551,9 +540,10 @@ public sealed class ExpertModeOrchestrator(
             modelId,
             [.. providerMessages],
             Tools: tools,
+            MaxTokens: budget.OutputLimit,
             CancellationToken: ct,
             Skills: CreateSkillsContext(snapshot, runId, sessionId),
-            RequestControl: expert.RequestControl)
+            RequestControl: (expert.RequestControl ?? new ExpertRequestControl()) with { MaxTokens = budget.OutputLimit })
         {
             HistoryMessageCount = Math.Max(0, providerMessages.Count - 1)
         };
@@ -1048,6 +1038,14 @@ public sealed class ExpertModeOrchestrator(
                 IsIdempotent = false,
                 HasIrreversibleToolSideEffects = true
             };
+            var continuedEstimate = await _provider.EstimateTokensAsync(providerRequest, ct).ConfigureAwait(false);
+            var continuedTokens = continuedEstimate.InputTokens ?? ProviderTokenEstimator.Estimate(providerRequest).InputTokens;
+            if (continuedTokens is null || continuedTokens > tokenLimit)
+            {
+                failure = CreateRuntimeError("context_budget_exhausted",
+                    "The current invocation and its tool results exceed the input budget. Start another turn after compaction.");
+                break;
+            }
         }
 
         if (cancelled || failure is not null)
@@ -2884,110 +2882,6 @@ public sealed class ExpertModeOrchestrator(
             $"Model {modelId} is not available from Provider {provider.ProviderId}.");
     }
 
-    private static async Task<RuntimeProviderMessage> GenerateSummaryMessageAsync(
-        IRuntimeProviderAdapter provider,
-        string providerId,
-        string modelId,
-        RuntimeProviderMessage[] history,
-        CancellationToken ct)
-    {
-        var request = new RuntimeProviderRequest(
-            "compact-summary-" + Guid.NewGuid().ToString("N"),
-            "session-compactor",
-            providerId,
-            modelId,
-            [
-                new RuntimeProviderMessage(
-                    RuntimeProviderRoles.System,
-                    [new TextContentBlock(
-                        "Summarize this conversation for future context. Preserve decisions, constraints, " +
-                        "unresolved work, identifiers, and tool outcomes. Do not add facts. Return only the summary.")]),
-                .. history
-            ],
-            Tools: null,
-            CancellationToken: ct);
-        var summary = new StringBuilder();
-        var completed = false;
-        await foreach (var providerEvent in ProviderInvocationBoundary.CompleteStreamingAsync(provider, request, ct).ConfigureAwait(false))
-        {
-            switch (providerEvent)
-            {
-                case TextDeltaProviderEvent text:
-                    summary.Append(text.Delta);
-                    break;
-                case InvocationCompletedProviderEvent:
-                    completed = true;
-                    break;
-                case InvocationFailedProviderEvent failed:
-                    throw new InvalidOperationException(
-                        $"Summary Provider failed ({failed.Error.Code}): {failed.Error.Message}");
-                case ToolCallDeltaProviderEvent or ToolCallCompleteProviderEvent:
-                    throw new InvalidDataException(
-                        "The summary Provider returned a tool call for a tool-free request.");
-                case ReasoningDeltaProviderEvent or UsageUpdatedProviderEvent or ProjectionAdjustedProviderEvent:
-                    break;
-                default:
-                    throw new InvalidDataException(
-                        $"The summary Provider returned unsupported event '{providerEvent.GetType().Name}'.");
-            }
-        }
-
-        if (!completed || string.IsNullOrWhiteSpace(summary.ToString()))
-        {
-            throw new InvalidDataException(
-                "The summary Provider completed without returning content.");
-        }
-
-        return new RuntimeProviderMessage(
-            RuntimeProviderRoles.Assistant,
-            [new TextContentBlock(summary.ToString().Trim())]);
-    }
-
-    private static async Task<ContextProjectionBuilder.Result?> BuildSummaryProjectionAsync(
-        IReadOnlyList<ConversationRecordV1> history,
-        RuntimeProviderMessage summaryMessage,
-        int? tailMessageCount,
-        int tokenLimit,
-        Func<RuntimeProviderMessage[], CancellationToken, ValueTask<ProviderTokenEstimate>> estimator,
-        CancellationToken ct)
-    {
-        var maxTailMessageCount = Math.Max(0, tailMessageCount ?? 0);
-        for (var requestedTailCount = maxTailMessageCount;
-             requestedTailCount >= 0;
-             requestedTailCount--)
-        {
-            var tailMessages = requestedTailCount == 0
-                ? []
-                : ContextProjectionBuilder.BuildTailWindow(history, requestedTailCount);
-            var messages = new RuntimeProviderMessage[tailMessages.Length + 1];
-            messages[0] = summaryMessage;
-            tailMessages.CopyTo(messages, 1);
-            var estimate = await estimator(messages, ct).ConfigureAwait(false);
-            var estimatedTokens = estimate.InputTokens
-                ?? ProviderTokenEstimator.Estimate(new RuntimeProviderRequest(
-                    "compact-summary-estimate-" + Guid.NewGuid().ToString("N"),
-                    "session-compactor",
-                    string.Empty,
-                    string.Empty,
-                    messages)).InputTokens
-                ?? 0;
-            var estimateSource = estimate.InputTokens is null
-                ? "runtime.utf8-bytes/4"
-                : $"provider.{estimate.Accuracy.ToString().ToLowerInvariant()}";
-            if (estimatedTokens <= tokenLimit)
-            {
-                return new ContextProjectionBuilder.Result(
-                    messages,
-                    "Summary",
-                    Math.Max(0, history.Count - tailMessages.Length),
-                    estimatedTokens,
-                    estimateSource);
-            }
-        }
-
-        return null;
-    }
-
     private async Task WriteProjectionCacheAsync(string sessionId,
         ConversationCompactionSource source,
         ContextProjectionBuilder.Result projection,
@@ -3014,14 +2908,18 @@ public sealed class ExpertModeOrchestrator(
             beforeEstimatedTokens,
             projection.EstimatedTokens,
             projection.EstimateSource,
-            projection.Messages.Select(CreateCompactMessage).ToArray(),
+            [CreateCompactMessage(projection.Messages[0])],
             DateTimeOffset.UtcNow,
             RuntimeMode: RuntimeMode.Expert.ToString(),
             ContextPolicyHash: contextPolicyHash,
             AgentPromptHash: agentPromptHash,
             ToolCatalogVersion: toolCatalogVersion,
             SummaryModelVersion: ResolveModelVersion(provider, modelId),
-            CacheMissReason: cacheMissReason);
+            CacheMissReason: cacheMissReason,
+            CoveredThroughSequence: source.Records[projection.DroppedMessageCount - 1].Sequence,
+            PrefixHistorySha256: source.PrefixHistoryHashes![source.Records[projection.DroppedMessageCount - 1].Sequence],
+            ProjectionRevision: Guid.NewGuid().ToString("N"),
+            SummaryValidated: true);
         await _store.WriteCompactCacheAsync(sessionId, cache, ct)
             .ConfigureAwait(false);
     }
@@ -3041,81 +2939,6 @@ public sealed class ExpertModeOrchestrator(
             || string.Equals(model.ProviderModelId, modelId, StringComparison.Ordinal));
         return found?.ProviderModelId ?? found?.Id ?? modelId;
     }
-
-    private async Task<(ContextProjectionBuilder.Result? Projection, bool CacheHit, string? CacheMissReason)> TryReadProjectionCacheAsync(
-        string sessionId,
-        ConversationCompactionSource source,
-        string providerId,
-        string modelId,
-        string contextPolicyHash,
-        string agentPromptHash,
-        string toolCatalogVersion,
-        string summaryModelVersion,
-        CancellationToken ct)
-    {
-        var cache = await _store.ReadCompactCacheAsync(sessionId, ct).ConfigureAwait(false);
-
-        // 使用统一的缓存键工厂进行匹配
-        if (!CompactionCacheKeyFactory.IsMatchingCache(
-            cache,
-            source.HistorySha256,
-            "summary",
-            providerId,
-            modelId,
-            keepLastTokens: null,
-            contextPolicyHash,
-            agentPromptHash,
-            toolCatalogVersion,
-            summaryModelVersion))
-        {
-            // 额外检查 Expert 模式专属字段
-            if (cache is not null
-                && !string.Equals(cache.RuntimeMode, "Expert", StringComparison.Ordinal))
-            {
-                return (null, false, "cache-identity-mismatch(mode)");
-            }
-
-            var cacheMissReason = CompactionCacheKeyFactory.AnalyzeCacheMismatch(
-                cache,
-                source.HistorySha256,
-                "summary",
-                providerId,
-                modelId,
-                keepLastTokens: null,
-                contextPolicyHash,
-                agentPromptHash,
-                toolCatalogVersion,
-                summaryModelVersion);
-            return (null, false, cacheMissReason);
-        }
-
-        // 再次检查 RuntimeMode（虽然已经通过基础匹配，但为了明确性）
-        if (!string.Equals(cache!.RuntimeMode, "Expert", StringComparison.Ordinal))
-        {
-            return (null, false, "cache-identity-mismatch(mode)");
-        }
-
-        // 缓存匹配成功，反序列化消息
-        var messages = cache!.ProjectionMessages
-            .Select(message => new RuntimeProviderMessage(
-                message.Role,
-                message.Content.Deserialize(RuntimeJsonContext.Default.ContentBlockArray)
-                    ?? throw new InvalidDataException("The compaction cache contains no content.")))
-            .ToArray();
-        return (
-            new ContextProjectionBuilder.Result(
-                messages,
-                "Summary",
-                cache.DroppedMessageCount,
-                cache.AfterEstimatedTokens,
-                cache.EstimateSource),
-            true,
-            null);
-    }
-    private static RuntimeProviderMessage ToRuntimeProviderMessage(ConversationRecordV1 record) => new(
-        record.Role,
-        record.Content.Deserialize(RuntimeJsonContext.Default.ContentBlockArray)
-            ?? throw new InvalidDataException("A conversation record has no content."));
 
     private ToolCatalogSnapshot? CaptureCatalogSnapshot()
     {

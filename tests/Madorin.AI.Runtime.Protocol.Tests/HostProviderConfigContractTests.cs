@@ -19,7 +19,8 @@ public sealed class HostProviderConfigContractTests
             AuthenticationHeader: "Authorization",
             AuthenticationScheme: "Bearer",
             Models: ["gpt-5"],
-            ConfigurationVersion: "1");
+            ConfigurationVersion: "1",
+            ModelDescriptors: [new HostProviderModelConfig("gpt-5", 131072, 8192)]);
 
         var json = JsonSerializer.Serialize(
             expected,
@@ -34,8 +35,23 @@ public sealed class HostProviderConfigContractTests
         Assert.AreEqual(expected.BaseUrl, actual.BaseUrl);
         Assert.AreEqual(expected.ApiKey, actual.ApiKey);
         CollectionAssert.AreEqual(expected.Models!.ToArray(), actual.Models!.ToArray());
+        CollectionAssert.AreEqual(expected.ModelDescriptors!.ToArray(), actual.ModelDescriptors!.ToArray());
         StringAssert.Contains(json, "\"providerId\":\"provider-1\"");
         StringAssert.Contains(json, "\"apiKey\":\"sk-test\"");
+    }
+
+    [TestMethod]
+    public void HostProviderConfig_LegacyIdOnlyJson_RemainsCompatible()
+    {
+        const string json = """
+            {"providerId":"p","protocol":"OpenAI","baseUrl":"https://example.test","apiKey":"test","models":["old-model"]}
+            """;
+
+        var actual = JsonSerializer.Deserialize(json, RuntimeJsonContext.Default.HostProviderConfig);
+
+        Assert.IsNotNull(actual);
+        Assert.IsNull(actual.ModelDescriptors);
+        Assert.AreEqual("old-model", Assert.ContainsSingle(actual.Models!));
     }
 
     [TestMethod]

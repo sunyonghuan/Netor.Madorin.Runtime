@@ -28,7 +28,9 @@ return await ProviderWorkerHost.RunAsync(
     BuildAdapter,
     streams.Stdin,
     streams.Stdout,
-    streams.Stderr);
+    streams.Stderr,
+    declaredCapabilities: null,
+    declaredModels: Madorin.AI.Runtime.Providers.OpenAI.Models.OpenAIModelCatalog.All);
 
 static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config)
 {
@@ -39,10 +41,5 @@ static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config)
         string.IsNullOrWhiteSpace(config.BaseUrl)
             ? "https://api.openai.com/v1"
             : config.BaseUrl.Trim(),
-        ToProviderModels(config.Models));
+        ProviderConnectionModels.Resolve(config, Madorin.AI.Runtime.Providers.OpenAI.Models.OpenAIModelCatalog.All));
 }
-
-static List<ProviderModel> ToProviderModels(IReadOnlyList<string>? ids) =>
-    ids is null || ids.Count == 0
-        ? []
-        : ids.Select(static id => new ProviderModel(id, id)).ToList();

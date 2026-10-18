@@ -9,4 +9,6 @@ public sealed record SessionCompactionRequest(
     int? KeepLastTokens = null,
     bool DryRun = false,
     bool Force = false,
-    string? SelectionSource = null);
+    string? SelectionSource = null,
+    string? OperationId = null,
+    int? RawTailSize = null);

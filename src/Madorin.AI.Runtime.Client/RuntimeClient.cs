@@ -1160,6 +1160,19 @@ public sealed class RuntimeClient : IRuntimeClient
             RuntimeJsonContext.Default.SessionCompactionResultDto,
             cancellationToken);
     }
+    public ValueTask<SessionContextStatusDto> GetSessionContextStatusAsync(
+        SessionContextStatusRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.SessionId);
+        return SendControlRequestAsync(
+            MessageTypes.SessionContextStatus,
+            request,
+            RuntimeJsonContext.Default.SessionContextStatusDto,
+            cancellationToken);
+    }
+
     public async ValueTask<NextTurnSelection> UpdateSessionSelectionAsync(
         SessionSelectionUpdateParameters parameters,
         CancellationToken cancellationToken = default)

@@ -15,6 +15,7 @@ public static class MessageTypes
     public const string SessionHistoryRead = "session.history.read";
     public const string SessionSelectionUpdate = "session.selection.update";
     public const string SessionCompaction = "session.compact";
+    public const string SessionContextStatus = "session.context.status";
     public const string SessionRehydrate = "session.rehydrate";
     public const string RunAccepted = "run.accepted";
     public const string InvocationStarted = "invocation.started";

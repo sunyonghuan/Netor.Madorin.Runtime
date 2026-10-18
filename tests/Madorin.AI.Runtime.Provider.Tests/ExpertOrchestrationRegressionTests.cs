@@ -388,6 +388,47 @@ public sealed class ExpertOrchestrationRegressionTests
         Assert.AreEqual("child-model", fixture.Child.Requests.Single().ModelId);
     }
 
+    [TestMethod]
+    public async Task Summary_DefaultTailPolicyAndChangedModel_UsesSummaryAcrossThreeReopenedTurns()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        await fixture.RunWithSummaryAsync("child", "child-model", required: true, oversized: true);
+        for (var turn = 1; turn <= 3; turn++)
+        {
+            await fixture.ContinueSummarySessionAsync("follow-up-" + turn);
+            var request = fixture.Primary.Requests.Last();
+            Assert.AreEqual("replacement-model", request.ModelId);
+            var text = string.Join("\n", request.Messages.SelectMany(message => message.Content)
+                .OfType<TextContentBlock>().Select(block => block.Text));
+            Assert.DoesNotContain(new string('x', 100), text, StringComparison.Ordinal);
+            StringAssert.Contains(text, "task-42");
+            StringAssert.Contains(text, "hello");
+            for (var previous = 1; previous <= turn; previous++)
+            {
+                StringAssert.Contains(text, "follow-up-" + previous);
+            }
+        }
+        Assert.HasCount(1, fixture.Child.Requests);
+    }
+
+    [TestMethod]
+    public async Task Summary_OversizedCurrentInputDoesNotDiscardItOrReplaceExistingProjection()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        await fixture.RunWithSummaryAsync("child", "child-model", required: true, oversized: true);
+        var before = await fixture.ReadSummaryCacheAsync();
+        var error = await Assert.ThrowsAsync<InvalidDataException>(() => fixture.ContinueSummarySessionAsync(new string('z', 20_000), "primary-model"));
+        StringAssert.Contains(error.Message, "summary_not_reduced");
+        Assert.AreEqual(before!.ProjectionRevision, (await fixture.ReadSummaryCacheAsync())!.ProjectionRevision);
+        Assert.HasCount(2, fixture.Primary.Requests);
+        var summaryRequest = fixture.Primary.Requests.Last();
+        Assert.AreEqual("session-compactor", summaryRequest.AgentId);
+        var data = ((TextContentBlock)summaryRequest.Messages[1].Content[0]).Text;
+        Assert.DoesNotContain(new string('x', 100), data, StringComparison.Ordinal);
+        Assert.DoesNotContain(new string('z', 100), data, StringComparison.Ordinal);
+        StringAssert.Contains(data, "task-42");
+    }
+
     private sealed class Fixture : IAsyncDisposable
     {
         public string Root { get; } = Path.Combine(Path.GetTempPath(), "expert-regression-" + Guid.NewGuid().ToString("N"));
@@ -403,6 +444,7 @@ public sealed class ExpertOrchestrationRegressionTests
 
         private ToolGateway? _gateway;
         private SqliteToolIntentRepository? _intents;
+        private string? _summarySessionId;
 
         public static async Task<Fixture> CreateAsync(bool withTools = false)
         {
@@ -445,6 +487,7 @@ public sealed class ExpertOrchestrationRegressionTests
             var repository = new SqliteSessionRepository(_connection);
             var sessionId = await repository.CreateSessionAsync(
                 RuntimeMode.Expert, "summary-session", TimeSpan.FromHours(1));
+            _summarySessionId = sessionId;
             var runId = await repository.CreateRunAsync(sessionId, "summary-run", TimeSpan.FromHours(1));
             await repository.TransitionRunStatusAsync(runId, RunStatus.Accepted, RunStatus.Preparing);
             await repository.TransitionRunStatusAsync(runId, RunStatus.Preparing, RunStatus.Running);
@@ -459,6 +502,7 @@ public sealed class ExpertOrchestrationRegressionTests
             var options = Options with
             {
                 ContextPolicy = new ExpertContextPolicy(Strategy: "Summary", MaxTokens: 2_000,
+                    TailMessageCount: 1,
                     SummaryProviderId: summaryProvider, SummaryModelId: summaryModel,
                     SummaryRequired: required)
             };
@@ -471,6 +515,27 @@ public sealed class ExpertOrchestrationRegressionTests
                 events.Add(item);
             }
             return events;
+        }
+
+        public Task<ConversationCompactCacheV1?> ReadSummaryCacheAsync() =>
+            new ConversationStore(Root).ReadCompactCacheAsync(_summarySessionId!);
+
+        public async Task ContinueSummarySessionAsync(string text, string modelId = "replacement-model")
+        {
+            var repository = new SqliteSessionRepository(_connection);
+            var sessionId = _summarySessionId!;
+            var runId = await repository.CreateRunAsync(sessionId, Guid.NewGuid().ToString("N"), TimeSpan.FromHours(1));
+            await repository.TransitionRunStatusAsync(runId, RunStatus.Accepted, RunStatus.Preparing);
+            await repository.TransitionRunStatusAsync(runId, RunStatus.Preparing, RunStatus.Running);
+            var reopened = new ExpertModeOrchestrator(Primary, new ConversationStore(Root), repository,
+                _outbox, Root, agentJobCoordinator: Jobs);
+            var options = Options with { ContextPolicy = new ExpertContextPolicy(MaxTokens: 2000, TailMessageCount: 1) };
+            var request = new NewSessionRunRequest("s", "r", RuntimeMode.Expert,
+                new NextTurnSelection(1, RuntimeMode.Expert, new("primary", modelId), options),
+                [new TextContentBlock(text)]);
+            await foreach (var _ in reopened.RunAsync(runId, sessionId, request, "runtime"))
+            {
+            }
         }
 
         // The routes remain private; invoke production methods without duplicating their logic.
@@ -498,7 +563,7 @@ public sealed class ExpertOrchestrationRegressionTests
     {
         public string ProviderId => id;
         public ProviderCapabilities Capabilities { get; } = new();
-        public IReadOnlyList<ProviderModel> Models { get; } = [new(id + "-model", id)];
+        public IReadOnlyList<ProviderModel> Models { get; } = [new(id + "-model", id, ContextWindow: 128_000)];
         public System.Collections.Concurrent.ConcurrentQueue<RuntimeProviderRequest> Requests { get; } = new();
         public Func<CancellationToken, Task>? BeforeOutput { get; set; }
         public Task ValidateCapabilitiesAsync(ContentBlock[] input, CancellationToken ct = default) => Task.CompletedTask;
@@ -510,7 +575,8 @@ public sealed class ExpertOrchestrationRegressionTests
             {
                 await BeforeOutput(ct);
             }
-            yield return new TextDeltaProviderEvent(request.InvocationId, "review done");
+            yield return new TextDeltaProviderEvent(request.InvocationId,
+                request.AgentId == "session-compactor" ? SummaryProjectionTests.ValidJson : "review done");
             yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
         }
     }

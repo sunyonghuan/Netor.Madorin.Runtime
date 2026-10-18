@@ -35,7 +35,8 @@ return await ProviderWorkerHost.RunAsync(
     streams.Stdin,
     streams.Stdout,
     streams.Stderr,
-    declaredCapabilities);
+    declaredCapabilities: declaredCapabilities,
+    declaredModels: Madorin.AI.Runtime.Providers.DeepSeek.Models.DeepSeekModelCatalog.All);
 
 static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config)
 {
@@ -45,11 +46,6 @@ static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config)
             ? "https://api.deepseek.com/v1"
             : config.BaseUrl.Trim(),
         config.ApiKey,
-        models: ToProviderModels(config.Models),
+        models: ProviderConnectionModels.Resolve(config, Madorin.AI.Runtime.Providers.DeepSeek.Models.DeepSeekModelCatalog.All),
         providerId: config.ProviderId);
 }
-
-static List<ProviderModel> ToProviderModels(IReadOnlyList<string>? ids) =>
-    ids is null || ids.Count == 0
-        ? []
-        : ids.Select(static id => new ProviderModel(id, id)).ToList();

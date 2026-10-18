@@ -12,6 +12,41 @@ namespace Madorin.AI.Runtime.Persistence.Files;
 /// </summary>
 public static class CompactionCacheKeyFactory
 {
+    /// <summary>Checks summary semantics and covered bytes, independently of future model selection.</summary>
+    public static string? ValidateSummaryPrefix(
+        ConversationCompactCacheV1? cache,
+        ConversationCompactionSource source,
+        string? agentPromptHash = null,
+        string? toolCatalogVersion = null)
+    {
+        if (cache is null)
+        {
+            return "cache-not-found";
+        }
+        if (cache.Schema != ConversationCompactCacheV1.CurrentSchema)
+        {
+            return "cache-schema-unsupported";
+        }
+        if (cache.Strategy != "summary" || !cache.SummaryValidated || cache.CoveredThroughSequence <= 0
+            || string.IsNullOrWhiteSpace(cache.ProjectionRevision))
+        {
+            return "summary-not-validated";
+        }
+        if (cache.RuntimeMode != "Expert"
+            || (agentPromptHash is not null && cache.AgentPromptHash != agentPromptHash)
+            || (toolCatalogVersion is not null && cache.ToolCatalogVersion != toolCatalogVersion))
+        {
+            return "summary-semantics-changed";
+        }
+        if (source.PrefixHistoryHashes is null
+            || !source.PrefixHistoryHashes.TryGetValue(cache.CoveredThroughSequence, out var prefixHash)
+            || !string.Equals(prefixHash, cache.PrefixHistorySha256, StringComparison.OrdinalIgnoreCase))
+        {
+            return "summary-prefix-changed";
+        }
+        return null;
+    }
+
     /// <summary>
     /// 检查缓存是否匹配指定的输入参数。
     /// 此方法是缓存命中判定的唯一入口，涵盖所有影响压缩结果的因素。

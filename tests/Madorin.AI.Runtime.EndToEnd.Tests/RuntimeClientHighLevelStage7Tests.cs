@@ -18,7 +18,7 @@ public sealed class RuntimeClientHighLevelStage7Tests
 
     [TestMethod]
     [Timeout(60_000, CooperativeCancellation = true)]
-    public async Task SessionCompaction_ConnectedRuntime_WritesCacheAndExpertReusesIt()
+    public async Task SessionCompaction_TailWindowManualProjection_PersistsAcrossThreeTurns()
     {
         var provider = new SummaryCompactionProvider();
         await using var fixture = await RuntimeFixture.StartAsync(provider);
@@ -33,35 +33,53 @@ public sealed class RuntimeClientHighLevelStage7Tests
         var firstRun = await fixture.Client.QueryRunAsync(runId, timeout.Token);
         Assert.IsFalse(string.IsNullOrWhiteSpace(firstRun.SessionId));
 
-        var compacted = await fixture.Client.CompactSessionAsync(
-            new SessionCompactionRequest(
+        var request = new SessionCompactionRequest(
                 firstRun.SessionId!,
                 Strategy: "summary",
                 ProviderId: provider.ProviderId,
-                ModelId: "stage7-model"),
-            timeout.Token);
+                ModelId: "stage7-model",
+                OperationId: Guid.NewGuid().ToString("N"),
+                RawTailSize: 0);
+        var compacted = await fixture.Client.CompactSessionAsync(request, timeout.Token);
 
         Assert.IsTrue(compacted.CacheWritten);
         Assert.IsFalse(compacted.CacheHit);
         Assert.IsTrue(compacted.SummaryGenerated);
+        Assert.AreEqual("Applied", compacted.Outcome);
+        Assert.IsFalse(string.IsNullOrWhiteSpace(compacted.ProjectionRevision));
+        Assert.IsGreaterThan(0L, compacted.CoveredThroughSequence!.Value);
         Assert.AreEqual(1, provider.SummaryCallCount);
 
-        var secondRunId = await fixture.Client.StartExistingSessionRunAsync(
-            new ExistingSessionRunRequest(
-                firstRun.SessionId!,
-                Guid.NewGuid().ToString("N"),
-                InputOverride: [new TextContentBlock("use the compacted context")]),
-            timeout.Token);
-        var secondEvents = await ReadInvocationStartedAndTerminalAsync(
-            fixture.Client,
-            secondRunId,
-            timeout.Token);
-        Assert.AreEqual(MessageTypes.RunCompleted, secondEvents.Terminal.MessageType);
-        var secondProjection = secondEvents.Started.Snapshot.ContextProjection;
-        Assert.IsNotNull(secondProjection);
-        Console.WriteLine($"CacheHit={secondProjection!.CacheHit}; Miss={secondProjection.CacheMissReason}; Strategy={secondProjection.Strategy}; Provider={secondProjection.CompactionProviderId}; Model={secondProjection.CompactionModelId}");
-        Assert.IsTrue(secondProjection.CacheHit);        Assert.AreEqual(1, provider.SummaryCallCount);
-        Assert.IsGreaterThanOrEqualTo(2, provider.MainCallCount);
+        var repeated = await fixture.Client.CompactSessionAsync(request, timeout.Token);
+        Assert.AreEqual(compacted.ProjectionRevision, repeated.ProjectionRevision);
+        Assert.AreEqual(1, provider.SummaryCallCount);
+        var status = await fixture.Client.GetSessionContextStatusAsync(
+            new SessionContextStatusRequest(firstRun.SessionId!, request.OperationId), timeout.Token);
+        Assert.AreEqual("Succeeded", status.OperationState);
+        Assert.AreEqual(compacted.ProjectionRevision, status.ProjectionRevision);
+        Assert.AreEqual(compacted.CoveredThroughSequence, status.CoveredThroughSequence);
+
+        for (var turn = 1; turn <= 3; turn++)
+        {
+            var nextRunId = await fixture.Client.StartExistingSessionRunAsync(
+                new ExistingSessionRunRequest(firstRun.SessionId!, Guid.NewGuid().ToString("N"),
+                    InputOverride: [new TextContentBlock($"incremental-turn-{turn}")]), timeout.Token);
+            var events = await ReadInvocationStartedAndTerminalAsync(fixture.Client, nextRunId, timeout.Token);
+            Assert.AreEqual(MessageTypes.RunCompleted, events.Terminal.MessageType);
+            var projection = events.Started.Snapshot.ContextProjection;
+            Assert.IsNotNull(projection);
+            Assert.IsTrue(projection.CacheHit);
+            var text = string.Join("\n", provider.MainRequests[^1].Messages.SelectMany(m => m.Content)
+                .OfType<TextContentBlock>().Select(block => block.Text));
+            StringAssert.Contains(text, "retained-summary-fact");
+            Assert.IsFalse(text.Contains("original-history-marker", StringComparison.Ordinal));
+            for (var previous = 1; previous <= turn; previous++)
+            {
+                StringAssert.Contains(text, $"incremental-turn-{previous}");
+            }
+        }
+        Assert.AreEqual(1, provider.SummaryCallCount);
+        Assert.AreEqual(4, provider.MainCallCount);
     }
     [TestMethod]
     public async Task HostCallbackDispatcher_RoutesAllTypedCallbacks()
@@ -574,16 +592,16 @@ public sealed class RuntimeClientHighLevelStage7Tests
                 new AgentRef(
                     "stage7-summary-agent",
                     "v1",
-                    "Use the configured summary policy.",
+                    "Use historical facts to answer concisely.",
                     SummaryCompactionProvider.Id,
                     "stage7-model"),
                 contextPolicy: new ExpertContextPolicy(
-                    Strategy: "Summary",
+                    Strategy: "TailWindow",
                     MaxTokens: 8_192,
                     TailMessageCount: 2,
-                    SummaryRequired: true)),
+                    SummaryRequired: false)),
             ToolCatalogVersion: "summary-stage7-v1"),
-        [new TextContentBlock("seed the session before compaction")]);
+        [new TextContentBlock("original-history-marker " + new string('x', 2_000))]);
     private static NewSessionRunRequest CreateRunRequest(
         string toolCatalogVersion,
         string providerId = SingleToolProvider.Id,
@@ -777,6 +795,8 @@ public sealed class RuntimeClientHighLevelStage7Tests
 
         public int MainCallCount { get; private set; }
 
+        public List<RuntimeProviderRequest> MainRequests { get; } = [];
+
         public async IAsyncEnumerable<RuntimeProviderEvent> CompleteStreamingAsync(
             RuntimeProviderRequest request,
             [EnumeratorCancellation] CancellationToken ct = default)
@@ -786,11 +806,13 @@ public sealed class RuntimeClientHighLevelStage7Tests
             if (string.Equals(request.AgentId, "session-compactor", StringComparison.Ordinal))
             {
                 SummaryCallCount++;
-                yield return new TextDeltaProviderEvent(request.InvocationId, "summary from connected runtime");
+                yield return new TextDeltaProviderEvent(request.InvocationId,
+                    """{"goals":["retained-summary-fact"],"completedFacts":[],"decisionsAndConstraints":[],"pendingWork":[],"identifiers":[]}""");
             }
             else
             {
                 MainCallCount++;
+                MainRequests.Add(request);
                 yield return new TextDeltaProviderEvent(request.InvocationId, "main response");
             }
 

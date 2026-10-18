@@ -38,15 +38,10 @@ static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config)
             config.ProviderId,
             config.ApiKey,
             string.IsNullOrWhiteSpace(config.BaseUrl) ? string.Empty : config.BaseUrl.Trim(),
-            ToProviderModels(config.Models),
+            ProviderConnectionModels.Resolve(config),
             config.ApiVersion ?? AzureOpenAIProtocol.DefaultApiVersion,
             config.Capabilities,
             string.IsNullOrWhiteSpace(config.ConfigurationVersion)
                 ? "1"
                 : config.ConfigurationVersion.Trim()));
 }
-
-static List<ProviderModel> ToProviderModels(IReadOnlyList<string>? ids) =>
-    ids is null || ids.Count == 0
-        ? []
-        : ids.Select(static id => new ProviderModel(id, id)).ToList();

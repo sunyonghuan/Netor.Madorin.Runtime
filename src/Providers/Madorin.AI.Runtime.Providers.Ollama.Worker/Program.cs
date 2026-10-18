@@ -48,13 +48,8 @@ static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config)
                 ? ProviderAuthenticationMode.None
                 : ProviderAuthenticationMode.Required,
             config.Capabilities,
-            ToProviderModels(config.Models),
+            ProviderConnectionModels.Resolve(config),
             string.IsNullOrWhiteSpace(config.ConfigurationVersion)
                 ? "1"
                 : config.ConfigurationVersion.Trim()));
 }
-
-static List<ProviderModel> ToProviderModels(IReadOnlyList<string>? ids) =>
-    ids is null || ids.Count == 0
-        ? []
-        : ids.Select(static id => new ProviderModel(id, id)).ToList();

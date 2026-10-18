@@ -5,7 +5,8 @@ namespace Madorin.AI.Runtime.Persistence.Files;
 /// <summary>Contains one consistent canonical-history snapshot for projection.</summary>
 public sealed record ConversationCompactionSource(
     IReadOnlyList<ConversationRecordV1> Records,
-    string HistorySha256);
+    string HistorySha256,
+    IReadOnlyDictionary<long, string>? PrefixHistoryHashes = null);
 
 /// <summary>Stores one provider-independent projected message.</summary>
 public sealed record ConversationCompactMessageV1(
@@ -34,7 +35,12 @@ public sealed record ConversationCompactCacheV1(
     string ToolCatalogVersion = "0",
     string ProjectionSchemaVersion = "madorin.context-projection.v1",
     string SummaryModelVersion = "",
-    string? CacheMissReason = null)
+    string? CacheMissReason = null,
+    long CoveredThroughSequence = 0,
+    string PrefixHistorySha256 = "",
+    string ProjectionRevision = "",
+    string? OperationId = null,
+    bool SummaryValidated = false)
 {
-    public const string CurrentSchema = "madorin.conversation.compact.v2";
+    public const string CurrentSchema = "madorin.conversation.compact.v3";
 }

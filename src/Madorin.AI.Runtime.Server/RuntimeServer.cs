@@ -478,6 +478,7 @@ public sealed class RuntimeServer : IAsyncDisposable
             .ConfigureAwait(false);
 
         await _shutdown.CancelAsync().ConfigureAwait(false);
+        await _compactionService.DisposeAsync().ConfigureAwait(false);
         foreach (var run in _activeRuns.Values)
         {
             run.Cancel();
@@ -497,7 +498,6 @@ public sealed class RuntimeServer : IAsyncDisposable
 
         await _instanceLock.DisposeAsync().ConfigureAwait(false);
         await _instanceNameLock.DisposeAsync().ConfigureAwait(false);
-        _compactionService.Dispose();
         _eventDispatchGate.Dispose();
         _meetingResumeGate.Dispose();
         _runRegistry.Dispose();
@@ -590,6 +590,16 @@ public sealed class RuntimeServer : IAsyncDisposable
                 controlChannel.SetRequestHandler(async (request, requestCt) =>
                 {
                     session.Touch(_timeProvider.GetUtcNow());
+                    // Compaction owns its database connections and Session lease; do not hold
+                    // the connection-wide repository gate during a model network request.
+                    if (request.Method == MessageTypes.SessionCompaction)
+                    {
+                        return await CreateSessionCompactionResponseAsync(request, requestCt).ConfigureAwait(false);
+                    }
+                    if (request.Method == MessageTypes.SessionContextStatus)
+                    {
+                        return await CreateSessionContextStatusResponseAsync(request, requestCt).ConfigureAwait(false);
+                    }
                     await session.EnterRequestAsync(requestCt).ConfigureAwait(false);
                     try
                     {
@@ -1244,6 +1254,11 @@ public sealed class RuntimeServer : IAsyncDisposable
                 .ConfigureAwait(false);
         }
 
+        if (string.Equals(request.Method, MessageTypes.SessionContextStatus, StringComparison.Ordinal))
+        {
+            return await CreateSessionContextStatusResponseAsync(request, ct).ConfigureAwait(false);
+        }
+
         if (string.Equals(request.Method, MessageTypes.SessionRehydrate, StringComparison.Ordinal))
         {
             return await CreateSessionRehydrateResponseAsync(
@@ -1845,7 +1860,9 @@ public sealed class RuntimeServer : IAsyncDisposable
                         parameters.KeepLastTokens,
                         parameters.DryRun,
                         parameters.Force,
-                        parameters.SelectionSource),
+                        parameters.SelectionSource,
+                        parameters.OperationId,
+                        parameters.RawTailSize),
                     ct)
                 .ConfigureAwait(false);
             if (result is null)
@@ -1870,11 +1887,19 @@ public sealed class RuntimeServer : IAsyncDisposable
                 result.CacheWritten,
                 result.CacheMissReason,
                 result.SelectionSource,
-                result.SummaryGenerated);
+                result.SummaryGenerated,
+                result.Outcome,
+                result.OperationId,
+                result.ProjectionRevision,
+                result.CoveredThroughSequence);
             var payload = JsonSerializer.SerializeToElement(
                 dto,
                 RuntimeJsonContext.Default.SessionCompactionResultDto);
             return new JsonRpcResponse("2.0", request.Id, payload);
+        }
+        catch (OperationCanceledException)
+        {
+            return Error(request.Id, -32020, "compaction_timeout: query session.context.status with OperationId.");
         }
         catch (KeyNotFoundException ex)
         {
@@ -1887,6 +1912,19 @@ public sealed class RuntimeServer : IAsyncDisposable
                 -32020,
                 $"SessionCompactionFailed: stage=projection;sessionId={parameters.SessionId};reason={ex.Message}");
         }
+    }
+
+    private async Task<JsonRpcResponse> CreateSessionContextStatusResponseAsync(JsonRpcRequest request, CancellationToken ct)
+    {
+        var parameters = request.Params?.Deserialize(RuntimeJsonContext.Default.SessionContextStatusRequest);
+        if (parameters is null || string.IsNullOrWhiteSpace(parameters.SessionId))
+        {
+            return Error(request.Id, -32602, "The session.context.status parameters are invalid.");
+        }
+        var status = await _compactionService.GetStatusAsync(parameters.SessionId, parameters.OperationId, ct).ConfigureAwait(false);
+        return status is null
+            ? Error(request.Id, -32004, "Session was not found.")
+            : new JsonRpcResponse("2.0", request.Id, JsonSerializer.SerializeToElement(status, RuntimeJsonContext.Default.SessionContextStatusDto));
     }
 
     private static string ToCompactionWireValue(SessionCompactionStrategy strategy) => strategy switch
@@ -1913,6 +1951,16 @@ public sealed class RuntimeServer : IAsyncDisposable
             return Error(request.Id, -32602, "The session.selection.update parameters are invalid.");
         }
 
+        IDisposable mutation;
+        try
+        {
+            mutation = _compactionService.EnterMutation(parameters.SessionId);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Error(request.Id, -32003, ex.Message);
+        }
+        using var mutationLease = mutation;
         var upsertError = TryUpsertProviderConfigs(parameters.ProviderConfigs);
         if (upsertError is not null)
         {
@@ -2361,6 +2409,19 @@ public sealed class RuntimeServer : IAsyncDisposable
         RunStartPlan plan,
         CancellationToken ct)
     {
+        IDisposable? mutation = null;
+        if (plan.ExistingSessionId is { } existingSessionId)
+        {
+            try
+            {
+                mutation = _compactionService.EnterMutation(existingSessionId);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Error(request.Id, -32003, ex.Message);
+            }
+        }
+        using var mutationLease = mutation;
         var runRequest = plan.ExecutionRequest;
         var primaryProviderId = _hostProviderRegistry is not null
             ? HostModeSelectionValidator.ResolvePrimaryProviderId(runRequest.Selection)
@@ -3420,11 +3481,13 @@ public sealed class RuntimeServer : IAsyncDisposable
         ModeOptions modeOptions = selection.ModeOptions switch
         {
             // Expert 须恢复 AvailableAgents，否则 rehydrate 后 @ 委派池丢失。
-            ExpertModeOptions expert => new ExpertModeOptions(
-                RehydrateAgent(expert.Agent),
-                expert.AvailableAgents is null
+            ExpertModeOptions expert => expert with
+            {
+                Agent = RehydrateAgent(expert.Agent),
+                AvailableAgents = expert.AvailableAgents is null
                     ? null
-                    : [.. expert.AvailableAgents.Select(RehydrateAgent)]),
+                    : [.. expert.AvailableAgents.Select(RehydrateAgent)]
+            },
             _ => throw new InvalidOperationException(
                 $"Mode options '{selection.ModeOptions.GetType().Name}' are not supported.")
         };

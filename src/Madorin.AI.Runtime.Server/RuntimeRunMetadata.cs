@@ -31,12 +31,13 @@ internal static class RuntimeRunMetadata
         ModeOptions modeOptions = selection.ModeOptions switch
         {
             // Expert 须保留 AvailableAgents，否则落盘/续跑后 @ 委派池丢失。
-            ExpertModeOptions expert => new ExpertModeOptions(
-                RemovePromptContent(expert.Agent),
-                expert.AvailableAgents is null
+            ExpertModeOptions expert => expert with
+            {
+                Agent = RemovePromptContent(expert.Agent),
+                AvailableAgents = expert.AvailableAgents is null
                     ? null
-                    : [.. expert.AvailableAgents.Select(RemovePromptContent)],
-                expert.ContextPolicy),
+                    : [.. expert.AvailableAgents.Select(RemovePromptContent)]
+            },
             _ => throw new InvalidOperationException(
                 $"Mode options '{selection.ModeOptions.GetType().Name}' are not supported.")
         };

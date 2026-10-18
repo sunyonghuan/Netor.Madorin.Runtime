@@ -72,7 +72,8 @@ public static partial class ProviderWorkerHost
                         ProviderWorkerIpc.Version,
                         slug,
                         protocol,
-                        declaredCapabilities),
+                        declaredCapabilities,
+                        declaredModels),
                     _shutdownCts.Token)
                 .ConfigureAwait(false);
             return null;

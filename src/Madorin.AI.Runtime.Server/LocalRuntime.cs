@@ -32,6 +32,7 @@ public sealed class LocalRuntime : IAsyncDisposable
         new BuiltinToolRegistry(),
         new JsonSchemaToolValidator());
     private readonly Func<NextTurnSelection, IRuntimeProviderAdapter> _providerResolver;
+    private readonly SessionCompactionService _compactionService;
     private readonly IToolConsentHandler? _toolConsentHandler;
     private readonly SessionMaintenanceAuditLog _maintenanceAudit;
     private readonly RuntimeDiagnosticLog _diagnosticLog;
@@ -59,6 +60,7 @@ public sealed class LocalRuntime : IAsyncDisposable
         _dataDirectory = options.DataDirectory;
         _databaseConnectionString = databaseConnectionString;
         _providerResolver = options.ProviderResolver;
+        _compactionService = new SessionCompactionService(_dataDirectory, databaseConnectionString, selection => ResolveProvider(selection));
         _toolConsentHandler = options.ToolConsentHandler;
         _maintenanceAudit = new SessionMaintenanceAuditLog(options.DataDirectory);
         _diagnosticLog = diagnosticLog;
@@ -428,21 +430,23 @@ public sealed class LocalRuntime : IAsyncDisposable
         var store = new ConversationStore(_dataDirectory);
         var source = await store.ReadCompactionSourceAsync(sessionId, ct).ConfigureAwait(false);
         var cache = await store.ReadCompactCacheAsync(sessionId, ct).ConfigureAwait(false);
-        var cacheCurrent = cache is not null
-            && cache.SourceHistorySha256.Equals(source.HistorySha256, StringComparison.OrdinalIgnoreCase);
-        var canonicalEstimatedTokens = cacheCurrent
-            ? cache!.BeforeEstimatedTokens
-            : EstimateHistoryTokens(source.Records);
+        var metadata = await _compactionService.GetStatusAsync(sessionId, ct: ct).ConfigureAwait(false);
+        var cacheCurrent = metadata?.ProjectionRevision is not null;
+        var windowCacheCurrent = cache is { Strategy: "full" or "sliding-window" }
+            && cache.Schema == ConversationCompactCacheV1.CurrentSchema
+            && cache.SourceHistorySha256 == source.HistorySha256;
+        var canonicalEstimatedTokens = EstimateHistoryTokens(source.Records);
 
         return new SessionContextStatus(
             sessionId,
             source.Records.Count,
             canonicalEstimatedTokens,
-            cacheCurrent ? cache!.ProjectionMessages.Length : source.Records.Count,
-            cacheCurrent ? cache!.AfterEstimatedTokens : canonicalEstimatedTokens,
-            cacheCurrent ? cache!.Strategy : "full",
-            cacheCurrent,
-            cacheCurrent ? cache!.CreatedAt : null);
+            cacheCurrent ? 1 + source.Records.Count(record => record.Sequence > metadata!.CoveredThroughSequence)
+                : windowCacheCurrent ? cache!.ProjectionMessages.Length : source.Records.Count,
+            windowCacheCurrent ? cache!.AfterEstimatedTokens : metadata?.HistoryEstimatedTokens ?? canonicalEstimatedTokens,
+            cacheCurrent || windowCacheCurrent ? cache!.Strategy : "full",
+            cacheCurrent || windowCacheCurrent,
+            cacheCurrent || windowCacheCurrent ? cache!.CreatedAt : null);
     }
 
     /// <summary>Sets a persisted Session status without changing its conversation data.</summary>
@@ -626,242 +630,9 @@ public sealed class LocalRuntime : IAsyncDisposable
         return result;
     }
 
-    private async Task<SessionCompactionResult?> CompactSessionCoreAsync(
-        string sessionId,
-        SessionCompactionOptions options,
-        CancellationToken ct)
-    {
-
-        await _runGate.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
-            await using var connection = await OpenDatabaseConnectionAsync(ct).ConfigureAwait(false);
-            var repository = new SqliteSessionRepository(connection);
-            var snapshot = await repository.GetSessionSnapshotAsync(sessionId, ct)
-                .ConfigureAwait(false);
-            if (snapshot is null)
-            {
-                return null;
-            }
-
-            var selection = await GetSessionSelectionAsync(snapshot, ct).ConfigureAwait(false);
-            var isExpertMode = selection.ModeOptions is ExpertModeOptions;
-            var expertOptions = isExpertMode ? (ExpertModeOptions)selection.ModeOptions : null;
-            var contextPolicy = expertOptions?.ContextPolicy ?? new ExpertContextPolicy();
-            var contextPolicyHash = isExpertMode
-                ? CompactionCacheKeyFactory.ComputeContextPolicyHash(contextPolicy)
-                : string.Empty;
-            var agentPromptHash = isExpertMode
-                ? CompactionCacheKeyFactory.ExtractAgentPromptHashFromSnapshot(
-                    snapshot,
-                    expertOptions!.Agent.AgentId)
-                    ?? CompactionCacheKeyFactory.ComputeAgentPromptHash(
-                        expertOptions.Agent.SystemPrompt)
-                : string.Empty;
-            var toolCatalogVersion = selection.ToolCatalogVersion;
-            var providerId = options.ProviderId ?? selection.DefaultSelection.ProviderId;
-            var modelId = options.ModelId ?? selection.DefaultSelection.ModelId;
-            var effectiveSelection = selection with
-            {
-                DefaultSelection = new DefaultSelection(providerId, modelId)
-            };
-            var provider = ResolveProvider(effectiveSelection);
-            ValidateCompactionModel(provider, modelId);
-
-            // 解析压缩模型（与 ExpertModeOrchestrator 保持一致）
-            var compactionProviderId = isExpertMode && !string.IsNullOrWhiteSpace(contextPolicy.SummaryProviderId)
-                ? contextPolicy.SummaryProviderId
-                : providerId;
-            var compactionModelId = isExpertMode && !string.IsNullOrWhiteSpace(contextPolicy.SummaryModelId)
-                ? contextPolicy.SummaryModelId
-                : modelId;
-            var compactionProvider = string.Equals(compactionProviderId, providerId, StringComparison.Ordinal)
-                ? provider
-                : ResolveProvider(effectiveSelection with
-                {
-                    DefaultSelection = new DefaultSelection(compactionProviderId, compactionModelId)
-                });
-            ValidateCompactionModel(compactionProvider, compactionModelId);
-
-            int? keepLastTokens = options.Strategy is SessionCompactionStrategy.SlidingWindow
-                ? options.KeepLastTokens ?? ResolveDefaultCompactionWindow(provider, modelId)
-                : null;
-            var strategyName = GetCompactionStrategyName(options.Strategy);
-            var summaryModelVersion = ResolveCompactionModelVersion(compactionProvider, compactionModelId);
-            var store = new ConversationStore(_dataDirectory);
-            var source = await store.ReadCompactionSourceAsync(sessionId, ct)
-                .ConfigureAwait(false);
-
-            string? cacheMissReason = null;
-            var selectionSource = options.SelectionSource
-                ?? (options.ProviderId is not null || options.ModelId is not null
-                    ? "cli-override"
-                    : "session-default");
-
-            if (!options.DryRun && !options.Force)
-            {
-                var cached = await store.ReadCompactCacheAsync(sessionId, ct)
-                    .ConfigureAwait(false);
-                if (CompactionCacheKeyFactory.IsMatchingCache(
-                    cached,
-                    source.HistorySha256,
-                    strategyName,
-                    providerId,
-                    modelId,
-                    keepLastTokens,
-                    isExpertMode ? contextPolicyHash : null,
-                    isExpertMode ? agentPromptHash : null,
-                    isExpertMode ? toolCatalogVersion : null,
-                    summaryModelVersion))
-                {
-                    return CreateCachedCompactionResult(cached!, selectionSource);
-                }
-
-                cacheMissReason = CompactionCacheKeyFactory.AnalyzeCacheMismatch(
-                    cached,
-                    source.HistorySha256,
-                    strategyName,
-                    providerId,
-                    modelId,
-                    keepLastTokens,
-                    isExpertMode ? contextPolicyHash : null,
-                    isExpertMode ? agentPromptHash : null,
-                    isExpertMode ? toolCatalogVersion : null,
-                    summaryModelVersion);
-            }
-
-            if (options.Force)
-            {
-                cacheMissReason = "forced-regeneration";
-            }
-
-            var estimateInvocationId = "compact-estimate-" + Guid.NewGuid().ToString("N");
-            ValueTask<ProviderTokenEstimate> EstimateAsync(
-                RuntimeProviderMessage[] messages,
-                CancellationToken token) =>
-                provider.EstimateTokensAsync(
-                    new RuntimeProviderRequest(
-                        estimateInvocationId,
-                        "session-compactor",
-                        providerId,
-                        modelId,
-                        messages,
-                        Tools: null,
-                        CancellationToken: token),
-                    token);
-            var fullProjection = await ContextProjectionBuilder.BuildAsync(
-                    source.Records,
-                    int.MaxValue,
-                    EstimateAsync,
-                    ct)
-                .ConfigureAwait(false);
-
-            if (options.DryRun)
-            {
-                var plannedMessageCount = options.Strategy is SessionCompactionStrategy.Summary
-                    ? 1
-                    : options.Strategy is SessionCompactionStrategy.Full
-                        ? fullProjection.Messages.Length
-                        : (await ContextProjectionBuilder.BuildAsync(
-                                source.Records,
-                                keepLastTokens!.Value,
-                                EstimateAsync,
-                                ct)
-                            .ConfigureAwait(false)).Messages.Length;
-                return new SessionCompactionResult(
-                    sessionId,
-                    options.Strategy,
-                    providerId,
-                    modelId,
-                    keepLastTokens,
-                    source.Records.Count,
-                    plannedMessageCount,
-                    Math.Max(0, source.Records.Count - plannedMessageCount),
-                    fullProjection.EstimatedTokens,
-                    AfterEstimatedTokens: null,
-                    fullProjection.EstimateSource,
-                    DryRun: true,
-                    CacheHit: false,
-                    CacheWritten: false,
-                    CacheMissReason: cacheMissReason,
-                    SelectionSource: selectionSource,
-                    SummaryGenerated: false);
-            }
-
-            RuntimeProviderMessage[] projectionMessages;
-            int droppedMessageCount;
-            int afterEstimatedTokens;
-            string estimateSource;
-            if (options.Strategy is SessionCompactionStrategy.Summary)
-            {
-                projectionMessages =
-                [await GenerateSummaryMessageAsync(
-                    compactionProvider,
-                    compactionProviderId,
-                    compactionModelId,
-                    fullProjection.Messages,
-                    ct).ConfigureAwait(false)];
-                var afterEstimate = await EstimateAsync(projectionMessages, ct).ConfigureAwait(false);
-                afterEstimatedTokens = afterEstimate.InputTokens
-                    ?? ProviderTokenEstimator.Estimate(new RuntimeProviderRequest(
-                        estimateInvocationId,
-                        "session-compactor",
-                        providerId,
-                        modelId,
-                        projectionMessages)).InputTokens
-                    ?? 0;
-                estimateSource = afterEstimate.InputTokens is null
-                    ? "runtime.utf8-bytes/4"
-                    : $"provider.{afterEstimate.Accuracy.ToString().ToLowerInvariant()}";
-                droppedMessageCount = source.Records.Count;
-            }
-            else
-            {
-                var projection = options.Strategy is SessionCompactionStrategy.Full
-                    ? fullProjection
-                    : await ContextProjectionBuilder.BuildAsync(
-                            source.Records,
-                            keepLastTokens!.Value,
-                            EstimateAsync,
-                            ct)
-                        .ConfigureAwait(false);
-                projectionMessages = projection.Messages;
-                droppedMessageCount = projection.DroppedMessageCount;
-                afterEstimatedTokens = projection.EstimatedTokens;
-                estimateSource = projection.EstimateSource;
-            }
-
-            var compactCache = new ConversationCompactCacheV1(
-                ConversationCompactCacheV1.CurrentSchema,
-                sessionId,
-                source.HistorySha256,
-                strategyName,
-                providerId,
-                modelId,
-                keepLastTokens,
-                source.Records.Count,
-                droppedMessageCount,
-                fullProjection.EstimatedTokens,
-                afterEstimatedTokens,
-                estimateSource,
-                projectionMessages.Select(CreateCompactMessage).ToArray(),
-                DateTimeOffset.UtcNow,
-                RuntimeMode: snapshot.Mode.ToString(),
-                ContextPolicyHash: contextPolicyHash,
-                AgentPromptHash: agentPromptHash,
-                ToolCatalogVersion: selection.ToolCatalogVersion,
-                SummaryModelVersion: summaryModelVersion,
-                CacheMissReason: cacheMissReason);
-            await store.WriteCompactCacheAsync(sessionId, compactCache, ct)
-                .ConfigureAwait(false);
-            return CreateGeneratedCompactionResult(options.Strategy, compactCache, cacheMissReason, selectionSource);
-        }
-        finally
-        {
-            _runGate.Release();
-        }
-    }
-
+    private Task<SessionCompactionResult?> CompactSessionCoreAsync(
+        string sessionId, SessionCompactionOptions options, CancellationToken ct) =>
+        _compactionService.CompactAsync(sessionId, options, ct);
     /// <summary>Gets the current persisted Selection for a Session.</summary>
     public async Task<NextTurnSelection?> GetSessionSelectionAsync(
         string sessionId,
@@ -883,6 +654,7 @@ public sealed class LocalRuntime : IAsyncDisposable
         ThrowIfDisposed();
         ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
         ArgumentNullException.ThrowIfNull(selection);
+        using var mutation = _compactionService.EnterMutation(sessionId);
         if (expectedSelectionVersion < 0
             || selection.SelectionVersion <= expectedSelectionVersion)
         {
@@ -973,6 +745,7 @@ public sealed class LocalRuntime : IAsyncDisposable
                 alwaysWrite: true)
             .ConfigureAwait(false);
 
+        await _compactionService.DisposeAsync().ConfigureAwait(false);
         List<IRuntimeProviderAdapter> providers;
         lock (_providerSync)
         {
@@ -1057,6 +830,7 @@ public sealed class LocalRuntime : IAsyncDisposable
             throw new ArgumentException("Existing Session input is required.", nameof(request));
         }
 
+        using var mutation = _compactionService.EnterMutation(request.SessionId);
         await _runGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -1648,44 +1422,6 @@ public sealed class LocalRuntime : IAsyncDisposable
         }
     }
 
-    private static void ValidateCompactionModel(
-        IRuntimeProviderAdapter provider,
-        string modelId)
-    {
-        if (provider.Models.Count == 0
-            || provider.Models.Any(model =>
-                string.Equals(model.Id, modelId, StringComparison.Ordinal)
-                || string.Equals(model.ProviderModelId, modelId, StringComparison.Ordinal)))
-        {
-            return;
-        }
-
-        throw new KeyNotFoundException(
-            $"Model '{modelId}' is not available from Provider '{provider.ProviderId}'.");
-    }
-
-    private static int ResolveDefaultCompactionWindow(
-        IRuntimeProviderAdapter provider,
-        string modelId)
-    {
-        var model = provider.Models.FirstOrDefault(candidate =>
-            string.Equals(candidate.Id, modelId, StringComparison.Ordinal)
-            || string.Equals(candidate.ProviderModelId, modelId, StringComparison.Ordinal));
-        return model?.ContextWindow is > 0
-            ? Math.Max(1, (int)(model.ContextWindow.Value * 0.9))
-            : SessionCompactionOptions.DefaultKeepLastTokens;
-    }
-
-    private static string ResolveCompactionModelVersion(
-        IRuntimeProviderAdapter provider,
-        string modelId)
-    {
-        var model = provider.Models.FirstOrDefault(candidate =>
-            string.Equals(candidate.Id, modelId, StringComparison.Ordinal)
-            || string.Equals(candidate.ProviderModelId, modelId, StringComparison.Ordinal));
-        return model?.ProviderModelId ?? modelId;
-    }
-
     private static int EstimateHistoryTokens(IReadOnlyList<ConversationRecordV1> records)
     {
         long utf8Bytes = 0;
@@ -1769,127 +1505,6 @@ public sealed class LocalRuntime : IAsyncDisposable
         return [new TextContentBlock(content.GetRawText())];
     }
 
-    private static string ComputeCompactionHash(string value) =>
-        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
-
-
-    private static SessionCompactionResult CreateCachedCompactionResult(
-        ConversationCompactCacheV1 cache,
-        string selectionSource) =>
-        new(
-            cache.SessionId,
-            ParseCompactionStrategy(cache.Strategy),
-            cache.ProviderId,
-            cache.ModelId,
-            cache.KeepLastTokens,
-            cache.SourceMessageCount,
-            cache.ProjectionMessages.Length,
-            cache.DroppedMessageCount,
-            cache.BeforeEstimatedTokens,
-            cache.AfterEstimatedTokens,
-            cache.EstimateSource,
-            DryRun: false,
-            CacheHit: true,
-            CacheWritten: false,
-            CacheMissReason: null,
-            SelectionSource: selectionSource,
-            SummaryGenerated: string.Equals(cache.Strategy, "summary", StringComparison.Ordinal));
-    private static SessionCompactionResult CreateGeneratedCompactionResult(
-        SessionCompactionStrategy strategy,
-        ConversationCompactCacheV1 cache,
-        string? cacheMissReason,
-        string selectionSource) =>
-        new(
-            cache.SessionId,
-            strategy,
-            cache.ProviderId,
-            cache.ModelId,
-            cache.KeepLastTokens,
-            cache.SourceMessageCount,
-            cache.ProjectionMessages.Length,
-            cache.DroppedMessageCount,
-            cache.BeforeEstimatedTokens,
-            cache.AfterEstimatedTokens,
-            cache.EstimateSource,
-            DryRun: false,
-            CacheHit: false,
-            CacheWritten: true,
-            CacheMissReason: cacheMissReason,
-            SelectionSource: selectionSource,
-            SummaryGenerated: strategy is SessionCompactionStrategy.Summary);
-
-    private static ConversationCompactMessageV1 CreateCompactMessage(
-        RuntimeProviderMessage message) =>
-        new(
-            message.Role,
-            JsonSerializer.SerializeToElement(
-                message.Content,
-                RuntimeJsonContext.Default.ContentBlockArray));
-
-    private static async Task<RuntimeProviderMessage> GenerateSummaryMessageAsync(
-        IRuntimeProviderAdapter provider,
-        string providerId,
-        string modelId,
-        RuntimeProviderMessage[] history,
-        CancellationToken ct)
-    {
-        var invocationId = "compact-summary-" + Guid.NewGuid().ToString("N");
-        var instruction = new RuntimeProviderMessage(
-            RuntimeProviderRoles.System,
-            [new TextContentBlock(
-                "Summarize this conversation for future context. Preserve decisions, constraints, " +
-                "unresolved work, identifiers, and tool outcomes. Do not add facts. Return only the summary.")]);
-        var request = new RuntimeProviderRequest(
-            invocationId,
-            "session-compactor",
-            providerId,
-            modelId,
-            [instruction, .. history],
-            Tools: null,
-            CancellationToken: ct);
-        var summary = new StringBuilder();
-        var completed = false;
-        await foreach (var providerEvent in ProviderInvocationBoundary.CompleteStreamingAsync(
-                provider,
-                request,
-                ct)
-            .ConfigureAwait(false))
-        {
-            switch (providerEvent)
-            {
-                case TextDeltaProviderEvent text:
-                    summary.Append(text.Delta);
-                    break;
-                case InvocationCompletedProviderEvent:
-                    completed = true;
-                    break;
-                case InvocationFailedProviderEvent failed:
-                    throw new InvalidOperationException(
-                        $"Summary Provider failed ({failed.Error.Code}): {failed.Error.Message}");
-                case ToolCallDeltaProviderEvent or ToolCallCompleteProviderEvent:
-                    throw new InvalidDataException(
-                        "The summary Provider returned a tool call for a tool-free request.");
-                case ReasoningDeltaProviderEvent
-                    or UsageUpdatedProviderEvent
-                    or ProjectionAdjustedProviderEvent:
-                    break;
-                default:
-                    throw new InvalidDataException(
-                        $"The summary Provider returned unsupported event '{providerEvent.GetType().Name}'.");
-            }
-        }
-
-        if (!completed || string.IsNullOrWhiteSpace(summary.ToString()))
-        {
-            throw new InvalidDataException(
-                "The summary Provider did not return a completed non-empty summary.");
-        }
-
-        return new RuntimeProviderMessage(
-            RuntimeProviderRoles.System,
-            [new TextContentBlock(summary.ToString())]);
-    }
-
     private static string GetCompactionStrategyName(SessionCompactionStrategy strategy) =>
         strategy switch
         {
@@ -1897,16 +1512,6 @@ public sealed class LocalRuntime : IAsyncDisposable
             SessionCompactionStrategy.SlidingWindow => "sliding-window",
             SessionCompactionStrategy.Summary => "summary",
             _ => throw new ArgumentOutOfRangeException(nameof(strategy))
-        };
-
-    private static SessionCompactionStrategy ParseCompactionStrategy(string strategy) =>
-        strategy switch
-        {
-            "full" => SessionCompactionStrategy.Full,
-            "sliding-window" => SessionCompactionStrategy.SlidingWindow,
-            "summary" => SessionCompactionStrategy.Summary,
-            _ => throw new InvalidDataException(
-                $"The compact cache contains unknown strategy '{strategy}'.")
         };
 
     private async Task<string> AppendMaintenanceAuditAsync(

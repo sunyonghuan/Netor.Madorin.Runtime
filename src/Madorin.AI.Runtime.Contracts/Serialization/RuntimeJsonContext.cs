@@ -46,6 +46,8 @@ namespace Madorin.AI.Runtime.Contracts.Serialization;
 [JsonSerializable(typeof(ExpertPlanStatusChangedEvent))]
 [JsonSerializable(typeof(HostProviderConfig))]
 [JsonSerializable(typeof(HostProviderConfig[]))]
+[JsonSerializable(typeof(HostProviderModelConfig))]
+[JsonSerializable(typeof(HostProviderModelConfig[]))]
 [JsonSerializable(typeof(IReadOnlyList<HostProviderConfig>))]
 [JsonSerializable(typeof(EventChannelHello))]
 [JsonSerializable(typeof(EventAcknowledgeParameters))]
@@ -117,6 +119,8 @@ namespace Madorin.AI.Runtime.Contracts.Serialization;
 [JsonSerializable(typeof(SessionSelectionUpdateParameters))]
 [JsonSerializable(typeof(SessionCompactionRequest))]
 [JsonSerializable(typeof(SessionCompactionResultDto))]
+[JsonSerializable(typeof(SessionContextStatusRequest))]
+[JsonSerializable(typeof(SessionContextStatusDto))]
 [JsonSerializable(typeof(NeededAgentDefinition))]
 [JsonSerializable(typeof(NeededAgentDefinition[]))]
 [JsonSerializable(typeof(RuntimeCapabilities))]
@@ -159,4 +163,3 @@ namespace Madorin.AI.Runtime.Contracts.Serialization;
 [JsonSerializable(typeof(bool))]
 [JsonSerializable(typeof(long))]
 public sealed partial class RuntimeJsonContext : JsonSerializerContext;
-

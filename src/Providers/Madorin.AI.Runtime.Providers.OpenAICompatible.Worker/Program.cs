@@ -45,7 +45,7 @@ static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config)
             : config.AuthenticationHeader.Trim(),
         config.AuthenticationScheme,
         config.Capabilities,
-        ToProviderModels(config.Models),
+        ProviderConnectionModels.Resolve(config),
         string.IsNullOrWhiteSpace(config.ConfigurationVersion)
             ? "1"
             : config.ConfigurationVersion.Trim(),
@@ -56,8 +56,3 @@ static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config)
         ProviderHttpClientFactory.Shared.CreateClient(config.ProviderId),
         disposeHttpClient: true);
 }
-
-static List<ProviderModel> ToProviderModels(IReadOnlyList<string>? ids) =>
-    ids is null || ids.Count == 0
-        ? []
-        : ids.Select(static id => new ProviderModel(id, id)).ToList();

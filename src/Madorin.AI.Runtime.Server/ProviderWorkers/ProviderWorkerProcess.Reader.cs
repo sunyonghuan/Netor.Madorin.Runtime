@@ -50,6 +50,7 @@ public sealed partial class ProviderWorkerProcess
         {
             case HelloOkFrame helloOk:
                 _negotiatedCapabilities = helloOk.Capabilities;
+                _negotiatedModels = helloOk.Models;
                 _hello?.TrySetResult(new HelloFrameResult(true, null, null, helloOk.Capabilities));
                 break;
             case HelloRejectedFrame rejected:

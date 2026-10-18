@@ -646,9 +646,7 @@ public sealed class StandaloneSessionCommandsStage7Tests
                 Assert.IsTrue(data.GetProperty("dryRun").GetBoolean());
                 Assert.IsFalse(data.GetProperty("cacheHit").GetBoolean());
                 Assert.IsFalse(data.GetProperty("cacheWritten").GetBoolean());
-                Assert.AreEqual(
-                    JsonValueKind.Null,
-                    data.GetProperty("afterEstimatedTokens").ValueKind);
+                Assert.IsGreaterThanOrEqualTo(0, data.GetProperty("afterEstimatedTokens").GetInt32());
             }
 
             var overridden = RunCommand(
@@ -685,6 +683,7 @@ public sealed class StandaloneSessionCommandsStage7Tests
         {
             var fixture = await CreateFixtureAsync(root);
             var sessionId = RunSession(fixture, "compact summary source");
+            await AppendCompactionHistoryAsync(fixture, sessionId);
             fixture.ProviderState.ResetSummaryCalls();
             var canonicalPath = Path.Combine(
                 fixture.DataDirectory,
@@ -720,7 +719,7 @@ public sealed class StandaloneSessionCommandsStage7Tests
                 fixture,
                 "session", "compact", sessionId, "--force", "--json");
 
-            AssertCompactionResult(forced, "summary", cacheHit: false, cacheWritten: true);
+            AssertCompactionResult(forced, "summary", cacheHit: true, cacheWritten: false);
             Assert.AreEqual(2, fixture.ProviderState.SummaryCallCount);
 
             var store = new ConversationStore(fixture.DataDirectory);
@@ -758,6 +757,7 @@ public sealed class StandaloneSessionCommandsStage7Tests
         {
             var fixture = await CreateFixtureAsync(root);
             var sessionId = RunSession(fixture, "compact provider failure");
+            await AppendCompactionHistoryAsync(fixture, sessionId);
             fixture.ProviderState.ResetSummaryCalls();
 
             var generated = RunCommand(
@@ -1047,6 +1047,15 @@ public sealed class StandaloneSessionCommandsStage7Tests
 
     private static string GetCompactCachePath(SessionFixture fixture, string sessionId) =>
         Path.Combine(fixture.DataDirectory, "messages", sessionId + ".compact.json");
+
+    private async Task AppendCompactionHistoryAsync(SessionFixture fixture, string sessionId)
+    {
+        var store = new ConversationStore(fixture.DataDirectory);
+        for (var index = 0; index < 12; index++)
+        {
+            await store.AppendMessageAsync(sessionId, "Expert", CreateTextDraft($"history-{index}"), _testContext.CancellationToken);
+        }
+    }
 
     private static ConversationMessageDraft CreateTextDraft(string text)
     {
@@ -1364,7 +1373,7 @@ public sealed class StandaloneSessionCommandsStage7Tests
     {
         public int SummaryCallCount;
 
-        public string SummaryReply { get; } = "deterministic compact summary";
+        public string SummaryReply { get; set; } = """{"goals":["deterministic compact summary"],"completedFacts":[],"decisionsAndConstraints":[],"pendingWork":[],"identifiers":[]}""";
 
         public RuntimeProviderRequest? LastSummaryRequest { get; set; }
 

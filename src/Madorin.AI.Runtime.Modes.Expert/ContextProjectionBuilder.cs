@@ -121,7 +121,13 @@ public static class ContextProjectionBuilder
     private static List<AtomicUnit> BuildAtomicUnits(
         IReadOnlyList<ConversationRecordV1> history)
     {
-        var messages = history.Select(CreateProjectedMessage).ToArray();
+        return BuildAtomicMessageUnits(history.Select(CreateProjectedMessage).Select(item => item.Message).ToArray())
+            .Select(static messages => new AtomicUnit(messages)).ToList();
+    }
+
+    /// <summary>Returns contiguous tool-call/result units without splitting their message boundaries.</summary>
+    public static IReadOnlyList<RuntimeProviderMessage[]> BuildAtomicMessageUnits(RuntimeProviderMessage[] messages)
+    {
         var units = new List<AtomicUnit>(messages.Length);
         for (var index = 0; index < messages.Length; index++)
         {
@@ -132,11 +138,11 @@ public static class ContextProjectionBuilder
                 .ToHashSet(StringComparer.Ordinal);
             if (callIds.Count == 0)
             {
-                units.Add(new AtomicUnit([current.Message]));
+                units.Add(new AtomicUnit([current]));
                 continue;
             }
 
-            var groupedMessages = new List<RuntimeProviderMessage> { current.Message };
+            var groupedMessages = new List<RuntimeProviderMessage> { current };
             while (index + 1 < messages.Length)
             {
                 var candidate = messages[index + 1];
@@ -144,7 +150,7 @@ public static class ContextProjectionBuilder
                     .OfType<ToolResultContentBlock>()
                     .Select(static block => block.CallId)
                     .ToArray();
-                if (candidate.Message.Role != RuntimeProviderRoles.Tool
+                if (candidate.Role != RuntimeProviderRoles.Tool
                     || resultIds.Length == 0
                     || resultIds.Any(resultId => !callIds.Contains(resultId)))
                 {
@@ -152,13 +158,13 @@ public static class ContextProjectionBuilder
                 }
 
                 index++;
-                groupedMessages.Add(candidate.Message);
+                groupedMessages.Add(candidate);
             }
 
             units.Add(new AtomicUnit(groupedMessages));
         }
 
-        return units;
+        return units.Select(static unit => unit.Messages.ToArray()).ToArray();
     }
 
     private static ProjectedMessage CreateProjectedMessage(ConversationRecordV1 record)

@@ -28,7 +28,9 @@ return await ProviderWorkerHost.RunAsync(
     BuildAdapter,
     streams.Stdin,
     streams.Stdout,
-    streams.Stderr);
+    streams.Stderr,
+    declaredCapabilities: null,
+    declaredModels: Madorin.AI.Runtime.Providers.Kimi.Models.KimiModelCatalog.All);
 
 static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config)
 {
@@ -38,12 +40,7 @@ static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config)
         baseUrl: string.IsNullOrWhiteSpace(config.BaseUrl)
             ? "https://api.moonshot.cn/v1"
             : config.BaseUrl.Trim(),
-        models: ToProviderModels(config.Models),
+        models: ProviderConnectionModels.Resolve(config, Madorin.AI.Runtime.Providers.Kimi.Models.KimiModelCatalog.All),
         providerId: config.ProviderId,
         maxTools: config.MaxTools);
 }
-
-static List<ProviderModel> ToProviderModels(IReadOnlyList<string>? ids) =>
-    ids is null || ids.Count == 0
-        ? []
-        : ids.Select(static id => new ProviderModel(id, id)).ToList();

@@ -29,9 +29,7 @@ public sealed class ProviderWorkerAdapter(
             Usage: true);
 
     public IReadOnlyList<ProviderModel> Models =>
-        _connection.Models is null || _connection.Models.Count == 0
-            ? []
-            : _connection.Models.Select(static id => new ProviderModel(id, id)).ToList();
+        ProviderConnectionModels.Resolve(_connection, _process.NegotiatedModels);
 
     public async IAsyncEnumerable<RuntimeProviderEvent> CompleteStreamingAsync(
         RuntimeProviderRequest request,

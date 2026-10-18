@@ -18,4 +18,8 @@ public sealed record SessionCompactionResultDto(
     bool CacheWritten,
     string? CacheMissReason = null,
     string SelectionSource = "session-default",
-    bool SummaryGenerated = false);
+    bool SummaryGenerated = false,
+    string Outcome = "Applied",
+    string? OperationId = null,
+    string? ProjectionRevision = null,
+    long? CoveredThroughSequence = null);
