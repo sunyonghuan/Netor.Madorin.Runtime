@@ -9,23 +9,6 @@ namespace Madorin.AI.Runtime.Tools.Builtin;
 /// <summary>Starts a pinned executable without shell expansion and enforces bounded process I/O.</summary>
 internal static class BuiltinProcessRunner
 {
-    private static readonly string[] ShellExecutables =
-    [
-        "bash",
-        "bash.exe",
-        "cmd",
-        "cmd.exe",
-        "fish",
-        "fish.exe",
-        "powershell",
-        "powershell.exe",
-        "pwsh",
-        "pwsh.exe",
-        "sh",
-        "sh.exe",
-        "zsh",
-        "zsh.exe"
-    ];
     private const int MaxArgumentCount = 128;
     private const int MaxArgumentLength = 8192;
     private const int MaxEnvironmentVariables = 128;
@@ -43,15 +26,6 @@ internal static class BuiltinProcessRunner
     {
         ArgumentNullException.ThrowIfNull(allowedExecutables);
         requested = NormalizeRequestedExecutable(requested);
-        if (ShellExecutables.Contains(
-                Path.GetFileName(requested),
-                OperatingSystem.IsWindows()
-                    ? StringComparer.OrdinalIgnoreCase
-                    : StringComparer.Ordinal))
-        {
-            throw new UnauthorizedAccessException(
-                "Shell executables are not allowed by mcli_process.");
-        }
         var comparer = OperatingSystem.IsWindows()
             ? StringComparer.OrdinalIgnoreCase
             : StringComparer.Ordinal;

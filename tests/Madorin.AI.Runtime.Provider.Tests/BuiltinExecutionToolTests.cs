@@ -52,6 +52,38 @@ public sealed class BuiltinExecutionToolTests
     }
 
     [TestMethod]
+    public async Task ProcessRun_AllowlistedShell_ExecutesCommand()
+    {
+        var (fileName, argumentsJson, expectedOutput) = GetShellCommand();
+        var result = await ExecuteAsync(
+            new BuiltinProcessToolExecutor(),
+            BuiltinToolRegistry.ProcessRunToolId,
+            argumentsJson,
+            CreatePermission(allowedExecutables: [fileName]));
+
+        Assert.IsTrue(result.Success, result.Error);
+        using var output = JsonDocument.Parse(result.OutputJson!);
+        Assert.AreEqual(0, output.RootElement.GetProperty("exitCode").GetInt32());
+        StringAssert.Contains(
+            output.RootElement.GetProperty("stdout").GetString(),
+            expectedOutput);
+    }
+
+    [TestMethod]
+    public async Task ProcessRun_UnallowlistedShell_IsRejected()
+    {
+        var (fileName, argumentsJson, _) = GetShellCommand();
+        var result = await ExecuteAsync(
+            new BuiltinProcessToolExecutor(),
+            BuiltinToolRegistry.ProcessRunToolId,
+            argumentsJson,
+            CreatePermission(allowedExecutables: ["dotnet"]));
+
+        Assert.IsFalse(result.Success);
+        StringAssert.Contains(result.Error, "effective allowlist");
+    }
+
+    [TestMethod]
     public async Task ProcessRun_UnallowlistedEnvironmentVariable_IsRejected()
     {
         var result = await ExecuteAsync(
@@ -226,6 +258,11 @@ public sealed class BuiltinExecutionToolTests
         DenyNetwork: networkPolicy?.DenyAll ?? true,
         AllowedEnvironmentVariables: allowedEnvironmentVariables ?? [],
         NetworkPolicy: networkPolicy);
+
+    private static (string FileName, string ArgumentsJson, string ExpectedOutput) GetShellCommand() =>
+        OperatingSystem.IsWindows()
+            ? ("cmd.exe", """{"fileName":"cmd.exe","arguments":["/c","echo mcli-shell-authorized"]}""", "mcli-shell-authorized")
+            : ("sh", """{"fileName":"sh","arguments":["-c","printf mcli-shell-authorized"]}""", "mcli-shell-authorized");
 
     private static NetworkPolicy CreateLoopbackPolicy(int port, long maxResponseBytes) => new(
         DenyAll: false,

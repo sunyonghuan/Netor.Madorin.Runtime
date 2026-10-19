@@ -25,4 +25,16 @@
     <AotPreferCustom Condition="'$(RuntimeIdentifier)' == '$(NETCoreSdkPortableRuntimeIdentifier)'">false</AotPreferCustom>
     <GlibcVersion Condition="$(RuntimeIdentifier.StartsWith('linux-')) and !$(RuntimeIdentifier.Contains('musl')) and '$(GlibcVersion)' == ''">2.35</GlibcVersion>
   </PropertyGroup>
+  <!-- Zig 链接器需要显式指定 Apple 加密原生库引用的 Swift overlay 库。 -->
+  <Target Name="AddMacOSCrossSwiftLibraries"
+          BeforeTargets="LinkNative"
+          DependsOnTargets="OverwriteTargetTriple"
+          Condition="'$(UsePublishAotCross)' == 'true' and
+                     '$(PublishAot)' == 'true' and
+                     $(RuntimeIdentifier.StartsWith('osx-')) and
+                     '$(CustomAotToolChain)' == 'zig'">
+    <ItemGroup>
+      <LinkerArg Include="-lswiftCoreFoundation;-lswiftDarwin;-lswiftDispatch;-lswiftIOKit;-lswiftObjectiveC;-lswiftXPC;-lswift_Builtin_float;-lswift_errno;-lswift_math;-lswift_signal;-lswift_stdio;-lswift_time;-lswiftsys_time;-lswiftunistd" />
+    </ItemGroup>
+  </Target>
 </Project>
