@@ -32,9 +32,8 @@ public static class CompactionCacheKeyFactory
         {
             return "summary-not-validated";
         }
-        if (cache.RuntimeMode != "Expert"
-            || (agentPromptHash is not null && cache.AgentPromptHash != agentPromptHash)
-            || (toolCatalogVersion is not null && cache.ToolCatalogVersion != toolCatalogVersion))
+        // A summary describes historical messages, not the current agent or tool catalog.
+        if (cache.RuntimeMode != "Expert")
         {
             return "summary-semantics-changed";
         }

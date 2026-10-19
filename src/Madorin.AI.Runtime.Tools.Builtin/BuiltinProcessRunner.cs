@@ -408,13 +408,6 @@ internal static class BuiltinProcessRunner
                 var path = Path.Join(directory.Trim(), candidate);
                 if (File.Exists(path) && !Directory.Exists(path))
                 {
-                    var extension = Path.GetExtension(path);
-                    if (OperatingSystem.IsWindows()
-                        && !string.Equals(extension, ".exe", StringComparison.OrdinalIgnoreCase))
-                    {
-                        continue;
-                    }
-
                     return Path.GetFullPath(path);
                 }
             }

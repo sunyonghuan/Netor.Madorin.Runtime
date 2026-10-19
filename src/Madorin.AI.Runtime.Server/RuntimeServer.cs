@@ -1692,9 +1692,6 @@ public sealed class RuntimeServer : IAsyncDisposable
 
         var diagnostics = CreateRecoveryDiagnostics(snapshot);
         var selection = DeserializePersistedSelection(snapshot, diagnostics);
-        var neededDefinitions = _sessionSelections.ContainsKey(snapshot.SessionId)
-            ? []
-            : CreateNeededDefinitions(snapshot, selection);
         var historyMeta = await TryGetConversationHistoryMetadataAsync(
                 snapshot.SessionId,
                 diagnostics,
@@ -1708,7 +1705,7 @@ public sealed class RuntimeServer : IAsyncDisposable
             snapshot.Mode,
             snapshot.SelectionVersion,
             selection,
-            neededDefinitions,
+            [],
             CreateRunQueryResult(
                 snapshot.LatestRun,
                 snapshot.LatestRun is null ? null : GetQueryableRunStatus(snapshot.LatestRun)),
@@ -2063,7 +2060,7 @@ public sealed class RuntimeServer : IAsyncDisposable
 
         var diagnostics = new List<string>();
         var persistedSelection = DeserializePersistedSelection(snapshot, diagnostics);
-        if (persistedSelection is null || snapshot.AgentSnapshots.Length == 0)
+        if (persistedSelection is null)
         {
             var failed = new SessionRehydrateResult(
                 snapshot.SessionId,
@@ -2078,42 +2075,10 @@ public sealed class RuntimeServer : IAsyncDisposable
         var definitions = parameters.AgentDefinitions.ToDictionary(
             static definition => definition.AgentRef.AgentId,
             StringComparer.Ordinal);
-        var mismatched = new List<string>();
-        var missing = false;
-        foreach (var agent in snapshot.AgentSnapshots)
-        {
-            if (!definitions.TryGetValue(agent.AgentId, out var definition))
-            {
-                missing = true;
-                continue;
-            }
+        // Historical agents are optional; the next turn may supply its current selection.
+        _sessionSelections[snapshot.SessionId] = RehydrateSelection(persistedSelection, definitions);
 
-            if (!string.Equals(
-                    definition.AgentRef.PromptTemplateVersion,
-                    agent.PromptTemplateVersion,
-                    StringComparison.Ordinal)
-                || !string.Equals(
-                    RuntimeRunMetadata.ComputePromptHash(definition.AgentRef.SystemPrompt),
-                    agent.PromptHash,
-                    StringComparison.Ordinal))
-            {
-                mismatched.Add(agent.AgentId);
-            }
-        }
-
-        var status = mismatched.Count > 0
-            ? "Failed"
-            : missing
-                ? "PartiallyReady"
-                : "Ready";
-        if (string.Equals(status, "Ready", StringComparison.Ordinal))
-        {
-            _sessionSelections[snapshot.SessionId] = RehydrateSelection(
-                persistedSelection,
-                definitions);
-        }
-
-        var result = new SessionRehydrateResult(snapshot.SessionId, status, [.. mismatched]);
+        var result = new SessionRehydrateResult(snapshot.SessionId, "Ready", []);
         var payload = JsonSerializer.SerializeToElement(
             result,
             RuntimeJsonContext.Default.SessionRehydrateResult);
@@ -2217,10 +2182,13 @@ public sealed class RuntimeServer : IAsyncDisposable
 
         if (!_sessionSelections.TryGetValue(existingRun.SessionId, out var savedSelection))
         {
-            return Error(
-                request.Id,
-                -32006,
-                $"Session '{existingRun.SessionId}' requires session.rehydrate before it can run.");
+            var diagnostics = new List<string>();
+            savedSelection = DeserializePersistedSelection(snapshot, diagnostics);
+            if (savedSelection is null)
+            {
+                return Error(request.Id, -32006,
+                    $"Session '{existingRun.SessionId}' has invalid persisted selection metadata.");
+            }
         }
 
         if (existingRun.ExpectedSelectionVersion is { } expectedVersion
@@ -2263,14 +2231,6 @@ public sealed class RuntimeServer : IAsyncDisposable
                         "An empty Agent prompt cannot be used to resume an Expert Session.");
                 }
 
-                if (existingRun.TurnOverride is null)
-                {
-                    var promptValidation = ValidateResumedExpertPrompt(snapshot, expertOptions);
-                    if (promptValidation is not null)
-                    {
-                        return Error(request.Id, -32006, promptValidation);
-                    }
-                }
                 break;
 
             default:
@@ -3340,39 +3300,6 @@ public sealed class RuntimeServer : IAsyncDisposable
         }
     }
 
-    private static string? ValidateResumedExpertPrompt(
-        PersistedSessionSnapshot snapshot,
-        ExpertModeOptions expertOptions)
-    {
-        if (string.IsNullOrWhiteSpace(expertOptions.Agent.SystemPrompt))
-        {
-            return "An empty Agent prompt cannot be used to resume an Expert Session.";
-        }
-
-        var agentSnapshot = snapshot.AgentSnapshots.FirstOrDefault(agent =>
-            string.Equals(agent.AgentId, expertOptions.Agent.AgentId, StringComparison.Ordinal));
-        if (agentSnapshot is null)
-        {
-            return $"Agent '{expertOptions.Agent.AgentId}' is missing from the Session Agent snapshots.";
-        }
-
-        var promptHash = RuntimeRunMetadata.ComputePromptHash(expertOptions.Agent.SystemPrompt);
-        if (!string.Equals(promptHash, agentSnapshot.PromptHash, StringComparison.OrdinalIgnoreCase))
-        {
-            return $"Agent prompt hash for '{expertOptions.Agent.AgentId}' does not match the Session snapshot.";
-        }
-
-        if (!string.Equals(
-                expertOptions.Agent.PromptTemplateVersion,
-                agentSnapshot.PromptTemplateVersion,
-                StringComparison.Ordinal))
-        {
-            return $"Agent prompt template version for '{expertOptions.Agent.AgentId}' does not match the Session snapshot.";
-        }
-
-        return null;
-    }
-
     private static List<string> CreateRecoveryDiagnostics(PersistedSessionSnapshot snapshot)
     {
         var diagnostics = new List<string>();
@@ -3427,55 +3354,15 @@ public sealed class RuntimeServer : IAsyncDisposable
     }
 
 
-    internal static NeededAgentDefinition[] CreateNeededDefinitions(
-        PersistedSessionSnapshot snapshot,
-        NextTurnSelection? selection)
-    {
-        var roles = new Dictionary<string, (string Type, string? ParticipantId)>(
-            StringComparer.Ordinal);
-        switch (selection?.ModeOptions)
-        {
-            case ExpertModeOptions expert:
-                roles[expert.Agent.AgentId] = ("SingleAgent", null);
-                if (expert.AvailableAgents is not null)
-                {
-                    foreach (var agent in expert.AvailableAgents)
-                    {
-                        roles.TryAdd(agent.AgentId, ("ExpertSubAgent", null));
-                    }
-                }
-
-                break;
-        }
-
-        return
-        [
-            .. snapshot.AgentSnapshots.Select(agent =>
-            {
-                var role = roles.GetValueOrDefault(
-                    agent.AgentId,
-                    snapshot.Mode switch
-                    {
-                        RuntimeMode.Expert => ("SingleAgent", null),
-                        _ => ("Agent", null)
-                    });
-                return new NeededAgentDefinition(
-                    agent.AgentId,
-                    agent.PromptHash,
-                    role.Item1,
-                    role.Item2);
-            })
-        ];
-    }
-
     private static NextTurnSelection RehydrateSelection(
         NextTurnSelection selection,
         Dictionary<string, AgentDefinition> definitions)
     {
         AgentRef RehydrateAgent(AgentRef persisted)
         {
-            var definition = definitions[persisted.AgentId];
-            return persisted with { SystemPrompt = definition.AgentRef.SystemPrompt };
+            return definitions.TryGetValue(persisted.AgentId, out var definition)
+                ? persisted with { SystemPrompt = definition.AgentRef.SystemPrompt }
+                : persisted;
         }
 
         ModeOptions modeOptions = selection.ModeOptions switch

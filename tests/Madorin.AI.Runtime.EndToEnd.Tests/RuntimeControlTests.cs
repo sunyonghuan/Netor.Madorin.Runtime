@@ -697,7 +697,7 @@ public sealed class RuntimeControlTests
     [TestMethod]
     [DoNotParallelize]
     [Timeout(30_000, CooperativeCancellation = true)]
-    public async Task SessionRehydrate_AfterRuntimeRestart_RequiresMatchingDefinitionBeforeExistingRun()
+    public async Task SessionRehydrate_AfterRuntimeRestart_AcceptsChangedDefinitionBeforeExistingRun()
     {
         var workspace = CreateTemporaryDirectory();
         var secret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
@@ -782,8 +782,7 @@ public sealed class RuntimeControlTests
             await secondClient.ConnectAsync(secondTimeout.Token);
 
             var resume = await secondClient.ResumeSessionAsync(sessionId, secondTimeout.Token);
-            Assert.HasCount(1, resume.NeededDefinitions);
-            Assert.AreEqual("agent-1", resume.NeededDefinitions[0].AgentId);
+            Assert.IsEmpty(resume.NeededDefinitions);
 
             var beforeRehydrate = await Assert.ThrowsExactlyAsync<InvalidOperationException>(
                 async () => await secondClient.StartExistingSessionRunAsync(
@@ -792,32 +791,15 @@ public sealed class RuntimeControlTests
                         "rehydrate-run-2",
                         InputOverride: [new TextContentBlock("blocked")]),
                     secondTimeout.Token));
-            StringAssert.Contains(beforeRehydrate.Message, "session.rehydrate");
+            StringAssert.Contains(beforeRehydrate.Message, "TurnOverride");
 
             var mismatched = await secondClient.RehydrateSessionAsync(
                 new SessionRehydrateParameters(
                     sessionId,
-                    [new AgentDefinition(new AgentRef("agent-1", "v1", "wrong prompt"))]),
+                    [new AgentDefinition(new AgentRef("agent-1", "v2", "updated prompt"))]),
                 secondTimeout.Token);
-            Assert.AreEqual("Failed", mismatched.Status);
-            Assert.HasCount(1, mismatched.Mismatched);
-            Assert.AreEqual("agent-1", mismatched.Mismatched[0]);
-
-            await Assert.ThrowsExactlyAsync<InvalidOperationException>(
-                async () => await secondClient.StartExistingSessionRunAsync(
-                    new ExistingSessionRunRequest(
-                        sessionId,
-                        "rehydrate-run-2",
-                        InputOverride: [new TextContentBlock("still blocked")]),
-                    secondTimeout.Token));
-
-            var ready = await secondClient.RehydrateSessionAsync(
-                new SessionRehydrateParameters(
-                    sessionId,
-                    [new AgentDefinition(new AgentRef("agent-1", "v1", systemPrompt))]),
-                secondTimeout.Token);
-            Assert.AreEqual("Ready", ready.Status);
-            Assert.HasCount(0, ready.Mismatched);
+            Assert.AreEqual("Ready", mismatched.Status);
+            Assert.HasCount(0, mismatched.Mismatched);
 
             var secondRunId = await secondClient.StartExistingSessionRunAsync(
                 new ExistingSessionRunRequest(

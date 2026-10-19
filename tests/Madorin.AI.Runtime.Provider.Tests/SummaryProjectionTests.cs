@@ -177,7 +177,7 @@ public sealed class SummaryProjectionTests
                 SummaryProjectionResolver.Resolve(source, next, "agent", "tools"), 1);
             Assert.HasCount(1, restoredPrefix);
             Assert.AreEqual("original-covered", ((TextContentBlock)restoredPrefix[0].Content[0]).Text);
-            Assert.AreEqual("summary-semantics-changed", SummaryProjectionResolver.Resolve(source, next, "changed", "tools").CacheMissReason);
+            Assert.IsTrue(SummaryProjectionResolver.Resolve(source, next, "changed", "new-tools").IsApplied);
             Assert.AreEqual("cache-schema-unsupported", SummaryProjectionResolver.Resolve(source, next with { Schema = "madorin.conversation.compact.v2" }).CacheMissReason);
             Assert.AreEqual("summary-prefix-changed", SummaryProjectionResolver.Resolve(source, next with { PrefixHistorySha256 = new string('0', 64) }).CacheMissReason);
         }

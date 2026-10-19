@@ -1,8 +1,11 @@
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
+using System.Text.Json;
 using Madorin.AI.Runtime.Client;
 using Madorin.AI.Runtime.Contracts;
+using Madorin.AI.Runtime.Contracts.Serialization;
 using Madorin.AI.Runtime.Entities;
+using Madorin.AI.Runtime.Persistence.Files;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Server;
 using Microsoft.Data.Sqlite;
@@ -131,15 +134,7 @@ public sealed class SessionResumeRecoveryTests
                     ?? throw new InvalidDataException("Resume did not return the Blob ID collection.");
                 Assert.HasCount(0, blobIds);
 
-                var expectedDefinitionIds = GetDefinitions(capture.Mode)
-                    .Select(static definition => definition.AgentRef.AgentId)
-                    .OrderBy(static id => id, StringComparer.Ordinal)
-                    .ToArray();
-                var actualDefinitionIds = resume.NeededDefinitions
-                    .Select(static definition => definition.AgentId)
-                    .OrderBy(static id => id, StringComparer.Ordinal)
-                    .ToArray();
-                CollectionAssert.AreEqual(expectedDefinitionIds, actualDefinitionIds);
+                Assert.IsEmpty(resume.NeededDefinitions);
 
                 var blocked = await Assert.ThrowsExactlyAsync<InvalidOperationException>(
                     async () => await secondClient.StartExistingSessionRunAsync(
@@ -148,7 +143,7 @@ public sealed class SessionResumeRecoveryTests
                             $"resume-{capture.Mode}-before-ready",
                             InputOverride: [new TextContentBlock("blocked")]),
                         secondTimeout.Token));
-                StringAssert.Contains(blocked.Message, "session.rehydrate");
+                StringAssert.Contains(blocked.Message, "TurnOverride");
                 var rehydrated = await secondClient.RehydrateSessionAsync(
                     new SessionRehydrateParameters(
                         capture.SessionId,
@@ -281,6 +276,115 @@ public sealed class SessionResumeRecoveryTests
             Assert.IsFalse(resume.IsFullyRecoverable);
             Assert.IsTrue(resume.RecoveryDiagnostics.Any(diagnostic =>
                 diagnostic.StartsWith("BlobHashMismatch:", StringComparison.Ordinal)));
+        }
+        finally
+        {
+            if (Directory.Exists(workspace))
+            {
+                Directory.Delete(workspace, recursive: true);
+            }
+        }
+    }
+
+    [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    [DoNotParallelize]
+    [Timeout(60_000, CooperativeCancellation = true)]
+    public async Task Restart_WithCurrentAgent_PreservesSummaryAndToolTailWithoutReplayingCoveredText(
+        bool useLegacyRehydrate)
+    {
+        var workspace = CreateTemporaryDirectory();
+        var secret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+        var provider = new ResumeProvider(1);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(TestContext.CancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(45));
+        try
+        {
+            string sessionId;
+            string revision;
+            using (var shutdown = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token))
+            {
+                await using var server = await RuntimeServer.StartAsync(
+                    CreateOptions(workspace, secret, "compact-first") with { ProviderResolver = _ => provider },
+                    timeout.Token);
+                var serverTask = server.RunAsync(shutdown.Token);
+                await using var client = new RuntimeClient(new RuntimeClientOptions(
+                    server.PipeName, Guid.NewGuid().ToString("N"),
+                    ExpectedRuntimeInstanceId: server.InstanceId, HandshakeSecret: secret));
+                await client.ConnectAsync(timeout.Token);
+                var capture = await StartAndCompleteAsync(client, RuntimeMode.Expert, "compact-original",
+                    timeout.Token, "covered-original-marker " + new string('x', 4000));
+                sessionId = capture.SessionId;
+                var compact = await client.CompactSessionAsync(new SessionCompactionRequest(
+                    sessionId, Strategy: "summary", ProviderId: provider.ProviderId,
+                    ModelId: "resume-model", OperationId: Guid.NewGuid().ToString("N"), RawTailSize: 0),
+                    timeout.Token);
+                Assert.IsTrue(compact.CacheWritten);
+                revision = compact.ProjectionRevision!;
+                shutdown.Cancel();
+                await serverTask;
+            }
+
+            var store = new ConversationStore(Path.Combine(workspace, ".madorin"));
+            using var args = JsonDocument.Parse("{}");
+            foreach (var message in new RuntimeProviderMessage[]
+            {
+                new("assistant", [new ToolCallContentBlock("read-file", "read", "read", args.RootElement.Clone())]),
+                new("tool", [new ToolResultContentBlock("read-file", "read", true,
+                    [new TextContentBlock("retained-file-tool-result")])])
+            })
+            {
+                await store.AppendMessageAsync(sessionId, new ConversationMessageDraft(
+                    "old-tool-invocation", "deleted-agent", message.Role,
+                    JsonSerializer.SerializeToElement(message.Content, RuntimeJsonContext.Default.ContentBlockArray),
+                    DateTimeOffset.UtcNow), timeout.Token);
+            }
+
+            using var secondShutdown = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
+            await using var secondServer = await RuntimeServer.StartAsync(
+                CreateOptions(workspace, secret, "compact-second") with { ProviderResolver = _ => provider },
+                timeout.Token);
+            var secondServerTask = secondServer.RunAsync(secondShutdown.Token);
+            await using var secondClient = new RuntimeClient(new RuntimeClientOptions(
+                secondServer.PipeName, Guid.NewGuid().ToString("N"),
+                ExpectedRuntimeInstanceId: secondServer.InstanceId, HandshakeSecret: secret));
+            await secondClient.ConnectAsync(timeout.Token);
+            if (useLegacyRehydrate)
+            {
+                var restored = await secondClient.RehydrateSessionAsync(
+                    new SessionRehydrateParameters(sessionId, []), timeout.Token);
+                Assert.AreEqual("Ready", restored.Status);
+                Assert.IsEmpty(restored.Mismatched);
+            }
+            var current = new NextTurnSelection(1, RuntimeMode.Expert,
+                new DefaultSelection(provider.ProviderId, "resume-model"),
+                new ExpertModeOptions(
+                    new AgentRef("current-agent", "v99", "Current instructions with changed plugin context.",
+                        provider.ProviderId, "resume-model"),
+                    contextPolicy: new ExpertContextPolicy(TailMessageCount: 2)),
+                ToolCatalogVersion: "new-tool-catalog");
+            var runId = await secondClient.StartExistingSessionRunAsync(new ExistingSessionRunRequest(
+                sessionId, Guid.NewGuid().ToString("N"), TurnOverride: current,
+                InputOverride: [new TextContentBlock("continue-after-restart")]), timeout.Token);
+            var terminal = await ReadTerminalAsync(secondClient, runId, 0, timeout.Token);
+            Assert.AreEqual(MessageTypes.RunCompleted, terminal.MessageType, terminal.Payload.GetRawText());
+            Assert.AreEqual(sessionId, (await secondClient.QueryRunAsync(runId, timeout.Token)).SessionId);
+            var request = provider.MainRequests[^1];
+            Assert.AreEqual("current-agent", request.AgentId);
+            var text = string.Join("\n", request.Messages.SelectMany(m => m.Content)
+                .OfType<TextContentBlock>().Select(b => b.Text));
+            StringAssert.Contains(text, "retained-summary-fact");
+            StringAssert.Contains(text, "continue-after-restart");
+            Assert.DoesNotContain("covered-original-marker", text, StringComparison.Ordinal);
+            Assert.IsTrue(request.Messages.SelectMany(m => m.Content).OfType<ToolCallContentBlock>()
+                .Any(b => b.CallId == "read-file"));
+            Assert.IsTrue(request.Messages.SelectMany(m => m.Content).OfType<ToolResultContentBlock>()
+                .Any(b => b.CallId == "read-file"));
+            Assert.AreEqual(1, provider.SummaryCallCount);
+            Assert.AreEqual(revision, (await store.ReadCompactCacheAsync(sessionId, timeout.Token))!.ProjectionRevision);
+            secondShutdown.Cancel();
+            await secondServerTask;
         }
         finally
         {
@@ -486,6 +590,9 @@ public sealed class SessionResumeRecoveryTests
 
     private sealed class ResumeProvider(int workPlanVersion) : IRuntimeProviderAdapter
     {
+        public List<RuntimeProviderRequest> MainRequests { get; } = [];
+        public int SummaryCallCount { get; private set; }
+
         public string ProviderId => "resume-provider";
 
         public ProviderCapabilities Capabilities { get; } = new(
@@ -501,6 +608,15 @@ public sealed class SessionResumeRecoveryTests
         {
             await Task.Yield();
             ct.ThrowIfCancellationRequested();
+            if (request.AgentId == "session-compactor")
+            {
+                SummaryCallCount++;
+                yield return new TextDeltaProviderEvent(request.InvocationId,
+                    """{"goals":["retained-summary-fact"],"completedFacts":[],"decisionsAndConstraints":[],"pendingWork":[],"identifiers":[]}""");
+                yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
+                yield break;
+            }
+            MainRequests.Add(request);
             var text = string.Equals(request.AgentId, "work-manager", StringComparison.Ordinal)
                 ? workPlanVersion == 1
                     ? """

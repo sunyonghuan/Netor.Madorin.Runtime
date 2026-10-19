@@ -18,7 +18,7 @@ public sealed class RuntimeClientHighLevelStage7Tests
 
     [TestMethod]
     [Timeout(60_000, CooperativeCancellation = true)]
-    public async Task SessionCompaction_TailWindowManualProjection_PersistsAcrossThreeTurns()
+    public async Task SessionCompaction_TailWindowManualProjection_PreservesSummaryAndConfiguredTailAcrossThreeTurns()
     {
         var provider = new SummaryCompactionProvider();
         await using var fixture = await RuntimeFixture.StartAsync(provider);
@@ -73,9 +73,10 @@ public sealed class RuntimeClientHighLevelStage7Tests
                 .OfType<TextContentBlock>().Select(block => block.Text));
             StringAssert.Contains(text, "retained-summary-fact");
             Assert.IsFalse(text.Contains("original-history-marker", StringComparison.Ordinal));
-            for (var previous = 1; previous <= turn; previous++)
+            StringAssert.Contains(text, $"incremental-turn-{turn}");
+            for (var previous = 1; previous < turn; previous++)
             {
-                StringAssert.Contains(text, $"incremental-turn-{previous}");
+                Assert.DoesNotContain($"incremental-turn-{previous}", text, StringComparison.Ordinal);
             }
         }
         Assert.AreEqual(1, provider.SummaryCallCount);
