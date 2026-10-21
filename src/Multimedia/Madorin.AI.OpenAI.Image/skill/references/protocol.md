@@ -9,7 +9,7 @@
 | 输入 | 含义 |
 | --- | --- |
 | `--api-key` | OpenAI API Key，作为 Bearer Token 发送；不得写入请求文件或输出。 |
-| `--api-url` | HTTPS API 根地址，缺省 `https://api.openai.com/v1`；程序追加 `images/generations`。 |
+| `--api-url` | API 根地址，缺省 `https://api.openai.com/v1`；程序追加 `images/generations`。默认要求 HTTPS，本地兼容服务的本机回环地址（.NET URI 识别，如 `localhost`、`127.0.0.1`、`[::1]`）允许 HTTP。地址不得包含用户信息、查询参数或片段。 |
 
 ## 请求字段
 

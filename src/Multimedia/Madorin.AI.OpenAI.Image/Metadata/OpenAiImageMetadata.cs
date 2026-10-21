@@ -115,7 +115,7 @@ internal static class OpenAiImageMetadata
             {
                 "request_id" => "主程序调用关联 ID，原样回传 response_id。",
                 "request_file" => "统一生成请求 JSON 文件，路径相对启动工作目录。",
-                "api_url" => "HTTPS API 基础地址，追加 images/generations。",
+                "api_url" => "HTTPS API 基础地址，追加 images/generations；仅本机回环地址（如 localhost、127.0.0.1、[::1]）允许 HTTP，不接受用户信息、查询参数或片段。",
                 "output_dir" => "产物目录，必须位于工作目录授权根内。",
                 "task" => "生成任务，默认 text-to-image。",
                 "model" => "已声明支持任务的模型 ID。",

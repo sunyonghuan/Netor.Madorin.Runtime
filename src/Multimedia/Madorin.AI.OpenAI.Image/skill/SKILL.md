@@ -18,6 +18,8 @@ skill-openai-image generate --request-file <json> --output-dir <dir> --api-url h
 
 也可直接传 `--request-id <id> --prompt <text>`。`--api-url` 缺省为 `https://api.openai.com/v1`。生成支持 `--model`、`--size` 或成对 `--width/--height`、`--quality`、`--num-images`。`--output-format json` 控制协议输出；图片编码用 `--provider-openai-output-format png|jpeg|webp`。API Key 仅作为 argv 参数，不要写入请求文件或日志。
 
+本地兼容服务可使用 HTTP，主机仅限 .NET URI 识别的本机回环地址（如 `localhost`、`127.0.0.1`、`[::1]`）；其他地址必须使用 HTTPS。API 地址不得包含用户信息、查询参数或片段，程序在基础路径后追加 `images/generations`。
+
 跨 CLI 复用时，内容文件建议省略 `model`、`request_id` 和 `execution.output_dir`，由主程序每次显式传目标模型、新请求 ID 和输出目录。模型按 `--model` → 文件 `model` → 默认 `gpt-image-1` 选择；覆盖后不支持的模型或任务直接失败，不丢弃或静默回退。跨 CLI 复用仍受目标任务和参数能力限制。
 
 统一附件结构会先校验再过滤；当前文生图任务不使用附件，响应按原索引记录 `unsupported_attachment_role`，不读取媒体内容。需要参考图片参与生成时应使用实现了 `image-edit` 的技能。

@@ -89,9 +89,10 @@ internal sealed class ImageGenerationOptionsFactory(WorkspacePaths paths)
         var apiKey = direct.GetValueOrDefault("api-key");
         var url = direct.GetValueOrDefault("api-url") ?? "https://api.openai.com/v1";
         if (string.IsNullOrWhiteSpace(apiKey) || !Uri.TryCreate(url, UriKind.Absolute, out var endpoint) ||
-            endpoint.Scheme != Uri.UriSchemeHttps || endpoint.Query.Length > 0 || endpoint.Fragment.Length > 0 || endpoint.UserInfo.Length > 0)
+            !(endpoint.Scheme == Uri.UriSchemeHttps || endpoint.Scheme == Uri.UriSchemeHttp && endpoint.IsLoopback) ||
+            endpoint.Query.Length > 0 || endpoint.Fragment.Length > 0 || endpoint.UserInfo.Length > 0)
         {
-            throw new SkillException("invalid_parameter", "必须提供 api-key 及无鉴权信息的 HTTPS API 地址。");
+            throw new SkillException("invalid_parameter", "必须提供 api-key 及不含用户信息、查询参数或片段的 HTTPS API 地址；仅本机回环地址允许 HTTP。");
         }
 
         var output = ImageParameterValues.Text(execution, "output_dir");
