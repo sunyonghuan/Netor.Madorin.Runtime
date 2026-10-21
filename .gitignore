@@ -1,5 +1,4 @@
-# Branch-local docs and agent constraints (keep on disk, do not track)
-/README.md
+# Branch-local agent constraints (keep on disk, do not track)
 /AGENTS.md
 /AGENT.md
 
