@@ -1,0 +1,54 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version"],
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "request_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "task": { "type": "string" },
+    "model": { "type": "string" },
+    "prompt": { "type": "string", "minLength": 1 },
+    "attachments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "role", "source"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "role": { "type": "string", "enum": ["reference", "source", "first_frame", "last_frame"] },
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "oneOf": [{ "required": ["path"] }, { "required": ["uri"] }],
+            "properties": {
+              "path": { "type": "string", "minLength": 1 },
+              "uri": { "type": "string", "minLength": 1, "sensitive": true }
+            }
+          }
+        }
+      }
+    },
+    "parameters": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "aspect_ratio": { "type": "string", "enum": ["auto", "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "2:1", "1:2", "19.5:9", "9:19.5", "20:9", "9:20", "21:9", "5:2"], "default": "auto" },
+        "num_images": { "type": "integer", "minimum": 1, "maximum": 10, "default": 1 }
+      }
+    },
+    "provider_parameters": { "type": "object", "additionalProperties": { "type": "object" } },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "output_dir": { "type": "string", "minLength": 1 },
+        "timeout": { "type": "integer", "minimum": 1 },
+        "try_run": { "type": "boolean" },
+        "verbose": { "type": "boolean" },
+        "no_wait": { "type": "boolean" },
+        "output_format": { "type": "string", "const": "json" }
+      }
+    }
+  }
+}

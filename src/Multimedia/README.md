@@ -25,6 +25,7 @@
 | --- | --- | --- |
 | `Madorin.AI.Multimedia.Core` | 通用命令解析、协议辅助、单次调用生命周期、文件安全和产物处理。 | .NET 基础库及 MIT 许可的 SkiaSharp 图片解码；不包含厂商模型、端点或私有参数。 |
 | `Madorin.AI.OpenAI.Image` | OpenAI 图片 CLI、模型声明、请求映射和 REST 调用。 | 通过项目引用使用公共类库；自带技能资源和发布脚本。 |
+| `Madorin.AI.Grok.Image` | xAI Grok 同步文生图 CLI、模型声明、Base64 请求映射和产物验证。 | 引用公共类库；自带技能资源和发布脚本，真实成功生成与 AOT 发布待验证。 |
 
 后续技能复用公共库，不复制基础设施。公共类库随对应 CLI 编译与打包，不创建独立 `publish.json`，不纳入单独发布清单。
 

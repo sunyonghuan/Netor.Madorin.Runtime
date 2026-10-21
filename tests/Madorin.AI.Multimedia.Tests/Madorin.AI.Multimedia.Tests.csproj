@@ -9,5 +9,6 @@
     <Using Include="Microsoft.VisualStudio.TestTools.UnitTesting" />
     <ProjectReference Include="../../src/Multimedia/Madorin.AI.Multimedia.Core/Madorin.AI.Multimedia.Core.csproj" />
     <ProjectReference Include="../../src/Multimedia/Madorin.AI.OpenAI.Image/Madorin.AI.OpenAI.Image.csproj" />
+    <ProjectReference Include="../../src/Multimedia/Madorin.AI.Grok.Image/Madorin.AI.Grok.Image.csproj" />
   </ItemGroup>
 </Project>
