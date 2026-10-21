@@ -4,8 +4,8 @@
 
 | 目录 | 职责 |
 | --- | --- |
-| `Protocol/` | 契约版本、关联 ID、JSON 工具、错误与响应封装。 |
-| `CommandLine/` | 与 Provider 无关的 argv 解析；允许选项由具体技能传入。 |
+| `Protocol/` | 契约版本、关联 ID、模型 ID 结构校验、远端目录规范化、JSON 工具、错误与响应封装。 |
+| `CommandLine/` | 与 Provider 无关的 argv 解析和模型查询连接/预算参数；允许选项由具体技能传入。 |
 | `Execution/` | 单次调用状态、超时预算、stdin 协作取消及资源释放。 |
 | `Files/` | 授权根路径校验、严格 JSON 文件读取、图片完整性解码和产物落盘。 |
 

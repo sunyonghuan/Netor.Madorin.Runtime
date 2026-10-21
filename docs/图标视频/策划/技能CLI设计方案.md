@@ -24,7 +24,7 @@
 | 命令 | 语法 | 成功结果 | 说明 |
 | --- | --- | --- | --- |
 | `metadata` | `<skill> metadata --request-id <id>` | `SkillMetadata` JSON | 返回技能身份、能力、命令及参数定义；供宿主发现与验证技能。 |
-| `list-models` | `<skill> list-models --request-id <id> [--output-format json]` | `ModelList` JSON | 列出该技能可用的图片或视频模型及能力；不能返回不支持生成的通用模型。 |
+| `list-models` | `<skill> list-models --request-id <id> [--api-url <url>] <认证参数> [--timeout <秒>] [--output-format json]` | `ModelList` JSON | 从本次目标 API 查询模型目录；不使用代码内置白名单。服务未提供任务能力时返回未知，不按名称猜测或过滤。 |
 | `generate` | 文件：`<skill> generate --request-file <file> [options]`；直接：`<skill> generate --request-id <id> [options]` | `GenerateResponse`；试运行为 `TryRunResponse`；异步提交为 `TaskResponse` | 请求 ID 至少由文件或 argv 一处提供，双来源须相同；其他显式直接参数可覆盖文件。等待落盘时须提供输出目录，仅提交异步任务时可省略。 |
 | `query` | `<skill> query --request-id <id> --task-id <task> [--task-context-file <file>] [--api-url <uri>] [--api-key <key>] [--wait] [--timeout <seconds>]` | `TaskResponse` JSON | 异步技能提供；默认查询一次，`--wait` 等待远端终态。不重新提交生成、不下载媒体；恢复上下文的必需性见第 2.10 节，不读取生成请求文件。 |
 | `download` | `<skill> download --request-id <id> --task-id <task> [--task-context-file <file>] --output-dir <path> [--api-url <uri>] [--api-key <key>] [--timeout <seconds>]` | `GenerateResponse` JSON | 异步技能提供；获取已完成产物并落盘，不创建生成任务。需要恢复上下文的 Provider 不能只凭任务 ID 下载。 |
@@ -42,7 +42,7 @@
 | `--api-key` | 字符串 | 是\* | 无 | 认证凭证。`*` 表示 API Key 认证的 Provider 必需；无 API Key 的认证方式由 Provider metadata 声明。 |
 | `--prompt` | 字符串 | 文生图/文生视频必需 | 无 | 生成指令；原样作为用户输入映射，不隐式翻译或改写。图生视频、编辑等模式按 Provider 的模式约束决定是否必需。 |
 | `--output-dir` | 路径 | 生成等待落盘或下载时必需 | 无 | 可由请求文件 `execution.output_dir` 提供；直接传参优先。产物路径相对于此目录。仅提交异步任务和查询状态时不要求提供。 |
-| `--model` | 字符串 | 主程序跨 CLI 生成时显式传入；其他调用按第 2.2 节选择 | 按第 2.2 节兜底 | 目标 CLI 的 `list-models` 中支持所选任务的模型 ID；覆盖文件 `model` 后校验，不以显示名、清单顺序或远端临时默认值代替。 |
+| `--model` | 字符串 | 主程序跨 CLI 生成时显式传入；其他调用按第 2.2 节选择 | 按第 2.2 节兜底 | 目标服务实际模型 ID，建议先通过相同地址和凭证的 `list-models` 选择；覆盖文件值后只校验非空字符串及无控制字符，原样传递，不以本地枚举、显示名或目录顺序替代。 |
 | `--task` | 字符串枚举 | 条件必需 | 按第 2.2 节选择 | 本次生成任务 ID；即使技能同时支持图片和视频，一次调用也只执行一个任务、输出一种媒体。 |
 | `--timeout` | 正整数秒 | 否 | `300` | 从识别目标命令起计算的总业务时限，包含本地处理、提交、轮询和落盘；文件取值确定后仍使用原起点。最多额外 `5` 秒清理，详见第 5 节。 |
 | `--output-format` | 枚举 | 否 | `json` | `json` 输出单个终态 JSON 对象；流式行输出如未由本契约扩展，不得自行改变 stdout 格式。 |
@@ -56,7 +56,7 @@
 
 | 参数适用范围 | 选项 |
 | --- | --- |
-| 每个命令 | `--request-id`、`--output-format`、`--verbose`；认证只在命令声明需要时检查，本地元数据、模型清单和版本不要求认证。 |
+| 每个命令 | `--request-id`、`--output-format`、`--verbose`；认证只在命令声明需要时检查，本地 metadata 和 version 不要求认证；list-models 是联网命令，接受连接、认证及 timeout 参数，按 Provider 认证要求检查。 |
 | 生成 | `--request-file`、`--prompt`、`--task`、`--model`、`--attachment`、附件简写、通用及 Provider 生成参数、`--try-run`、`--no-wait`。 |
 | 生成、查询、下载 | `--api-url`、认证参数、`--timeout`。生成和下载接受 `--output-dir`；查询不接受输出目录。 |
 | 查询、下载 | `--task-id`、`--task-context-file`；`--wait` 仅用于查询。向不适用命令传选项返回 `invalid_parameter`，不作为生成参数丢弃。 |
@@ -76,9 +76,9 @@
 
 | 选择项 | 优先级与校验 |
 | --- | --- |
-| 任务 | 合并后的显式 `task` → `metadata.default_task` → 候选任务唯一时自动选择；显式指定模型时只考虑该模型任务，否则考虑技能全部任务。不从提示词或选项组合猜任务。默认任务与显式模型不兼容时直接报错。 |
-| 模型 | 显式 `--model` → 文件 `model` → `metadata.default_models[task]` → 支持该任务的模型唯一时自动选择 → 仍不能确定则报错。只有前一来源未提供时才进入下一项，默认值不能覆盖显式值。 |
-| 模型校验 | 合并后模型必须是目标 CLI 声明且支持所选任务的 ID；不支持、空值或任务不兼容时返回 `invalid_parameter`，试运行返回 `invalid`。不能丢弃模型、跨 Provider 猜测模型映射或静默回退。被 `--model` 覆盖的旧文件值不参与有效模型校验或回显。 |
+| 任务 | 合并后的显式 `task` → `metadata.default_task` → 本地已实现任务唯一时自动选择。不从提示词、模型名称或选项组合猜任务；不支持的任务本地失败。服务明确提供模型任务信息时可辅助选择，不把未知能力当作不支持。 |
+| 模型 | 显式 `--model` → 文件 `model` → `metadata.default_models[task]` → 仍未确定则报错。只在前一来源缺失时继续；默认模型仅为兼容兜底，不保证目标服务可用。不自动联网选择目录首项，不以本地数组作为候选模型。 |
+| 模型校验 | 最终模型只做传输结构校验：非空字符串、无控制字符。禁止静态模型白名单、前缀匹配、名称猜测和旧目录快照门禁；ID 原样映射给 Provider。生成不强制先查询目录，也不因目录缺项或查询不支持而拒绝提交。远端不支持的模型按实际服务错误返回，不丢弃、猜映射或回退。被 argv 覆盖的旧值不参与校验与回显。 |
 | 选择结果 | 将确定的 `task`、`model` 写入有效参数；`validated` 不能携带未确定的任务或模型。 |
 
 主程序跨 CLI 生成采用以下调用约定；CLI 继续支持文件模型与默认模型，以兼容独立调用。
@@ -89,10 +89,10 @@
 | `--output-dir` | 指定本次产物目录 | 等待生成并落盘时传入，覆盖文件输出目录；仅提交异步任务时可省略。 |
 | `--api-url` | 指定目标服务地址 | 按目标 CLI 端点规则传入；已有声明默认地址时可省略，地址变化不等于协议兼容。 |
 | `--api-key` | 提供本次认证凭证 | 按目标 CLI 认证声明传入；其他认证方式使用其声明的直接参数。 |
-| `--model` | 指定目标模型 | 主程序显式传入目标 CLI 声明支持的模型 ID；各 CLI 可以使用不同 ID，无需修改内容文件。 |
+| `--model` | 指定目标模型 | 主程序按目标 API 返回的实际 ID 显式传入；各服务可使用不同部署名或别名，无需修改内容文件。 |
 | `--request-id` | 关联本次请求与响应 | 每次调用分配新 ID；若旧文件仍含 ID，双来源必须相同，不能按模型覆盖规则替换。 |
 
-同一请求文件可跨 CLI 解析，不保证目标支持相同任务、全部参数或产生相同结果。主程序先按目标 metadata / list-models 选模型，再用 `--try-run` 核对最终模型、任务及转换/丢弃记录；默认模型只作省略时的兜底。查询和下载仍恢复原任务模型，不接受 `--model` 重新选型。
+同一请求文件可跨 CLI 解析，不保证目标支持相同任务、全部参数或产生相同结果。主程序通过目标 list-models 查询目录，用 metadata.tasks 核对本地协议任务，再用 `--try-run` 核对模型原文、任务和转换/丢弃记录；服务未声明的模型能力保持未知，预检不保证远端可用。默认模型只作省略时的兜底。查询和下载仍恢复原任务模型，不接受 `--model` 重新选型。
 
 | 任务 ID | 媒体类型 | 主要输入与语义 |
 | --- | --- | --- |
@@ -104,6 +104,20 @@
 
 技能只声明实际支持的任务；单首帧输入属于 `image-to-video` 的具体参数形式，不冒充首尾帧任务。其他任务 ID 作为契约扩展另行定义，不用自由字符串替代既有任务含义。
 
+
+### 2.2.1 动态模型目录与本地协议能力
+
+| 事项 | 统一规则 |
+| --- | --- |
+| 权威来源 | 模型目录由本次 API 地址与凭证对应的服务返回；OpenAI/Grok 当前调用基础路径后的 GET models。其他 Provider 按其实际模型目录接口实现，不跨账号、跨地址复用结果。 |
+| 目录与能力 | 本地 metadata.tasks 说明 CLI 实现了哪些协议任务和字段；远端模型 ID 不等于已经验证该模型支持这些任务。只返回 ID 的服务使用 tasks=null，不能根据名称猜测、静态枚举过滤或把本地任务复制成远端事实。 |
+| 查询副作用 | list-models 只查询模型目录，允许联网，不提交生成、不读取媒体、不创建输出文件；支持本次 request-id、连接认证、timeout、取消及标准 JSON 错误。 |
+| 查询异常 | 认证失败、网络错误、超时、不支持的端点、错误 JSON、缺少 data 数组、无效或重复 ID 如实失败；空目录 [] 为成功。不吞错误、不返回内置模型凑成功、不自动更换地址。 |
+| 生成边界 | --model 按输入原样传递，不强制先调用 list-models。目录可能不完整或暂不可用，不能作为生成白名单。服务端的模型不可用、无权限或任务不兼容错误按实际响应归一，不重选或重发。 |
+| 离线预检 | try-run 不查询目录；只校验模型 ID 结构、本地已实现任务、协议参数和映射。validated 不保证模型存在、账号可用、模型参数限制或远端成功。 |
+| 参数约束 | 本地保留有依据的协议类型、单位、枚举、互斥及资源保护规则；不得把已知模型的专属限制强加给所有新 ID。服务未提供模型级限制时明确未知，由正式调用核实，不承诺所有模型通用。 |
+| 默认与兼容 | 本批保留既有 default_models 供省略参数的独立调用兼容；主程序应查询目标目录并显式传 --model。默认 ID 不构成白名单或可用性保证；没有默认时要求提供模型，离线不自动挑选远端候选。 |
+
 ### 2.3 统一生成请求文件
 
 文件输入与直接参数输入最终转换为同一个显式类型对象，共用转换、过滤、默认值、校验及 Provider 映射。请求文件描述主程序关联 ID、生成内容和执行设置，不保存连接凭证。
@@ -113,7 +127,7 @@
 | `schema_version` | 字符串 | 是，初版 `1.0` | 统一请求格式版本；未知版本失败，不把版本当作可丢弃生成参数。 |
 | `request_id` | 字符串 | 与 `--request-id` 至少一处提供 | 主程序分配的调用关联 ID，格式与双来源一致性按第 3.0 节；不是远端任务或幂等键。 |
 | `task` | 字符串 | 按第 2.2 节选择 | 单次生成任务；不支持的任务失败，不自动换成其他任务。 |
-| `model` | 字符串 | 可省略 | 目标技能的实际模型 ID；保留为兼容输入。跨 CLI 通用文件建议省略，由主程序以 `--model` 显式指定；命令行覆盖后校验最终模型，未被覆盖且不支持时失败，不丢弃或回退。 |
+| `model` | 字符串 | 可省略 | 目标技能的实际模型 ID；保留为兼容输入。跨 CLI 通用文件建议省略，由主程序以 `--model` 显式指定；命令行覆盖后校验最终模型，未被覆盖时做非空、无控制字符校验，原样交给远端；不以本地模型名称表拒绝，也不丢弃或回退。 |
 | `prompt` | 字符串 | 按任务要求 | 完整提示词，保留中文、换行和顺序，不截断、不隐式改写。 |
 | `attachments` | 附件数组 | `[]` | 参考图、源图、首尾帧等输入，按下表定义；数组顺序保留，不自动解释成视频时间轴。 |
 | `parameters` | 对象 | `{}` | 通用生成参数；优先按第 2.7 节转换，无等价用法再丢弃。提示词、附件及执行控制不重复放此处。 |
@@ -205,7 +219,7 @@
 
 ### 2.6 Provider 专用参数
 
-协议特有参数不得混入通用选项或公共 JSON 根字段。参数定义使用第 3.1 节的同一结构，在所属模型的任务下声明，避免另设一套字段。
+协议特有参数不得混入通用选项或公共 JSON 根字段。参数定义使用第 3.1 节的同一结构，在 metadata.tasks 的协议任务下声明；远端实际提供模型专属约束时另标明来源，避免另设一套字段。
 
 | 对象 | 命名与存放规则 |
 | --- | --- |
@@ -451,11 +465,22 @@ UTF-8 往返校验只证明 CLI 已收到的字符串编码/解码保持一致�
 | `request_schema` | 对象 | 是 | 第 2.3 节公共请求结构的离线 JSON Schema，随技能发布到 `references/request.schema.json`。同版本公共结构一致；`parameters` 和 Provider 扩展保留未知项供后续过滤，模型特定约束放任务 Schema，不提前阻止跨 CLI 复用。 |
 | `max_request_bytes` | 正整数 | 是 | 请求 JSON 文件的最大字节数，超限在加载前拒绝；不是媒体附件大小上限。 |
 | `commands` | 命令定义数组 | 是 | 按下表声明命令及命令级参数；不得只给命令名称。 |
-| `models` | 模型定义数组 | 是 | 模型及其任务定义，见下表；清单只声明实际实现的本地能力，不保证账号远端可用。 |
+| `models` | 数组，固定 `[]` | 是 | metadata 离线执行，不合成或嵌入模型目录；实际列表由 list-models 返回。 |
+| `tasks` | 任务定义数组 | 是 | CLI 已实现的协议级任务、参数、转换和目标 Schema；沿用下表任务结构。模型字段只约束字符串结构，不写模型 ID const/enum。 |
+| `model_discovery` | 对象 | 是 | 模型目录的调用方式，字段见下表；目录来自目标 API，与本地 tasks 分开。 |
 | `default_task` | 字符串 | 否 | 合并文件与 argv 后未指定任务时采用的 ID，须属于已声明任务；未设置时按唯一候选规则处理。 |
-| `default_models` | 对象 | 是 | 任务 ID 到默认模型 ID 的映射；可为空对象。每个模型必须存在且支持对应任务。 |
+| `default_models` | 对象 | 是 | 任务 ID 到默认模型 ID 的映射；可为空对象。键必须属于本地 tasks；值为兼容默认 ID，不要求存在于静态目录，也不代表目标服务保证可用。 |
 | `authentication` | 认证定义对象 | 是 | 认证类型、参数定义与必需性；不包含实际凭证或示例秘密。 |
 | `extensions` | 对象 | 否 | 契约扩展点。扩展应有稳定命名空间，并不得改变公共字段含义。 |
+
+model_discovery 字段：
+
+| 字段 | 类型 | 必需 | 含义 |
+| --- | --- | --- | --- |
+| source | 字符串，固定 api | 是 | 模型目录来自当前目标服务，不内嵌固定模型 ID 集合。 |
+| command | 字符串，固定 list-models | 是 | 主程序获取目录的命令。 |
+| path | 字符串 | 是 | 相对 API 基础路径的目录端点；OpenAI/Grok 当前为 models，不含实际连接地址或凭证。 |
+| capability_information | 字符串 | 是 | 当前目录只有 ID 等信息时为 unknown；不代表模型已通过任务能力验证。 |
 
 `commands[]`：
 
@@ -464,7 +489,7 @@ UTF-8 往返校验只证明 CLI 已收到的字符串编码/解码保持一致�
 | `name` | 字符串 | 是 | 第 2 节的固定命令名；同一技能内唯一。 |
 | `description` | 字符串 | 是 | 简体中文说明命令用途与副作用。 |
 | `parameters` | 参数定义数组 | 是 | argv 命令级选项；每个命令声明 `request_id`，其他项按命令包含请求文件、连接、路由及执行控制。生成内容由任务参数及请求 Schema 声明。 |
-| `authentication_required` | 布尔值 | 是 | 为 `true` 时合并 `authentication.parameters` 并检查认证必填项；`metadata`、`version` 和本地模型清单为 `false`。 |
+| `authentication_required` | 布尔值 | 是 | 为 `true` 时合并 `authentication.parameters` 并检查认证必填项；metadata、version 为 false；list-models 按实际 Provider 认证要求设置，不再视为本地命令。 |
 | `response_type` | 枚举 | 是 | `SkillMetadata`、`ModelList`、`GenerateResponse`、`VersionInfo`、`TaskResponse`；生成默认返回产物响应，异步提交返回任务响应，试运行按第 3.6 节，失败按第 3.7 节。 |
 
 `authentication`：
@@ -474,14 +499,14 @@ UTF-8 往返校验只证明 CLI 已收到的字符串编码/解码保持一致�
 | `type` | 枚举 | 是 | `none` 无认证；`api_key` 使用 API Key；`provider` 为供应商专用认证。后者的参数与本地映射由技能实现，不在宿主猜测。 |
 | `parameters` | 参数定义数组 | 是 | 只声明直接认证参数；`api_key` 类型须声明必需且敏感的 `api_key`；`none` 使用空数组。Provider 组合认证字段使用其前缀，不写入请求文件或默认值，不采用 AES 密钥分发。 |
 
-`models[]` 与 `models[].tasks[]`：
+`ModelList.models[]` 与 `metadata.tasks[]`：
 
 | 对象 / 字段 | 类型 | 必需 | 含义 |
 | --- | --- | --- | --- |
 | 模型 `id` | 字符串 | 是 | `--model` 使用的唯一 ID。 |
 | 模型 `name` | 字符串 | 是 | 用户可读显示名，不用于请求选择。 |
-| 模型 `tasks` | 任务定义数组 | 是 | 该模型实际实现的任务；不能用技能级媒体能力代替任务列表。 |
-| 任务 `id` | 字符串 | 是 | 第 2.2 节的任务 ID，在同一模型内唯一。 |
+| 模型 `tasks` | 任务定义数组或 null | 是 | 仅在服务返回并可可靠映射时填写；只有 ID 的目录返回 null，表示未知，不能复制本地任务冒充模型能力。 |
+| 任务 `id` | 字符串 | 是 | 第 2.2 节的任务 ID，在 metadata.tasks 或同一远端模型任务数组内唯一。 |
 | 任务 `media_type` | 枚举 | 是 | `image` 或 `video`；须与任务语义和技能 `capabilities` 一致。 |
 | 任务 `parameters` | 参数定义数组 | 是 | 原生接受的公共及当前 Provider 生成参数；未在此原生接受的输入先尝试 `parameter_conversions`，再按第 2.8 节过滤。 |
 | 任务 `parameter_conversions` | 转换规则数组 | 是 | 第 2.7 节规则；无转换为 `[]`。公共与特殊字段只要存在可靠等价转换就应实现，不用空数组掩盖遗漏映射。 |
@@ -512,7 +537,7 @@ UTF-8 往返校验只证明 CLI 已收到的字符串编码/解码保持一致�
 
 | 合并与校验项 | 规则 |
 | --- | --- |
-| 参数来源 | 声明来源为命令 + 按需认证 + 模型任务；同一 argv 名或请求路径存在冲突定义属于 metadata 错误，附件入口与本方案明确规定的简写共享 `/attachments` 除外。文件/argv 合并按第 2.3 节，不将有意覆盖误判为定义冲突。 |
+| 参数来源 | 声明来源为命令 + 按需认证 + 本地协议任务；远端模型专属能力只有经过可靠映射才参与解释；同一 argv 名或请求路径存在冲突定义属于 metadata 错误，附件入口与本方案明确规定的简写共享 `/attachments` 除外。文件/argv 合并按第 2.3 节，不将有意覆盖误判为定义冲突。 |
 | Schema 约定 | 使用 JSON Schema 2020-12 的离线子集：`type`、`properties`、`required`、`items`、`additionalProperties`、`enum`、`const`、`minimum`、`maximum`、`exclusiveMinimum`、`exclusiveMaximum`、`minLength`、`maxLength`、`minItems`、`maxItems`、`allOf`、`anyOf`、`oneOf`、`not`、`if`、`then`、`else`，并允许 `description` 和布尔注解 `sensitive`。不支持的关键字及 `$ref` 必须拒绝，不加载远程 Schema。 |
 | 结构字段含义 | `type` 指定 JSON 类型；`properties` 定义对象子字段；`required` 列出必需键；`items` 定义数组元素；`additionalProperties=false` 禁止未知子字段。嵌套结构递归使用同一子集。 |
 | 值与数量约束 | `enum` / `const` 限制可选值 / 固定值；`minimum` / `maximum` 为含端点数值边界，`exclusiveMinimum` / `exclusiveMaximum` 不含端点；`minLength` / `maxLength` 为 Unicode 码点数，`minItems` / `maxItems` 为数组元素数。 |
@@ -527,7 +552,8 @@ UTF-8 往返校验只证明 CLI 已收到的字符串编码/解码保持一致�
 | `schema_version` | 字符串 | 是 | 模型清单 JSON 契约版本。 |
 | `response_id` | 字符串 | 是 | 本次查询的主程序请求 ID，原样回传。 |
 | `provider` | 字符串 | 是 | 返回清单的 Provider 标识。 |
-| `models` | 模型定义数组 | 是 | 模型对象结构与 `metadata.models[]` 一致。 |
+| `model_source` | 字符串，固定 `api` | 是 | 证明本次目录来自目标 API，不使用本地缓存或内置白名单替代查询。 |
+| `models` | 模型定义数组 | 是 | 保留服务目录中的原始 ID 与顺序；服务未提供可验证的任务能力时 tasks=null，不按名称筛选通用/图片模型。合法空目录返回 []。 |
 
 ### 3.3 `version` 响应
 
@@ -870,8 +896,9 @@ flowchart TB
     P["第 7 节：按 RID 发布完整技能包至 skills/技能名/"] --> H["主程序设置 cwd 授权根，分配 request_id"]
     H --> I["argv 传命令、请求文件、模型、输出目录和连接参数；识别命令记录预算起点；stdin 接取消"]
     I --> C{"完成关联、结构与路径检查；分派命令"}
-    C -->|"metadata / list-models / version"| M["返回本地能力、模型清单或版本 JSON"]
-    C -->|"generate"| G["合并显式输入；模型按 argv、文件、声明默认或唯一候选选择；不支持则失败"]
+    C -->|"metadata / version"| M["返回离线协议任务与参数定义或版本 JSON"]
+    C -->|"list-models"| LM["使用本次地址和认证请求模型 API；原样返回目录，能力未知为 null；失败不回退静态清单"]
+    C -->|"generate"| G["合并显式输入；模型按 argv、文件或兼容默认选择；只校验结构，不以本地名称拒绝"]
     G --> V["校验源值与组合；等价转换；过滤剩余不支持项"]
     V --> D["补确定性默认；校验目标；Provider 请求映射"]
     D --> T{"try_run？"}

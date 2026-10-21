@@ -7,7 +7,7 @@
 | Provider | xAI，API 根地址默认为 `https://api.x.ai/v1` |
 | 端点 | `POST /images/generations` |
 | 任务 | 仅 `text-to-image`，同步等待并落盘 |
-| 模型 | `grok-imagine-image-2.0`；最终可用性由账户和服务端决定 |
+| 模型 | 模型目录从目标 API 查询；`grok-imagine-image-2.0` 仅为兼容默认，不是白名单 |
 | 附件 | 当前不实现 image-edit；统一附件先校验，再按原索引记录 `unsupported_attachment_role`，不读取媒体 |
 | 异步 | 不声明 `supports_async`，不提供 query/download/no-wait |
 
@@ -23,7 +23,7 @@
 | 公共字段 | Provider 字段 | 类型/默认 | 说明 |
 | --- | --- | --- | --- |
 | `prompt` | `prompt` | string，必需 | 原文透传；不翻译、不截断 |
-| `model` | `model` | string，默认 `grok-imagine-image-2.0` | 按 argv → 文件 → 默认模型选择；不支持时失败 |
+| `model` | `model` | string，默认 `grok-imagine-image-2.0` | 按 argv → 文件 → 默认选择；非空且无控制字符即原样传递，由服务判断可用性 |
 | `parameters.aspect_ratio` | `aspect_ratio` | string，默认 `auto` | 支持 `auto`、`1:1`、`16:9`、`9:16`、`4:3`、`3:4`、`3:2`、`2:3`、`2:1`、`1:2`、`19.5:9`、`9:19.5`、`20:9`、`9:20`、`21:9`、`5:2` |
 | `parameters.num_images` | `n` | integer，默认 1，范围 1-10 | xAI 文档标明 REST API 支持 1–10；响应必须返回相同数量 |
 | `response_format` | `response_format` | 固定 `b64_json` | CLI 强制使用 base64，确保能完成本地产物验证；不使用默认 URL |
@@ -50,3 +50,9 @@
 原始响应体和 API Key 不输出；服务端 `x-request-id`（如存在）仅映射为 `provider_metadata.request_id`，不与公共 `response_id` 或任务 ID 混用。
 
 协议依据：[xAI Image Generation](https://docs.x.ai/developers/model-capabilities/images/generation)，核对日期 2026-10-22。
+
+## 模型发现协议
+
+list-models 为联网命令，接受 --request-id、--api-url、--api-key、--timeout、--output-format json 与 --verbose。使用同一基础地址后的 GET models 和 Bearer 认证；仅保留服务实际返回的模型 ID，返回 model_source=api。当前模型 API 未提供可靠任务信息，故 models[].tasks=null；不按名称推断或过滤。重复/无效 ID、错误结构、非成功 HTTP 按公共错误失败，不回退静态清单。
+
+metadata 离线返回 models=[]、顶层 tasks 协议定义和 model_discovery。生成不预先强制查询模型，try-run 只做 ID 结构和协议参数预检；模型存在性、权限与真实能力由服务决定，不使用静态白名单。

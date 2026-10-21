@@ -10,7 +10,6 @@ internal static class GrokImageMetadata
     public const string SkillId = "skill-grok-image";
     public const string DefaultModel = "grok-imagine-image-2.0";
     public const string DefaultApiUrl = "https://api.x.ai/v1";
-    public static readonly string[] SupportedModels = [DefaultModel];
     public static readonly string[] SupportedAspectRatios =
         ["auto", "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "2:1", "1:2", "19.5:9", "9:19.5", "20:9", "9:20", "21:9", "5:2"];
 
@@ -26,23 +25,19 @@ internal static class GrokImageMetadata
         var requestSchema = JsonNode.Parse(schemaStream)?.AsObject() ?? throw new InvalidOperationException("The embedded request schema is invalid.");
         var commands = new JsonArray(
             Command("metadata", "读取技能能力与契约。", false, "SkillMetadata", ["--request-id", "--output-format", "--verbose"]),
-            Command("list-models", "列出本地声明支持的图片模型。", false, "ModelList", ["--request-id", "--output-format", "--verbose"]),
+            Command("list-models", "从目标 API 获取模型目录，任务能力未返回时标为未知。", true, "ModelList", ["--request-id", "--api-url", "--timeout", "--output-format", "--verbose"]),
             Command("version", "读取技能和契约版本。", false, "VersionInfo", ["--request-id", "--output-format", "--verbose"]),
             Command("generate", "通过 Grok Imagine 生成图片并保存产物。", true, "GenerateResponse",
                 ["--request-id", "--request-file", "--api-url", "--api-key", "--output-dir", "--task", "--model", "--prompt", "--aspect-ratio", "--num-images", "--output-format", "--timeout", "--try-run", "--verbose", "--no-wait"]));
-        var models = new JsonArray();
-        foreach (var model in SupportedModels)
-        {
-            var task = Obj(("id", S("text-to-image")), ("media_type", S("image")), ("parameters", ImageParameters()),
-                ("parameter_conversions", new JsonArray()), ("validation_schema", GrokImageSchemas.Effective(model)),
+        var task = Obj(("id", S("text-to-image")), ("media_type", S("image")), ("parameters", ImageParameters()),
+                ("parameter_conversions", new JsonArray()), ("validation_schema", GrokImageSchemas.Effective()),
                 ("supports_partial", B(false)), ("supports_async", B(false)), ("task_context_required", B(false)),
                 ("task_context_schema", null), ("attachment_limits", new JsonArray()));
-            models.Add((JsonNode)Obj(("id", S(model)), ("name", S(model)), ("tasks", new JsonArray(task))));
-        }
         return Obj(("schema_version", S(ContractVersion)), ("response_id", S(id)), ("skill_id", S(SkillId)),
             ("name", S("Grok 图片生成")), ("provider", S("grok")), ("version", S(Version)), ("capabilities", Strings("image")),
             ("default_api_url", S(DefaultApiUrl)), ("request_schema_version", S(ContractVersion)), ("request_schema", requestSchema),
-            ("max_request_bytes", N(1_048_576)), ("commands", commands), ("models", models), ("default_task", S("text-to-image")),
+            ("max_request_bytes", N(1_048_576)), ("commands", commands), ("models", new JsonArray()), ("tasks", new JsonArray(task)),
+            ("model_discovery", Obj(("source", S("api")), ("command", S("list-models")), ("path", S("models")), ("capability_information", S("unknown")))), ("default_task", S("text-to-image")),
             ("default_models", Obj(("text-to-image", S(DefaultModel)))),
             ("authentication", Obj(("type", S("api_key")), ("parameters", new JsonArray(
                 Obj(("name", S("api_key")), ("cli_name", S("--api-key")), ("request_path", null), ("scope", S("common")),
@@ -50,9 +45,6 @@ internal static class GrokImageMetadata
                     ("type", S("string")), ("required", B(true)), ("sensitive", B(true))))))),
             ("extensions", new JsonObject()));
     }
-
-    public static JsonObject BuildModels(string? id) => Obj(("schema_version", S(ContractVersion)), ("response_id", S(id)),
-        ("provider", S("grok")), ("models", BuildMetadata(id)["models"]!.DeepClone()));
 
     private static JsonArray ImageParameters() => new(
         Parameter("prompt", "--prompt", "string", true, null, "生成图片的文本提示词。", "/prompt"),
@@ -101,7 +93,7 @@ internal static class GrokImageMetadata
                 "api_key" => "xAI API Key，通过 Bearer Token 认证，不回显。",
                 "output_dir" => "产物目录，必须位于工作目录授权根内。",
                 "task" => "生成任务，当前仅支持 text-to-image。",
-                "model" => "当前支持的 Grok Imagine 图片模型 ID。",
+                "model" => "目标服务模型 ID，原样传递；本地不维护模型名称白名单。",
                 "prompt" => "生成图片的提示词。",
                 "aspect_ratio" => "图片比例，支持 auto、1:1、16:9、9:16、4:3、3:4、3:2、2:3、2:1、1:2、19.5:9、9:19.5、20:9、9:20、21:9、5:2。",
                 "num_images" => "生成数量，范围 1 至 10。",

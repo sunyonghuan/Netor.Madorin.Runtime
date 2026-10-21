@@ -5,7 +5,7 @@ namespace Madorin.AI.OpenAI.Image.Metadata;
 
 internal static class OpenAiImageSchemas
 {
-    public static JsonObject Effective(string model)
+    public static JsonObject Effective()
     {
         var parameters = Obj(("type", S("object")), ("additionalProperties", B(false)),
             ("required", Strings("size", "quality", "num_images")),
@@ -14,7 +14,7 @@ internal static class OpenAiImageSchemas
         return Obj(("type", S("object")), ("additionalProperties", B(false)),
             ("required", Strings("schema_version", "request_id", "task", "model", "prompt", "parameters", "execution", "attachments", "provider_parameters")),
             ("properties", Obj(("schema_version", Constant("1.0")), ("request_id", Obj(("type", S("string")), ("minLength", N(1)), ("maxLength", N(128)))),
-                ("task", Constant("text-to-image")), ("model", Constant(model)), ("prompt", Obj(("type", S("string")), ("minLength", N(1)))),
+                ("task", Constant("text-to-image")), ("model", Obj(("type", S("string")), ("minLength", N(1)))), ("prompt", Obj(("type", S("string")), ("minLength", N(1)))),
                 ("attachments", Obj(("type", S("array")), ("maxItems", N(0)))), ("parameters", parameters),
                 ("provider_parameters", Obj(("type", S("object")), ("additionalProperties", B(false)), ("required", Strings("openai")),
                     ("properties", Obj(("openai", Obj(("type", S("object")), ("additionalProperties", B(false)), ("required", Strings("output_format")),

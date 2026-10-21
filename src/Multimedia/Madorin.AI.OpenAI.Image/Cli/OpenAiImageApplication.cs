@@ -50,13 +50,18 @@ internal sealed class OpenAiImageApplication(HttpClient client)
                     response = SkillResponses.Generated("openai", "image", invocation, generated);
                 }
             }
+            else if (args[0] == "list-models")
+            {
+                var options = ModelListOptions.Parse(args[1..], "https://api.openai.com/v1", invocation);
+                response = await new OpenAiImageClient(client).ListModelsAsync(options, invocation);
+            }
             else
             {
                 ValidateLocalCommand(args, id);
                 response = args[0] switch
                 {
                     "metadata" => OpenAiImageMetadata.BuildMetadata(id),
-                    "list-models" => OpenAiImageMetadata.BuildModels(id),
+
                     "version" => OpenAiImageMetadata.BuildVersion(id),
                     _ => throw new SkillException("invalid_parameter", "未知命令。")
                 };

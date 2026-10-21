@@ -15,11 +15,11 @@ public sealed class RequestContractTests
         var metadata = await Invoke(workspace, ["metadata", "--request-id", "meta"]);
         var preview = await Invoke(workspace, ["generate", "--request-id", "preview", "--prompt", "水墨山水", "--api-key", "placeholder", "--output-format", "json", "--provider-openai-output-format", "jpeg", "--try-run"]);
         Assert.AreEqual("validated", preview["status"]!.GetValue<string>());
-        var schema = JsonSchema.FromText(metadata["models"]![0]!["tasks"]![0]!["validation_schema"]!.ToJsonString());
+        var schema = JsonSchema.FromText(metadata["tasks"]![0]!["validation_schema"]!.ToJsonString());
         using var effective = System.Text.Json.JsonDocument.Parse(preview["effective_parameters"]!.ToJsonString());
         Assert.IsTrue(schema.Evaluate(effective.RootElement).IsValid);
         var parameters = metadata["commands"]!.AsArray().Single(item => item!["name"]!.GetValue<string>() == "generate")!["parameters"]!.AsArray()
-            .Concat(metadata["authentication"]!["parameters"]!.AsArray()).Concat(metadata["models"]![0]!["tasks"]![0]!["parameters"]!.AsArray()).ToArray();
+            .Concat(metadata["authentication"]!["parameters"]!.AsArray()).Concat(metadata["tasks"]![0]!["parameters"]!.AsArray()).ToArray();
         Assert.AreEqual(parameters.Length, parameters.Select(item => item!["cli_name"]!.GetValue<string>()).Distinct(StringComparer.Ordinal).Count());
         var attachments = parameters.Where(item => item!["request_path"]?.GetValue<string>() == "/attachments").ToArray();
         Assert.HasCount(5, attachments);

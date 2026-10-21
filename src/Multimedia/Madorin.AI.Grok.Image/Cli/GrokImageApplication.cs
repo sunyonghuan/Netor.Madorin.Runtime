@@ -50,13 +50,18 @@ internal sealed class GrokImageApplication(HttpClient client)
                     response = SkillResponses.Generated("grok", "image", invocation, generated);
                 }
             }
+            else if (args[0] == "list-models")
+            {
+                var options = ModelListOptions.Parse(args[1..], "https://api.x.ai/v1", invocation);
+                response = await new GrokImageClient(client).ListModelsAsync(options, invocation);
+            }
             else
             {
                 ValidateLocalCommand(args, id);
                 response = args[0] switch
                 {
                     "metadata" => GrokImageMetadata.BuildMetadata(id),
-                    "list-models" => GrokImageMetadata.BuildModels(id),
+
                     "version" => GrokImageMetadata.BuildVersion(id),
                     _ => throw new SkillException("invalid_parameter", "未知命令。")
                 };

@@ -132,7 +132,7 @@ public sealed class GrokImageApplicationTests
     }
 
     [TestMethod]
-    public async Task UnsupportedModelReturnsCorrelatedValidationFailure()
+    public async Task EmptyModelReturnsCorrelatedValidationFailure()
     {
         using var workspace = new TestWorkspace();
         using var client = new HttpClient(new FakeHandler(_ => throw new InvalidOperationException("invalid models must not access the provider")));
@@ -140,7 +140,7 @@ public sealed class GrokImageApplicationTests
 
         var code = await new GrokImageApplication(client).RunAsync(
             ["generate", "--request-id", "req-invalid-model", "--prompt", "hello", "--api-key", "secret",
-             "--model", "unsupported-model", "--try-run"], output, workspace.Root);
+             "--model", "", "--try-run"], output, workspace.Root);
         var response = JsonNode.Parse(output.ToString())!;
 
         Assert.AreEqual(1, code);

@@ -96,7 +96,7 @@ internal sealed class ImageGenerationOptionsFactory(WorkspacePaths paths)
 
     private static void Validate(string task, string model, string? prompt, string aspectRatio, int count)
     {
-        if (task != "text-to-image" || string.IsNullOrWhiteSpace(prompt) || !GrokImageMetadata.SupportedModels.Contains(model, StringComparer.Ordinal) ||
+        if (task != "text-to-image" || string.IsNullOrWhiteSpace(prompt) || !ModelIds.IsValid(model) ||
             !GrokImageMetadata.SupportedAspectRatios.Contains(aspectRatio, StringComparer.Ordinal) || count is < 1 or > 10)
         { throw new SkillException("invalid_parameter", "任务、模型、宽高比、提示词或生成数量不合法。"); }
     }

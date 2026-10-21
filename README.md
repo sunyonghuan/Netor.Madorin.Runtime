@@ -76,9 +76,9 @@ dotnet run --project src/Madorin.AI.Runtime.Cli --no-build -- config validate
 | 技能 | 项目 | 模型与已实现任务 |
 | --- | --- | --- |
 | `skill-openai-image` | [Madorin.AI.OpenAI.Image](src/Multimedia/Madorin.AI.OpenAI.Image/README.md) | 默认 `gpt-image-1`；同步 `text-to-image`，具体模型与参数以 `list-models`、`metadata` 为准。 |
-| `skill-grok-image` | [Madorin.AI.Grok.Image](src/Multimedia/Madorin.AI.Grok.Image/README.md) | `grok-imagine-image-2.0`；同步 `text-to-image`，支持图片数量与宽高比。 |
+| `skill-grok-image` | [Madorin.AI.Grok.Image](src/Multimedia/Madorin.AI.Grok.Image/README.md) | 同步 `text-to-image`；模型从目标 API 查询，兼容默认值为 `grok-imagine-image-2.0`。 |
 
-两个技能均提供 `metadata`、`list-models`、`version`、`generate`。当前未实现参考图片参与生成、图像编辑、视频生成或公开异步 `query` / `download`。请求中的附件即使结构合法，也不会参与当前文生图任务。
+两个技能均提供 `metadata`、`list-models`、`version`、`generate`。metadata 离线返回本地 tasks 协议能力；list-models 使用当前 API 地址与密钥联网查询模型目录，服务未提供任务能力时 tasks=null。生成不强制先查询目录，也不把目录或内置名称用作白名单。当前未实现参考图片参与生成、图像编辑、视频生成或公开异步 `query` / `download`。请求中的附件即使结构合法，也不会参与当前文生图任务。
 
 ### 构建与能力查询
 
@@ -86,7 +86,7 @@ dotnet run --project src/Madorin.AI.Runtime.Cli --no-build -- config validate
 dotnet build src/Multimedia/Madorin.AI.OpenAI.Image/Madorin.AI.OpenAI.Image.csproj
 dotnet build src/Multimedia/Madorin.AI.Grok.Image/Madorin.AI.Grok.Image.csproj
 dotnet run --project src/Multimedia/Madorin.AI.Grok.Image --no-build -- metadata --request-id metadata-001
-dotnet run --project src/Multimedia/Madorin.AI.Grok.Image --no-build -- list-models --request-id models-001
+dotnet run --project src/Multimedia/Madorin.AI.Grok.Image --no-build -- list-models --request-id models-001 --api-url https://api.x.ai/v1 --api-key $env:GROK_API_KEY
 ```
 
 ### 请求文件与试运行
@@ -123,7 +123,7 @@ dotnet run --project src/Multimedia/Madorin.AI.Grok.Image --no-build -- generate
 | 参数 / 规则 | 说明 |
 | --- | --- |
 | `--request-file` | 生成请求 JSON 文件路径，承载任务、长提示词、附件结构及生成参数；也可直接使用 `--prompt` 等受支持参数。 |
-| `--model` | 跨 CLI 调用时显式指定目标模型；覆盖文件中的模型，不支持的最终模型直接失败。 |
+| `--model` | 跨 CLI 调用时显式指定目标模型；覆盖文件中的模型，非空且无控制字符即原样传递；不使用静态模型白名单。 |
 | `--output-dir` | 本地媒体输出目录；只将完整校验且成功落盘的文件列为产物。 |
 | `--api-url` | Provider 基础地址；两个技能各有默认地址，程序追加 `images/generations`。HTTPS 为常规要求，本机回环兼容服务允许 HTTP。 |
 | `--api-key` | 仅通过 argv 传递，不写入请求文件；调用方不要记录包含凭证的完整命令。 |
@@ -175,7 +175,7 @@ pwsh ./build/madorin-cli.publish.ps1 list
 | --- | --- |
 | 多媒体构建与离线测试 | Grok 批次记录为构建 0 警告、0 错误，多媒体测试 68/68 通过；属于既有批次证据。 |
 | 中文试运行与技能源结构 | Grok 批次已验证中文 try-run、凭证脱敏和技能源结构。 |
-| 真实图片生成 | 已授权的本机兼容端点调用返回 HTTP 404，无图片产物；真实成功生成仍待验证。 |
+| 真实图片生成 | 历史本机兼容端点返回 404；本批 OpenAI CLI 使用目标服务的 gpt-image-2 成功生成并校验落盘，详见[动态模型记录](docs/图标视频/执行/执行记录(动态模型目录).md)。 |
 | Native AOT 与目标平台 | 多媒体真实 AOT 发布、目标 RID 实机运行仍待验证。 |
 
 后续修改多媒体行为时，可按影响范围构建对应项目，并运行定向测试：

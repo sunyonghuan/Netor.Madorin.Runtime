@@ -180,7 +180,7 @@ internal sealed class ImageGenerationOptionsFactory(WorkspacePaths paths)
 
     private static void Validate(string task, string model, string? prompt, string size, string quality, string format, int count)
     {
-        if (task != "text-to-image" || string.IsNullOrWhiteSpace(prompt) || !OpenAiImageMetadata.SupportedModels.Contains(model, StringComparer.Ordinal))
+        if (task != "text-to-image" || string.IsNullOrWhiteSpace(prompt) || !ModelIds.IsValid(model))
         {
             throw new SkillException("invalid_parameter", "任务、模型或提示词不合法。");
         }

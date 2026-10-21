@@ -1,4 +1,5 @@
 using System.Net;
+using Madorin.AI.Multimedia.Core.CommandLine;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -17,6 +18,23 @@ internal sealed class OpenAiImageClient(HttpClient client)
 
     public static JsonObject Preview(OpenAiImageRequest request) =>
         JsonSerializer.SerializeToNode(request, OpenAiJsonContext.Default.OpenAiImageRequest)!.AsObject();
+
+    public async Task<JsonObject> ListModelsAsync(ModelListOptions options, SkillInvocation invocation)
+    {
+        invocation.ThrowIfCancellationRequested();
+        var endpoint = new Uri(new Uri(options.Endpoint.GetLeftPart(UriPartial.Path).TrimEnd('/') + "/"), "models");
+        using var message = new HttpRequestMessage(HttpMethod.Get, endpoint);
+        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.ApiKey);
+        using var response = await client.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, invocation.CancellationToken);
+        invocation.ProviderRequestId = response.Headers.TryGetValues("x-request-id", out var ids) ? ids.FirstOrDefault() : null;
+        var body = await response.Content.ReadAsStringAsync(invocation.CancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw MapError(response.StatusCode, body);
+        }
+
+        return ModelCatalogResponse.Parse(body, "openai", invocation);
+    }
 
     public async Task<JsonArray> GenerateAsync(
         ImageGenerationOptions options, OpenAiImageRequest request, SkillInvocation invocation, ArtifactStore artifacts)

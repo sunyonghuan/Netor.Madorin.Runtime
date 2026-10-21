@@ -11,6 +11,8 @@ public sealed class ModelSelectionTests
     [DataRow("gpt-image-1-mini", null, "gpt-image-1-mini")]
     [DataRow("gpt-image-1.5", "gpt-image-1-mini", "gpt-image-1-mini")]
     [DataRow("other-cli-model", "gpt-image-1.5", "gpt-image-1.5")]
+    [DataRow("deployment/custom-image", null, "deployment/custom-image")]
+    [DataRow(null, "gpt-image-2", "gpt-image-2")]
     public async Task ModelSelectionUsesDirectThenFileThenDeclaredDefault(string? fileModel, string? directModel, string expected)
     {
         using var workspace = new TestWorkspace();
@@ -70,9 +72,7 @@ public sealed class ModelSelectionTests
     }
 
     [TestMethod]
-    [DataRow("other-cli-model", null, "text-to-image")]
-    [DataRow("gpt-image-1", "other-cli-model", "text-to-image")]
-    [DataRow(null, "", "text-to-image")]
+        [DataRow(null, "", "text-to-image")]
     [DataRow(null, "gpt-image-1-mini", "image-edit")]
     public async Task InvalidSelectedModelOrTaskDoesNotFallBack(string? fileModel, string? directModel, string task)
     {

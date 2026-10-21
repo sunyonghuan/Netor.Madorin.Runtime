@@ -9,7 +9,7 @@
 | 项目命名 | 以技能 CLI 方案为准，技能项目使用 `Madorin.AI.<Provider>.<Capability>`；能力段为 `Image`、`Video` 或 `ImageVideo`，不额外插入 `Skills` 段。 |
 | 职责边界 | CLI 入口负责命令与输出；技能内部的 Provider 实现负责供应商协议；共享契约不包含供应商私有字段。 |
 | 请求输入 | 生成支持统一 JSON 文件并保留直接参数；API 基础地址与认证只 argv，不采用 AES 或连接文件。查询/下载按声明可需 --task-context-file，保存任务恢复状态而非生成内容。 |
-| 模型选择 | 主程序跨 CLI 生成显式传 `--model`；内容文件建议省略模型、调用 ID 和输出目录。模型按 argv → 文件 → 声明默认 → 唯一候选选择，最终模型不支持则失败，不丢弃或静默回退。 |
+| 模型选择 | 主程序跨 CLI 生成显式传 `--model`；内容文件建议省略模型、调用 ID 和输出目录。模型按 argv → 文件 → 兼容默认选择，ID 非空且无控制字符即原样传递，不使用静态名称白名单或前缀门禁。list-models 从当前 API 获取目录，失败不静态回退；metadata.tasks 描述本地协议能力，未知模型任务为 null。 |
 | 请求关联 | response_id 原样等于有效 request_id；远端 task_id 与 provider_metadata.request_id 单次追踪分开。成功/失败中的任务与完整上下文按方案第 3 节保留。 |
 | 异步与控制 | 公开异步须能跨进程恢复；BFL 原 polling_url 仅在 task_context/受限任务文件往返。stdin 取消帧、命令识别起点总预算和最多 5 秒清理按方案第 2.10、2.11、5 节。 |
 | 参数转换 | 公共和特殊参数优先按已声明规则做等价转换，响应记录 `converted_parameters`；无法应用的剩余项才丢弃并记录 `ignored_parameters`。非法源值、目标冲突及协议/控制错误仍失败。 |
