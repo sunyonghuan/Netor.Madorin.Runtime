@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsAotCompatible>false</IsAotCompatible>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="MSTest" />
+    <PackageReference Include="JsonSchema.Net" />
+    <Using Include="Microsoft.VisualStudio.TestTools.UnitTesting" />
+    <ProjectReference Include="../../src/Multimedia/Madorin.AI.Multimedia.Core/Madorin.AI.Multimedia.Core.csproj" />
+    <ProjectReference Include="../../src/Multimedia/Madorin.AI.OpenAI.Image/Madorin.AI.OpenAI.Image.csproj" />
+  </ItemGroup>
+</Project>

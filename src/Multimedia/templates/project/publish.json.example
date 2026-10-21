@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "skill_name": "skill-example-image",
+  "project": "Madorin.AI.Example.Image.csproj",
+  "executable": "skill-example-image",
+  "platforms": [
+    "win-x64",
+    "linux-x64",
+    "osx-arm64"
+  ]
+}
