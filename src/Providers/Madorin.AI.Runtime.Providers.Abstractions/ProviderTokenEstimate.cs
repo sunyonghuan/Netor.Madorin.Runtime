@@ -30,7 +30,8 @@ public static class ProviderTokenEstimator
             {
                 bytes += Encoding.UTF8.GetByteCount(tool.ToolId);
                 bytes += Encoding.UTF8.GetByteCount(tool.DisplayName);
-                bytes += Encoding.UTF8.GetByteCount(tool.Description);
+                // Older hosts may omit optional tool descriptions.
+                bytes += Encoding.UTF8.GetByteCount(tool.Description ?? string.Empty);
                 bytes += Encoding.UTF8.GetByteCount(tool.InputSchemaJson);
             }
         }

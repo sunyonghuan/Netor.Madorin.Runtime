@@ -173,7 +173,7 @@ public sealed partial class ToolCatalogStore : IToolCatalogStore
                 item.ToolId,
                 match.Groups["namespace"].Value,
                 item.DisplayName,
-                item.Description,
+                item.Description ?? string.Empty,
                 item.InputSchema.GetRawText(),
                 item.OutputSchema.GetRawText(),
                 item.Risk.ToString(),
