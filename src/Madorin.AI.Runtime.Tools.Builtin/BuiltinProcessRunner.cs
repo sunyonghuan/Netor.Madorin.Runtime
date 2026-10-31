@@ -145,25 +145,40 @@ internal static class BuiltinProcessRunner
 
     public static IReadOnlyDictionary<string, string> BuildEnvironment(
         System.Text.Json.JsonElement arguments,
-        IReadOnlyList<string>? allowedVariables)
+        IReadOnlyList<string>? allowedVariables,
+        bool inheritAll = false)
     {
         var comparer = OperatingSystem.IsWindows()
             ? StringComparer.OrdinalIgnoreCase
             : StringComparer.Ordinal;
         var allowed = (allowedVariables ?? []).ToHashSet(comparer);
-        if (allowed.Count > MaxEnvironmentVariables)
+        if (!inheritAll && allowed.Count > MaxEnvironmentVariables)
         {
             throw new InvalidDataException("The environment variable allowlist is too large.");
         }
 
         var result = new Dictionary<string, string>(comparer);
-        foreach (var name in allowed)
+        if (inheritAll)
         {
-            ValidateEnvironmentName(name);
-            var inherited = Environment.GetEnvironmentVariable(name);
-            if (inherited is not null)
+            foreach (System.Collections.DictionaryEntry item in Environment.GetEnvironmentVariables())
             {
-                result[name] = inherited;
+                if (item.Key is string name && item.Value is string value)
+                {
+                    ValidateEnvironmentName(name);
+                    result[name] = value;
+                }
+            }
+        }
+        else
+        {
+            foreach (var name in allowed)
+            {
+                ValidateEnvironmentName(name);
+                var inherited = Environment.GetEnvironmentVariable(name);
+                if (inherited is not null)
+                {
+                    result[name] = inherited;
+                }
             }
         }
 
@@ -380,10 +395,13 @@ internal static class BuiltinProcessRunner
         var info = new FileInfo(path);
         if ((info.Attributes & FileAttributes.ReparsePoint) != 0 || info.LinkTarget is not null)
         {
-            var target = info.ResolveLinkTarget(returnFinalTarget: true)
-                ?? throw new UnauthorizedAccessException(
-                    "The executable link target could not be resolved.");
-            path = Path.GetFullPath(target.FullName);
+            // Windows app execution aliases may expose a reparse point without a
+            // filesystem target. They are valid shell launchers and must remain usable.
+            var target = info.ResolveLinkTarget(returnFinalTarget: true);
+            if (target is not null)
+            {
+                path = Path.GetFullPath(target.FullName);
+            }
         }
 
         if (!File.Exists(path) || Directory.Exists(path))

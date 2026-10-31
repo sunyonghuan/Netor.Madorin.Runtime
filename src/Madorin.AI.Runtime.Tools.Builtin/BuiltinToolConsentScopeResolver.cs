@@ -379,7 +379,10 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
             $"{script.Length} script characters; stdin {standardInput?.Length ?? 0} characters",
             readRoots: [workingDirectory],
             allowedExecutables: shells,
-            allowedEnvironmentVariables: environmentNames,
+            allowedEnvironmentVariables: environmentNames.Concat(
+                SkillScriptEnvironmentPolicy.InheritedVariableNames).Distinct(
+                OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal)
+                .ToArray(),
             canGrantForRun: canGrantForRun);
     }
 

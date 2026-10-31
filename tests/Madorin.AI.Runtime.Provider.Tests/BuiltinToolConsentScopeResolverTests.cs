@@ -106,7 +106,7 @@ public sealed class BuiltinToolConsentScopeResolverTests
     [DataRow(BuiltinToolRegistry.FileReadToolId, "{\"path\":\"../outside.txt\"}")]
     [DataRow(BuiltinToolRegistry.FileReadToolId, "{\"path\":\"\\\\server\\share\\file.txt\"}")]
     [DataRow(BuiltinToolRegistry.FileReadToolId, "{\"path\":\"\\\\?\\C:\\Windows\\win.ini\"}")]
-    [DataRow(BuiltinToolRegistry.ProcessRunToolId, "{\"fileName\":\"tools/dotnet\"}")]
+    [DataRow(BuiltinToolRegistry.CommandToolId, "{\"fileName\":\"tools/dotnet\"}")]
     [DataRow(BuiltinToolRegistry.HttpRequestToolId, "{\"method\":\"GET\",\"url\":\"https://user:password@example.test/data\"}")]
     public void Resolve_UnsafeOrDynamicTarget_FailsClosed(string toolId, string argumentsJson)
     {
@@ -162,22 +162,25 @@ public sealed class BuiltinToolConsentScopeResolverTests
     }
 
     [TestMethod]
-    public void Resolve_ProcessUsesSafeEnvironmentAndRestrictsCustomVariablesToOnce()
+    public void Resolve_CommandUsesSafeEnvironmentAndRestrictsCustomVariablesToOnce()
     {
         var process = Resolve(
-            BuiltinToolRegistry.ProcessRunToolId,
-            """{"fileName":"dotnet","arguments":["--info","sensitive-value"],"stdin":"secret-input","environment":{"TOKEN":"secret-token"}}""");
+            BuiltinToolRegistry.CommandToolId,
+            """{"script":"dotnet --info","shell":"auto","stdin":"secret-input","environment":{"TOKEN":"secret-token"}}""");
         var safeProcess = Resolve(
-            BuiltinToolRegistry.ProcessRunToolId,
-            """{"fileName":"dotnet","arguments":["--info"]}""");
+            BuiltinToolRegistry.CommandToolId,
+            """{"script":"dotnet --info"}""");
         var http = Resolve(
             BuiltinToolRegistry.HttpRequestToolId,
             """{"method":"POST","url":"https://example.test:8443/orders","headers":{"Authorization":"Bearer secret-token"},"body":"secret-body"}""");
 
         Assert.IsTrue(process.IsSuccess, process.Error);
         Assert.IsNotNull(process.Scope);
-        Assert.HasCount(1, process.Scope.AllowedExecutables);
-        Assert.AreEqual("dotnet", process.Scope.AllowedExecutables[0]);
+        Assert.IsNotEmpty(process.Scope.AllowedExecutables);
+        Assert.Contains(
+            OperatingSystem.IsWindows() ? "pwsh" : "bash",
+            process.Scope.AllowedExecutables,
+            StringComparer.OrdinalIgnoreCase);
         Assert.Contains(
             "TOKEN",
             process.Scope.AllowedEnvironmentVariables,
@@ -198,7 +201,7 @@ public sealed class BuiltinToolConsentScopeResolverTests
             "OPENAI_API_KEY",
             process.Scope.AllowedEnvironmentVariables,
             StringComparer.OrdinalIgnoreCase);
-        Assert.AreEqual("2 arguments; stdin 12 characters", process.Scope.DetailSummary);
+        Assert.AreEqual("13 script characters; stdin 12 characters", process.Scope.DetailSummary);
         Assert.IsFalse(process.Scope.CanGrantForRun);
         Assert.DoesNotContain("sensitive-value", process.Scope.DetailSummary, StringComparison.Ordinal);
         Assert.DoesNotContain("secret", process.Scope.DetailSummary, StringComparison.OrdinalIgnoreCase);

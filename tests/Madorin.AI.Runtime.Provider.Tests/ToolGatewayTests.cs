@@ -540,7 +540,7 @@ public sealed class ToolGatewayTests
             new ToolAuthorizationService(
                 repository,
                 new RuntimeToolPolicy(runtimePermission)),
-            [new BuiltinProcessToolExecutor()],
+            [new BuiltinCommandToolExecutor()],
             repository,
             outbox);
         var invocation = CreateProcessInvocation("call-process-audit");
@@ -561,7 +561,7 @@ public sealed class ToolGatewayTests
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
         Assert.IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
         Assert.AreEqual(
-            OperatingSystem.IsWindows() ? "process:dotnet.exe" : "process:dotnet",
+            OperatingSystem.IsWindows() ? "shell:powershell.exe" : "shell:sh",
             reader.GetString(0));
         Assert.AreEqual(
             Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(invocation.ArgumentsJson))),
@@ -801,7 +801,7 @@ public sealed class ToolGatewayTests
         using var outbox = new SqliteEventOutbox(connection);
         var validator = new JsonSchemaToolValidator();
         var registry = new BuiltinToolRegistry();
-        var executor = new PreparedCountingToolExecutor(BuiltinToolRegistry.ProcessRunToolId);
+        var executor = new PreparedCountingToolExecutor(BuiltinToolRegistry.CommandToolId);
         var runtimePermission = CreateProcessPermission("runtime-process");
         using var gateway = new ToolGateway(
             new ToolCatalogStore(registry, validator),
@@ -1236,18 +1236,20 @@ public sealed class ToolGatewayTests
             _workspaceRoot,
             [_workspaceRoot],
             [_workspaceRoot],
-            AllowedExecutables: ["dotnet"],
-            AllowedToolIds: [BuiltinToolRegistry.ProcessRunToolId],
+            AllowedExecutables: OperatingSystem.IsWindows()
+                ? ["pwsh", "powershell", "cmd"]
+                : ["bash", "zsh", "sh"],
+            AllowedToolIds: [BuiltinToolRegistry.CommandToolId],
             MaximumRisk: ToolRiskLevel.Process,
-            AllowedEnvironmentVariables: []);
+            AllowedEnvironmentVariables: Madorin.AI.Runtime.Services.Skills.SkillScriptEnvironmentPolicy.InheritedVariableNames.ToArray());
 
     private static ToolInvocation CreateProcessInvocation(string callId) =>
         new(
             callId,
-            BuiltinToolRegistry.ProcessRunToolId,
+            BuiltinToolRegistry.CommandToolId,
             "agent-1",
             ParentAgentId: null,
-            """{"fileName":"dotnet","arguments":["--version"]}""",
+            """{"script":"dotnet --version"}""",
             "run-1",
             "session-1",
             InvocationId: "invocation-1");

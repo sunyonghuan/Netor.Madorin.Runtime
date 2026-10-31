@@ -46,7 +46,8 @@ public sealed class BuiltinCommandToolExecutor : IToolExecutor
                 GetOptionalString(arguments, "workingDirectory") ?? permission.WorkspaceRoot);
             var environment = BuiltinProcessRunner.BuildEnvironment(
                 arguments,
-                permission.AllowedEnvironmentVariables);
+                permission.AllowedEnvironmentVariables,
+                inheritAll: true);
             var standardInput = BuiltinProcessRunner.ParseStandardInput(arguments);
             var effectiveShell = ResolveEffectiveShell(executable.Path, shell);
             var processArguments = BuiltinCommandRunner.BuildArguments(effectiveShell, script);

@@ -13,7 +13,7 @@ namespace Madorin.AI.Runtime.Provider.Tests;
 
 /// <summary>
 /// 使用 ~/.madorin/config.json 真实模型 + 自动同意 Handler，验证
-/// mcli_process 授权→scope 定稿→继续执行 全链路（无需点 UI）。
+/// mcli_command 授权→scope 定稿→继续执行 全链路（无需点 UI）。
 /// </summary>
 [TestClass]
 public sealed class LiveProcessConsentE2ETests
@@ -83,7 +83,7 @@ public sealed class LiveProcessConsentE2ETests
                         "1.0",
                         """
                         You are a tool-calling test agent. When asked to run a process, you MUST call the
-                        mcli_process tool exactly once with fileName "dotnet" and arguments ["--version"].
+                        mcli_command tool exactly once with script "dotnet --version".
                         Do not refuse. Do not invent other tools. After the tool result, reply with one short line.
                         """,
                         config.DefaultProvider,
@@ -96,7 +96,7 @@ public sealed class LiveProcessConsentE2ETests
                 selection,
                 [
                     new TextContentBlock(
-                        "Please run mcli_process now: fileName=dotnet, arguments=[\"--version\"].")
+                        "Please run mcli_command now: fileName=dotnet, arguments=[\"--version\"].")
                 ]);
 
             var envelopes = new List<RuntimeEventEnvelope>();
@@ -108,7 +108,7 @@ public sealed class LiveProcessConsentE2ETests
             Assert.IsGreaterThanOrEqualTo(
                 1,
                 autoConsent.PermissionCount,
-                "模型应触发 mcli_process，从而走至少一次自动 permission 同意。");
+                "模型应触发 mcli_command，从而走至少一次自动 permission 同意。");
 
             var allJson = string.Join(
                 '\n',

@@ -101,7 +101,7 @@ public sealed class LongTaskReliabilityTests
                 CreateContext(workspace, "mcli_fs_read", "call-read"),
                 CancellationToken.None);
             var denied = await allowList.RequestPermissionAsync(
-                CreateContext(workspace, "mcli_process", "call-process"),
+                CreateContext(workspace, "mcli_command", "call-process"),
                 CancellationToken.None);
 
             Assert.AreEqual(ToolAuthorizationDecision.Granted, allowed.Decision);

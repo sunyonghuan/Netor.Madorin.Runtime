@@ -39,7 +39,7 @@ internal static class BuiltinCommandRunner
             {
                 return BuiltinProcessRunner.ResolveAndPinExecutable(candidate, allowedExecutables);
             }
-            catch (FileNotFoundException)
+            catch (Exception ex) when (ex is FileNotFoundException or UnauthorizedAccessException)
             {
             }
         }
@@ -53,7 +53,7 @@ internal static class BuiltinCommandRunner
         ArgumentException.ThrowIfNullOrWhiteSpace(script);
         if (Utf8.GetByteCount(script) > MaxScriptBytes)
         {
-            throw new InvalidDataException("The command script exceeds the 1 MB limit.");
+            throw new InvalidDataException("The command script exceeds the 8 KB limit.");
         }
 
         if (OperatingSystem.IsWindows())
@@ -71,8 +71,8 @@ internal static class BuiltinCommandRunner
 
         return shell switch
         {
-            "bash" or "zsh" => ["-lc", "export LANG=C.UTF-8 LC_ALL=C.UTF-8; " + script],
-            "sh" => ["-c", "export LANG=C.UTF-8 LC_ALL=C.UTF-8; " + script],
+            "bash" or "zsh" => ["-lc", "export PYTHONIOENCODING=utf-8 PYTHONUTF8=1; " + script],
+            "sh" => ["-c", "export PYTHONIOENCODING=utf-8 PYTHONUTF8=1; " + script],
             _ => throw new ArgumentException("The selected shell is not available on this platform.")
         };
     }

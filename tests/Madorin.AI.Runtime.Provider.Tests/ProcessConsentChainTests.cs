@@ -10,7 +10,7 @@ namespace Madorin.AI.Runtime.Provider.Tests;
 
 /// <summary>
 /// 验证 Host 风格「人审 Granted + 空 AllowedExecutables Grant」在 Runtime 用 scope 定稿后，
-/// mcli_process 能二次执行成功——不依赖 UI 点击。
+/// mcli_command 能二次执行成功——不依赖 UI 点击。
 /// </summary>
 [TestClass]
 public sealed class ProcessConsentChainTests
@@ -46,10 +46,10 @@ public sealed class ProcessConsentChainTests
             TestContext.CancellationToken);
         var invocation = new ToolInvocation(
             "call-process-1",
-            BuiltinToolRegistry.ProcessRunToolId,
+            BuiltinToolRegistry.CommandToolId,
             "agent-expert",
             ParentAgentId: null,
-            """{"fileName":"dotnet","arguments":["--version"]}""",
+            """{"script":"dotnet --version"}""",
             "run-process-1",
             "session-process-1",
             "invocation-process-1");
@@ -101,10 +101,10 @@ public sealed class ProcessConsentChainTests
             TestContext.CancellationToken);
         var invocation = new ToolInvocation(
             "call-process-2",
-            BuiltinToolRegistry.ProcessRunToolId,
+            BuiltinToolRegistry.CommandToolId,
             "agent-expert",
             ParentAgentId: null,
-            """{"fileName":"dotnet","arguments":["--version"]}""",
+            """{"script":"dotnet --version"}""",
             "run-process-2",
             "session-process-2",
             "invocation-process-2");
@@ -421,7 +421,7 @@ public sealed class ProcessConsentChainTests
                 authorization,
                 [
                     new BuiltinFsToolExecutor(),
-                    new BuiltinProcessToolExecutor()
+                    new BuiltinCommandToolExecutor()
                 ],
                 store,
                 outbox);
