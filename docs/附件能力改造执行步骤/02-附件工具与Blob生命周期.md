@@ -59,6 +59,7 @@
 - Release 附件/工具/授权联合回归 144 项通过，ConversationStore Release 23 项通过，Protocol 49 项通过，构建零警告。补测授权与 Expert 共 38 项，35 通过、3 项既有 summary/compaction 失败，与步骤 01 全量记录相同；未修改 summary 业务。
 - BlobTransferTests 端到端回归：5 项全部通过。初跑超大内联文本测试等待 Provider 引用超时；读取事件后定位为测试 Provider 未声明 ContextWindow 导致 `context_window_unknown`。仅补夹具 ContextWindow 和 run.failed 诊断，不放宽生产上下文检查，复跑通过。此回归验证既有 Blob 通道，不等于附件工具经 Worker 到真实模型的端到端验收。
 - 2026-10-31 后续修正：用户确认未知上下文窗口不应禁止调用，现已删除预算函数的硬阻断，并撤回上述测试夹具的窗口补值；测试 Provider 保持未知窗口时 BlobTransferTests 仍为 5 项全部通过。全局配置不变的真实 DeepSeek CLI 文本调用成功，附件 Worker/厂商收发仍未验收。详见[上下文兼容修复记录](../执行步骤/上下文压缩与手动压缩命令修复方案.md)。
+- 真实 CLI 验证补充：5 家可调用连接各执行一次 attach，均生成正确的 11,297 字节 PNG Blob 与 146 字节 JSON 元数据，源文件/Blob SHA-256 一致、staging 无残留；模型续调因 Worker Resolver 或 reasoning 历史校验失败，不能标模型读图成功。见[逐连接实测记录](./验证记录-20261031-CLI与真实Provider附件.md)。
 
 ### 未关闭项
 
