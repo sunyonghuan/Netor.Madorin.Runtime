@@ -38,4 +38,6 @@ public sealed record ToolGrant(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string[]? AllowedSkillScriptKeys = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    string? SkillCatalogVersion = null);
+    string? SkillCatalogVersion = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? CommandWorkingDirectory = null);

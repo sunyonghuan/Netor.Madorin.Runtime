@@ -40,35 +40,33 @@ public sealed class BuiltinCommandToolExecutor : IToolExecutor
         var script = GetRequiredString(arguments, "script");
         var encoding = BuiltinCommandRunner.ResolveEncoding(GetOptionalString(arguments, "encoding"));
         var shell = BuiltinCommandRunner.NormalizeShell(GetOptionalString(arguments, "shell"));
-        var executable = BuiltinCommandRunner.ResolveShell(shell, permission.AllowedExecutables);
-        try
+        var workingDirectory = CommandToolAuthorization.ResolveWorkingDirectory(
+            permission.WorkspaceRoot, arguments);
+        if (!CommandToolAuthorization.MatchesDirectory(permission.CommandWorkingDirectory, workingDirectory))
         {
-            var policy = new BuiltinFsPathPolicy(permission);
-            var workingDirectory = policy.PinReadDirectory(
-                GetOptionalString(arguments, "workingDirectory") ?? permission.WorkspaceRoot);
-            var environment = BuiltinProcessRunner.BuildEnvironment(
-                arguments,
-                permission.AllowedEnvironmentVariables,
-                inheritAll: true);
-            var standardInput = BuiltinProcessRunner.ParseStandardInput(arguments);
-            var effectiveShell = ResolveEffectiveShell(executable.Path, shell);
-            var processArguments = BuiltinCommandRunner.BuildArguments(effectiveShell, script, encoding);
-            return ValueTask.FromResult<IPreparedToolExecution>(
-                new PreparedCommandExecution(
-                    invocation,
-                    executable,
-                    workingDirectory,
-                    processArguments,
-                    environment,
-                    standardInput,
-                    encoding,
-                    $"shell:{Path.GetFileName(executable.Path)}"));
+            throw new UnauthorizedAccessException(
+                $"Command execution requires authorization for working directory '{workingDirectory}'.");
         }
-        catch
+
+        if (!Directory.Exists(workingDirectory))
         {
-            executable.Dispose();
-            throw;
+            throw new DirectoryNotFoundException($"Command working directory not found: '{workingDirectory}'.");
         }
+
+        var executable = BuiltinCommandRunner.ResolveShell(shell);
+        var environment = BuiltinProcessRunner.BuildEnvironment(arguments, allowedVariables: null, inheritAll: true);
+        var standardInput = BuiltinProcessRunner.ParseStandardInput(arguments);
+        var processArguments = BuiltinCommandRunner.BuildArguments(executable.Name, script, encoding);
+        return ValueTask.FromResult<IPreparedToolExecution>(
+            new PreparedCommandExecution(
+                invocation,
+                executable.Path,
+                workingDirectory,
+                processArguments,
+                environment,
+                standardInput,
+                encoding,
+                $"command:{workingDirectory}; shell:{executable.Name}"));
     }
 
     public async Task<ToolResult> ExecuteAsync(ToolInvocation invocation, CancellationToken ct = default)
@@ -113,23 +111,10 @@ public sealed class BuiltinCommandToolExecutor : IToolExecutor
         return property.GetString();
     }
 
-    private static string ResolveEffectiveShell(string path, string requested)
-    {
-        if (requested != "auto")
-        {
-            return requested;
-        }
-
-        var name = Path.GetFileNameWithoutExtension(path).ToLowerInvariant();
-        return name is "pwsh" or "powershell" or "cmd" or "bash" or "zsh" or "sh"
-            ? name
-            : throw new InvalidOperationException("The resolved shell is not supported.");
-    }
-
     internal sealed class PreparedCommandExecution(
         ToolInvocation invocation,
-        BuiltinProcessRunner.PinnedExecutable executable,
-        PinnedPath workingDirectory,
+        string executablePath,
+        string workingDirectory,
         IReadOnlyList<string> arguments,
         IReadOnlyDictionary<string, string> environment,
         string? standardInput,
@@ -145,9 +130,9 @@ public sealed class BuiltinCommandToolExecutor : IToolExecutor
             try
             {
                 var output = await BuiltinProcessRunner.RunAsync(
-                    executable.Path,
+                    executablePath,
                     arguments,
-                    workingDirectory.Path,
+                    workingDirectory,
                     environment,
                     standardInput,
                     encoding,
@@ -160,7 +145,7 @@ public sealed class BuiltinCommandToolExecutor : IToolExecutor
                     writer.WriteString("stderr", output.StandardError);
                     writer.WriteBoolean("stdoutTruncated", output.StandardOutputTruncated);
                     writer.WriteBoolean("stderrTruncated", output.StandardErrorTruncated);
-                    writer.WriteString("shell", Path.GetFileName(executable.Path));
+                    writer.WriteString("shell", Path.GetFileName(executablePath));
                     writer.WriteEndObject();
                 });
                 return new ToolResult(invocation.CallId, invocation.ToolId, true, json);
@@ -180,12 +165,7 @@ public sealed class BuiltinCommandToolExecutor : IToolExecutor
 
         public ValueTask DisposeAsync()
         {
-            if (Interlocked.Exchange(ref _disposed, 1) == 0)
-            {
-                workingDirectory.Dispose();
-                executable.Dispose();
-            }
-
+            Interlocked.Exchange(ref _disposed, 1);
             return ValueTask.CompletedTask;
         }
     }

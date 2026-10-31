@@ -71,11 +71,7 @@ internal sealed class StandaloneToolGrantFactory(TimeProvider? timeProvider = nu
         var normalizedWorkspace = Path.GetFullPath(workspaceRoot);
         var isRunGrant = lifetime is StandaloneToolGrantLifetime.Run;
         var expandWorkspaceRoots = isRunGrant
-            && (descriptor.ToolId.StartsWith("mcli_fs_", StringComparison.Ordinal)
-                || string.Equals(
-                    descriptor.ToolId,
-                    BuiltinToolRegistry.CommandToolId,
-                    StringComparison.Ordinal));
+            && descriptor.ToolId.StartsWith("mcli_fs_", StringComparison.Ordinal);
         var allowedReadRoots = expandWorkspaceRoots && scope.AllowedReadRoots.Length > 0
             ? [normalizedWorkspace]
             : scope.AllowedReadRoots;
@@ -126,6 +122,7 @@ internal sealed class StandaloneToolGrantFactory(TimeProvider? timeProvider = nu
             RootGrantId: grantId,
             DelegationChain: [],
             AllowedSkillScriptKeys: scriptKeys,
-            SkillCatalogVersion: skillCatalogVersion);
+            SkillCatalogVersion: skillCatalogVersion,
+            CommandWorkingDirectory: scope.CommandWorkingDirectory);
     }
 }

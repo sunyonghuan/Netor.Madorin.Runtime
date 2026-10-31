@@ -111,6 +111,31 @@ public sealed class StandaloneToolConsentTests
     }
 
     [TestMethod]
+    public void Create_CommandRunGrant_BindsDirectoryWithoutFilesystemOrExecutablePermissions()
+    {
+        var descriptor = new BuiltinToolRegistry().GetTools().Single(tool => tool.ToolId == BuiltinToolRegistry.CommandToolId);
+        var invocation = new ToolInvocation("command-call", descriptor.ToolId, "agent-1", null,
+            """{"script":"echo command","workingDirectory":"nested","environment":{"CUSTOM":"value"}}""",
+            "command-run", "command-session");
+        var resolution = new BuiltinToolConsentScopeResolver().Resolve(invocation, descriptor, _workspace);
+        var request = new ToolPermissionRequest("command-request", "agent-1", null, descriptor.ToolId,
+            invocation.CallId, "hash", "Process", "call-or-run", "command permission");
+        var context = new ToolPermissionConsentContext(request, invocation, descriptor, resolution, _workspace);
+        var factory = new StandaloneToolGrantFactory();
+
+        var grant = factory.Create(context, StandaloneToolGrantLifetime.Run);
+        Assert.AreEqual(Path.Combine(_workspace, "nested"), grant.CommandWorkingDirectory);
+        Assert.IsNull(grant.AllowedCallIds);
+        Assert.IsEmpty(grant.AllowedReadRoots);
+        Assert.IsEmpty(grant.AllowedWriteRoots);
+        Assert.IsEmpty(grant.AllowedExecutables);
+        Assert.IsEmpty(grant.AllowedEnvironmentVariables!);
+        var once = factory.Create(context, StandaloneToolGrantLifetime.Once);
+        Assert.AreEqual(grant.CommandWorkingDirectory, once.CommandWorkingDirectory);
+        Assert.AreEqual(invocation.CallId, once.AllowedCallIds![0]);
+    }
+
+    [TestMethod]
     public async Task Create_RunFileWriteGrantAuthorizesAnotherWorkspaceFileWithoutDestructiveFlags()
     {
         var context = CreateWritePermissionContext("call-write-1", "src/new-file.cs");

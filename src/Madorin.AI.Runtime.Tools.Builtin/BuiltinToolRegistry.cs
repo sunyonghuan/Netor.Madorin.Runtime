@@ -23,7 +23,7 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
     public const string FileDeleteToolId = "mcli_fs_delete";
     public const string FileSearchToolId = "mcli_fs_search";
     public const string FileEditToolId = "mcli_fs_edit";
-    public const string CommandToolId = "mcli_command";
+    public const string CommandToolId = CommandToolAuthorization.ToolId;
     public const string HttpRequestToolId = "mcli_http";
     public const string DelegateToAgentToolId = "mcli_delegate_agent";
     public const string AgentJobCreateToolId = "mcli_agent_job_create";
@@ -158,7 +158,7 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
                 "script":{"type":"string","minLength":1,"description":"Required command or multiline script, including program arguments. Maximum 8 KiB of UTF-8 script text."},
                 "shell":{"type":"string","enum":["auto","pwsh","powershell","cmd","bash","zsh","sh"],"default":"auto","description":"Script interpreter. Default auto: Windows selects pwsh, then powershell, then cmd; macOS/Linux selects bash, then zsh, then sh. Commands and programs belong in script."},
                 "workingDirectory":{"type":"string","description":"Initial working directory. Default: current workspace root. Relative paths resolve from the workspace root."},
-                "environment":{"type":"object","additionalProperties":{"type":"string"},"default":{},"description":"Environment variable overrides, as string values. Default: inherit the full CLI environment. Overrides use the current permission grant."},
+                "environment":{"type":"object","additionalProperties":{"type":"string"},"default":{},"description":"Environment variable overrides, as string values. Default: inherit the full CLI environment."},
                 "stdin":{"type":"string","default":"","description":"Standard input text. Default: empty input followed by EOF."},
                 "encoding":{"type":"string","enum":["utf-8","gbk","gb18030"],"default":"utf-8","description":"Character encoding for stdin, stdout, and stderr. Default utf-8. Select gbk or gb18030 for programs using that stream encoding."}
               },

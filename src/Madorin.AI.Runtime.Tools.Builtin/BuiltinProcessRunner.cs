@@ -195,7 +195,7 @@ internal static class BuiltinProcessRunner
         foreach (var item in property.EnumerateObject())
         {
             ValidateEnvironmentName(item.Name);
-            if (!allowed.Contains(item.Name))
+            if (!inheritAll && !allowed.Contains(item.Name))
             {
                 throw new UnauthorizedAccessException(
                     $"Environment variable '{item.Name}' is not allowed by the effective Grant.");
@@ -343,7 +343,7 @@ internal static class BuiltinProcessRunner
         catch (Win32Exception ex)
         {
             throw new InvalidOperationException(
-                $"The process could not be started: {ex.Message}",
+                $"The process '{executablePath}' could not be started in '{workingDirectory}': {ex.Message}",
                 ex);
         }
 
@@ -413,7 +413,7 @@ internal static class BuiltinProcessRunner
         return new PinnedExecutable(path, BuiltinFsHandle.Open(path, isDirectory: false));
     }
 
-    private static string FindOnRuntimePath(string executableName)
+    internal static string FindOnRuntimePath(string executableName)
     {
         var candidates = OperatingSystem.IsWindows()
             && string.IsNullOrEmpty(Path.GetExtension(executableName))
@@ -424,7 +424,7 @@ internal static class BuiltinProcessRunner
         {
             foreach (var candidate in candidates)
             {
-                var path = Path.Join(directory.Trim(), candidate);
+                var path = Path.Join(directory.Trim().Trim('"'), candidate);
                 if (File.Exists(path) && !Directory.Exists(path))
                 {
                     return Path.GetFullPath(path);

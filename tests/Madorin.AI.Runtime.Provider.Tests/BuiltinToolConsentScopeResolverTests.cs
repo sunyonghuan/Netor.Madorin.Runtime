@@ -162,7 +162,7 @@ public sealed class BuiltinToolConsentScopeResolverTests
     }
 
     [TestMethod]
-    public void Resolve_CommandUsesSafeEnvironmentAndRestrictsCustomVariablesToOnce()
+    public void Resolve_CommandAuthorizationOnlyBindsWorkingDirectory()
     {
         var process = Resolve(
             BuiltinToolRegistry.CommandToolId,
@@ -176,43 +176,19 @@ public sealed class BuiltinToolConsentScopeResolverTests
 
         Assert.IsTrue(process.IsSuccess, process.Error);
         Assert.IsNotNull(process.Scope);
-        Assert.IsNotEmpty(process.Scope.AllowedExecutables);
-        Assert.Contains(
-            OperatingSystem.IsWindows() ? "pwsh" : "bash",
-            process.Scope.AllowedExecutables,
-            StringComparer.OrdinalIgnoreCase);
-        Assert.Contains(
-            "TOKEN",
-            process.Scope.AllowedEnvironmentVariables,
-            StringComparer.OrdinalIgnoreCase);
-        Assert.Contains(
-            "TEMP",
-            process.Scope.AllowedEnvironmentVariables,
-            StringComparer.OrdinalIgnoreCase);
-        Assert.Contains(
-            "TMP",
-            process.Scope.AllowedEnvironmentVariables,
-            StringComparer.OrdinalIgnoreCase);
-        Assert.Contains(
-            "USERPROFILE",
-            process.Scope.AllowedEnvironmentVariables,
-            StringComparer.OrdinalIgnoreCase);
-        Assert.DoesNotContain(
-            "OPENAI_API_KEY",
-            process.Scope.AllowedEnvironmentVariables,
-            StringComparer.OrdinalIgnoreCase);
-        Assert.AreEqual("13 script characters; stdin 12 characters", process.Scope.DetailSummary);
-        Assert.IsFalse(process.Scope.CanGrantForRun);
+        Assert.IsEmpty(process.Scope.AllowedExecutables);
+        Assert.IsEmpty(process.Scope.AllowedEnvironmentVariables);
+        Assert.IsEmpty(process.Scope.AllowedReadRoots);
+        Assert.AreEqual(CommandToolAuthorization.NormalizeDirectory(_workspace), process.Scope.CommandWorkingDirectory);
+        StringAssert.Contains(process.Scope.DetailSummary, "execute any commands with your user permissions");
+        Assert.IsTrue(process.Scope.CanGrantForRun);
         Assert.DoesNotContain("sensitive-value", process.Scope.DetailSummary, StringComparison.Ordinal);
         Assert.DoesNotContain("secret", process.Scope.DetailSummary, StringComparison.OrdinalIgnoreCase);
 
         Assert.IsTrue(safeProcess.IsSuccess, safeProcess.Error);
         Assert.IsNotNull(safeProcess.Scope);
         Assert.IsTrue(safeProcess.Scope.CanGrantForRun);
-        Assert.Contains(
-            "TEMP",
-            safeProcess.Scope.AllowedEnvironmentVariables,
-            StringComparer.OrdinalIgnoreCase);
+        Assert.AreEqual(process.Scope.CommandWorkingDirectory, safeProcess.Scope.CommandWorkingDirectory);
 
         Assert.IsTrue(http.IsSuccess, http.Error);
         Assert.IsNotNull(http.Scope);

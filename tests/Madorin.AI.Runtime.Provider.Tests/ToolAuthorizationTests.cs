@@ -589,7 +589,8 @@ public sealed class ToolAuthorizationTests
                 DelegatedAgentIds: [],
                 AllowedToolIds: [invocation.ToolId],
                 MaximumRisk: ToolRiskLevel.Process,
-                AgentId: invocation.AgentId),
+                AgentId: invocation.AgentId,
+                CommandWorkingDirectory: _workspace),
             ct: TestContext.CancellationToken);
 
         var granted = await service.AuthorizeAsync(

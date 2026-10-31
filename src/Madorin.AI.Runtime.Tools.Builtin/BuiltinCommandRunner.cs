@@ -28,31 +28,23 @@ internal static class BuiltinCommandRunner
         };
     }
 
-    public static string[] GetAllowedShellNames()
-    {
-        return OperatingSystem.IsWindows()
-            ? ["pwsh", "powershell", "cmd"]
-            : ["bash", "zsh", "sh"];
-    }
-
-    public static BuiltinProcessRunner.PinnedExecutable ResolveShell(
-        string requested,
-        IReadOnlyList<string> allowedExecutables)
+    public static (string Name, string Path) ResolveShell(string requested)
     {
         var candidates = GetCandidates(requested);
         foreach (var candidate in candidates)
         {
             try
             {
-                return BuiltinProcessRunner.ResolveAndPinExecutable(candidate, allowedExecutables);
+                // 保留启动路径，让操作系统解析应用别名、符号链接及其目标。
+                return (candidate, BuiltinProcessRunner.FindOnRuntimePath(candidate));
             }
-            catch (Exception ex) when (ex is FileNotFoundException or UnauthorizedAccessException)
+            catch (FileNotFoundException)
             {
             }
         }
 
         throw new FileNotFoundException(
-            $"None of the requested shells were available: {string.Join(", ", candidates)}.");
+            $"Shell executable not found on the Runtime PATH: {string.Join(", ", candidates)}.");
     }
 
     public static IReadOnlyList<string> BuildArguments(string shell, string script, Encoding encoding)

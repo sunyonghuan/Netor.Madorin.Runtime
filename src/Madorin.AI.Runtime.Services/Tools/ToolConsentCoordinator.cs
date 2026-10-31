@@ -364,7 +364,10 @@ public sealed class ToolConsentCoordinator
         {
             var permissionRequestId = CreateConsentRequestId("permission", invocation);
             var argumentsHash = ComputeHash(invocation.ArgumentsJson);
-            var permissionReason = pendingResult.Error?.Message ?? "The tool requires a Grant.";
+            var permissionReason = scopeResolution.Scope?.CommandWorkingDirectory is { } commandDirectory
+                ? $"Allow AI to execute any commands from '{commandDirectory}' with your user permissions. " +
+                    "Commands can access files and system resources available to your user account."
+                : pendingResult.Error?.Message ?? "The tool requires a Grant.";
             var permissionState = new ToolApprovalState(
                 permissionRequestId,
                 invocation.CallId,
@@ -628,6 +631,12 @@ public sealed class ToolConsentCoordinator
         bool pinToCall)
     {
         pinToCall |= invocation.ParentAgentId is not null;
+        if (string.Equals(descriptor.ToolId, CommandToolAuthorization.ToolId, StringComparison.Ordinal)
+            && scopeResolution.Scope?.CommandWorkingDirectory is null)
+        {
+            return null;
+        }
+
         if (hostGrant is null)
         {
             return scopeResolution.IsSuccess && scopeResolution.Scope is { } scopeOnly
@@ -734,7 +743,8 @@ public sealed class ToolConsentCoordinator
                 : hostGrant.AllowedEnvironmentVariables,
             AgentId = hostGrant.AgentId ?? invocation.AgentId,
             AllowedSkillScriptKeys = scriptKeys,
-            SkillCatalogVersion = skillCatalogVersion
+            SkillCatalogVersion = skillCatalogVersion,
+            CommandWorkingDirectory = scope.CommandWorkingDirectory ?? hostGrant.CommandWorkingDirectory
         };
     }
 
@@ -798,7 +808,8 @@ public sealed class ToolConsentCoordinator
             DelegationChain: [],
             ApprovalRequestId: approvalRequestId,
             AllowedSkillScriptKeys: scriptKeys,
-            SkillCatalogVersion: skillCatalogVersion);
+            SkillCatalogVersion: skillCatalogVersion,
+            CommandWorkingDirectory: scope.CommandWorkingDirectory);
     }
 
     /// <summary>
@@ -830,8 +841,7 @@ public sealed class ToolConsentCoordinator
     }
 
     private static bool ExpandsToWorkspace(string toolId) =>
-        toolId.StartsWith("mcli_fs_", StringComparison.Ordinal)
-        || string.Equals(toolId, "mcli_command", StringComparison.Ordinal);
+        toolId.StartsWith("mcli_fs_", StringComparison.Ordinal);
 
     private static bool IsRunFileWrite(string toolId) =>
         string.Equals(toolId, "mcli_fs_write", StringComparison.Ordinal);

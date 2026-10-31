@@ -139,7 +139,8 @@ public sealed class ToolAuthorizationService(
                 ParentInvocationId: null,
                 PlanVersion: null,
                 AllowedSkillScriptKeys: grant.AllowedSkillScriptKeys,
-                SkillCatalogVersion: grant.SkillCatalogVersion)
+                SkillCatalogVersion: grant.SkillCatalogVersion,
+                CommandWorkingDirectory: grant.CommandWorkingDirectory)
         ]);
 
         ToolGrantState? parent = null;
@@ -223,7 +224,8 @@ public sealed class ToolAuthorizationService(
                 now,
                 ApprovalRequestId: grant.ApprovalRequestId,
                 AllowedSkillScriptKeys: context.AllowedSkillScriptKeys,
-                SkillCatalogVersion: context.SkillCatalogVersion),
+                SkillCatalogVersion: context.SkillCatalogVersion,
+                CommandWorkingDirectory: context.CommandWorkingDirectory),
             ct).ConfigureAwait(false);
     }
 
@@ -316,6 +318,11 @@ public sealed class ToolAuthorizationService(
         ToolPermissionContext permission)
     {
         var missing = new List<string>();
+        if (string.Equals(descriptor.ToolId, CommandToolAuthorization.ToolId, StringComparison.Ordinal)
+            && permission.CommandWorkingDirectory is null)
+        {
+            missing.Add("command.execute");
+        }
         if (string.Equals(descriptor.ToolId, SkillScriptAuthorization.ToolId, StringComparison.Ordinal))
         {
             if (!SkillScriptAuthorization.TryReadScope(
@@ -377,7 +384,8 @@ public sealed class ToolAuthorizationService(
                         && !permission.AllowDelete:
                     missing.Add(capability);
                     break;
-                case "process.execute" when permission.AllowedExecutables.Length == 0:
+                case "process.execute" when permission.AllowedExecutables.Length == 0
+                    && !string.Equals(descriptor.ToolId, CommandToolAuthorization.ToolId, StringComparison.Ordinal):
                     missing.Add(capability);
                     break;
                 case "powershell.execute" when !permission.AllowPowerShell:
@@ -413,6 +421,21 @@ public sealed class ToolAuthorizationService(
         ToolDescriptor descriptor,
         ToolPermissionContext permission)
     {
+        if (string.Equals(descriptor.ToolId, CommandToolAuthorization.ToolId, StringComparison.Ordinal))
+        {
+            try
+            {
+                using var arguments = JsonDocument.Parse(invocation.ArgumentsJson);
+                var directory = CommandToolAuthorization.ResolveWorkingDirectory(
+                    permission.WorkspaceRoot, arguments.RootElement);
+                return CommandToolAuthorization.MatchesDirectory(permission.CommandWorkingDirectory, directory);
+            }
+            catch (Exception ex) when (ex is JsonException or ArgumentException or IOException)
+            {
+                return false;
+            }
+        }
+
         if (_scopeResolver is null)
         {
             return true;
@@ -563,7 +586,8 @@ public sealed class ToolAuthorizationService(
             AllowedSkillScriptKeys: grant.AllowedSkillScriptKeys is { Length: > 0 }
                 ? grant.AllowedSkillScriptKeys
                 : null,
-            SkillCatalogVersion: grant.SkillCatalogVersion);
+            SkillCatalogVersion: grant.SkillCatalogVersion,
+            CommandWorkingDirectory: grant.CommandWorkingDirectory);
     }
 
     private static ToolAuthorizationResult Denied(string capability, string reason) =>

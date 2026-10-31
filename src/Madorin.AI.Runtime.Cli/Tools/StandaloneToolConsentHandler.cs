@@ -34,7 +34,9 @@ internal sealed class StandaloneToolConsentHandler(
             _terminal.WriteLine("1  Allow once", CliTextStyle.Parameter);
             _terminal.WriteLine(
                 canGrantForRun
-                    ? context.ScopeResolution.Scope!.AllowDelete
+                    ? context.ScopeResolution.Scope!.CommandWorkingDirectory is not null
+                        ? "2  Allow commands from this directory for this Run"
+                        : context.ScopeResolution.Scope.AllowDelete
                         ? "2  Allow workspace deletes for this Run"
                         : "2  Allow for this Run"
                     : "2  Allow for this Run (unavailable)",

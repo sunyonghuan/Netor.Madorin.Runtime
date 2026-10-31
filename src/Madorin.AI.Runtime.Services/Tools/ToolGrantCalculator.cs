@@ -65,7 +65,10 @@ public static class ToolGrantCalculator
                 MergeTraceValue(
                     result.SkillCatalogVersion,
                     next.SkillCatalogVersion,
-                    nameof(ToolPermissionContext.SkillCatalogVersion)));
+                    nameof(ToolPermissionContext.SkillCatalogVersion)),
+                CommandWorkingDirectory: result.CommandWorkingDirectory is { } directory
+                    && CommandToolAuthorization.MatchesDirectory(next.CommandWorkingDirectory, directory)
+                        ? directory : null);
         }
 
         return result;
@@ -125,6 +128,8 @@ public static class ToolGrantCalculator
             AllowedCallIds = NormalizeValues(permission.AllowedCallIds),
             AllowedEnvironmentVariables = NormalizeValues(permission.AllowedEnvironmentVariables),
             AllowedSkillScriptKeys = NormalizeValues(permission.AllowedSkillScriptKeys),
+            CommandWorkingDirectory = permission.CommandWorkingDirectory is { } directory
+                ? CommandToolAuthorization.NormalizeDirectory(directory) : null,
             NetworkPolicy = NormalizeNetwork(
                 permission.NetworkPolicy ?? new NetworkPolicy(permission.DenyNetwork, [])),
             DelegationChain = permission.DelegationChain?.ToArray()
@@ -259,6 +264,9 @@ public static class ToolGrantCalculator
         && first.AllowDelete == second.AllowDelete
         && SetEquals(first.AllowedExecutables, second.AllowedExecutables, StringComparer.Ordinal)
         && first.AllowPowerShell == second.AllowPowerShell
+        && (first.CommandWorkingDirectory is null && second.CommandWorkingDirectory is null
+            || first.CommandWorkingDirectory is { } directory
+                && CommandToolAuthorization.MatchesDirectory(second.CommandWorkingDirectory, directory))
         && first.DenyNetwork == second.DenyNetwork
         && Nullable.Equals(first.ExpiresAt, second.ExpiresAt)
         && NullableSetEquals(first.AllowedToolIds, second.AllowedToolIds)

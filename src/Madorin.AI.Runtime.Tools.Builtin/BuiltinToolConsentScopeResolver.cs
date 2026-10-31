@@ -359,33 +359,16 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
         var script = BuiltinCommandToolExecutor.GetRequiredString(arguments, "script");
         _ = BuiltinCommandRunner.ResolveEncoding(
             BuiltinCommandToolExecutor.GetOptionalString(arguments, "encoding"));
-        var shell = BuiltinCommandRunner.NormalizeShell(
+        _ = BuiltinCommandRunner.NormalizeShell(
             BuiltinCommandToolExecutor.GetOptionalString(arguments, "shell"));
         var standardInput = BuiltinProcessRunner.ParseStandardInput(arguments);
-        var requestedEnvironmentNames = BuiltinProcessRunner.ParseRequestedEnvironmentVariableNames(
-            arguments);
-        var environmentNames = BuiltinProcessRunner.CreateAllowedEnvironmentVariableNames(
-            arguments,
-            SkillScriptEnvironmentPolicy.InheritedVariableNames);
-        var canGrantForRun = requestedEnvironmentNames.All(
-            SkillScriptEnvironmentPolicy.InheritedVariableNames.Contains);
-        var workingDirectory = BuiltinFsPathPolicy.ResolveRequestedPath(
-            workspaceRoot,
-            BuiltinCommandToolExecutor.GetOptionalString(arguments, "workingDirectory")
-                ?? workspaceRoot);
-        var shells = shell == "auto"
-            ? BuiltinCommandRunner.GetAllowedShellNames()
-            : [shell];
+        _ = BuiltinProcessRunner.ParseRequestedEnvironmentVariableNames(arguments);
+        var workingDirectory = CommandToolAuthorization.ResolveWorkingDirectory(workspaceRoot, arguments);
         return Create(
-            $"shell:{shell}",
-            $"{script.Length} script characters; stdin {standardInput?.Length ?? 0} characters",
-            readRoots: [workingDirectory],
-            allowedExecutables: shells,
-            allowedEnvironmentVariables: environmentNames.Concat(
-                SkillScriptEnvironmentPolicy.InheritedVariableNames).Distinct(
-                OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal)
-                .ToArray(),
-            canGrantForRun: canGrantForRun);
+            $"command:{workingDirectory}",
+            "Allow AI to execute any commands with your user permissions from this directory. " +
+                $"{script.Length} script characters; stdin {standardInput?.Length ?? 0} characters",
+            canGrantForRun: true) with { CommandWorkingDirectory = workingDirectory };
     }
 
     private static ToolRequestedScope HttpScope(JsonElement arguments)

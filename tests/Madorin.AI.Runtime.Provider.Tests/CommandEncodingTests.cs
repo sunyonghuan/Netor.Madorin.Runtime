@@ -120,7 +120,8 @@ public sealed class CommandEncodingTests
         var permission = new ToolPermissionContext(
             "grant-encoding", "run-encoding", workspace, [workspace], [],
             AllowedExecutables: OperatingSystem.IsWindows()
-                ? ["powershell", "pwsh", "cmd"] : ["sh", "bash", "zsh"]);
+                ? ["powershell", "pwsh", "cmd"] : ["sh", "bash", "zsh"],
+            CommandWorkingDirectory: workspace);
         return new BuiltinCommandToolExecutor().ExecuteAsync(
             new ToolInvocation(Guid.NewGuid().ToString("N"), BuiltinToolRegistry.CommandToolId,
                 "agent-encoding", null, argumentsJson, "run-encoding", "session-encoding",

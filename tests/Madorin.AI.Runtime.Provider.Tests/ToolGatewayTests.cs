@@ -560,9 +560,8 @@ public sealed class ToolGatewayTests
         command.Parameters.AddWithValue("$callId", invocation.CallId);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
         Assert.IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
-        Assert.AreEqual(
-            OperatingSystem.IsWindows() ? "shell:powershell.exe" : "shell:sh",
-            reader.GetString(0));
+        StringAssert.StartsWith(reader.GetString(0),
+            $"command:{CommandToolAuthorization.NormalizeDirectory(_workspaceRoot)}; shell:");
         Assert.AreEqual(
             Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(invocation.ArgumentsJson))),
             reader.GetString(1));
@@ -1241,7 +1240,8 @@ public sealed class ToolGatewayTests
                 : ["bash", "zsh", "sh"],
             AllowedToolIds: [BuiltinToolRegistry.CommandToolId],
             MaximumRisk: ToolRiskLevel.Process,
-            AllowedEnvironmentVariables: Madorin.AI.Runtime.Services.Skills.SkillScriptEnvironmentPolicy.InheritedVariableNames.ToArray());
+            AllowedEnvironmentVariables: Madorin.AI.Runtime.Services.Skills.SkillScriptEnvironmentPolicy.InheritedVariableNames.ToArray(),
+            CommandWorkingDirectory: _workspaceRoot);
 
     private static ToolInvocation CreateProcessInvocation(string callId) =>
         new(
