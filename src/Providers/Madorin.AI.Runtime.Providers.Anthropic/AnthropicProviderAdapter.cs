@@ -27,6 +27,9 @@ public sealed class AnthropicProviderAdapter :
     private readonly IProviderBlobResolver? _blobResolver;
     private readonly ProviderAuthenticationHandler? _credentialHandler;
     private readonly AnthropicMinimalClient? _ownedClient;
+    private readonly HttpClient? _fileClient;
+    private readonly ProviderAuthenticationHandler? _fileCredentialHandler;
+    private readonly Uri? _fileBaseUri;
 
     public AnthropicProviderAdapter(
         IChatClient chatClient,
@@ -121,6 +124,11 @@ public sealed class AnthropicProviderAdapter :
             Timeout = TimeSpan.FromMinutes(10)
         };
         _ownedClient = new AnthropicMinimalClient(options);
+        // Files API 不接受响应指定的下载地址，也不跟随重定向转发凭据。
+        _fileBaseUri = new Uri(baseUrl.TrimEnd('/') + "/");
+        _fileCredentialHandler = new ProviderAuthenticationHandler("x-api-key", null, apiKey,
+            new SocketsHttpHandler { AllowAutoRedirect = false });
+        _fileClient = new HttpClient(_fileCredentialHandler) { Timeout = Timeout.InfiniteTimeSpan };
         _chatClientFactory = modelId => _ownedClient.AsIChatClient(modelId);
         ProviderId = providerId;
         Models = models ?? [];
@@ -163,6 +171,7 @@ public sealed class AnthropicProviderAdapter :
         }
 
         _credentialHandler.Update(parameters.Credential);
+        _fileCredentialHandler?.Update(parameters.Credential);
         return Task.CompletedTask;
     }
 
@@ -315,7 +324,8 @@ public sealed class AnthropicProviderAdapter :
                 ?? throw new InvalidOperationException("The Anthropic chat client factory returned null."));
         var options = CreateChatOptions(request);
         return MafSkillsAgentFactory.CreateResponseStream(
-            chatClient,
+            new Protocol.AnthropicFileOutputChatClient(chatClient, _fileClient, _fileBaseUri,
+                request.MaximumBufferedBlobBytes),
             request,
             messages,
             options,
@@ -692,6 +702,7 @@ public sealed class AnthropicProviderAdapter :
 
     public void Dispose()
     {
+        _fileClient?.Dispose();
         _ownedClient?.Dispose();
     }
 }

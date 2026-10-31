@@ -52,11 +52,8 @@ internal sealed class WorkerBlobOutputLease(RuntimeProviderRequest request, stri
                             ProviderWorkerIpc.MaxBufferedBlobBytes) - _total
                         || string.IsNullOrWhiteSpace(frame.ContentType) || frame.ContentType.Length > 128
                         || frame.ContentType.Any(char.IsControl)
-                        || !(frame.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)
-                            || frame.ContentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase)
-                            || frame.ContentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase)
-                            || frame.ContentType.Equals("application/pdf", StringComparison.OrdinalIgnoreCase)
-                            || frame.ContentType.Equals("application/octet-stream", StringComparison.OrdinalIgnoreCase))
+                        || !System.Net.Http.Headers.MediaTypeHeaderValue.TryParse(frame.ContentType, out var mediaType)
+                        || mediaType.Parameters.Count != 0
                         || frame.Sha256 is not { Length: 64 } || frame.Sha256.Any(c => !Uri.IsHexDigit(c)))
                     {
                         throw new InvalidDataException("Worker output metadata or quota is invalid.");

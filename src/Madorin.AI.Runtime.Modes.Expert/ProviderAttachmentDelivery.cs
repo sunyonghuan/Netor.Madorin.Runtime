@@ -23,6 +23,13 @@ public static class ProviderAttachmentDelivery
             "audio/pcm" => ".pcm",
             "video/mp4" => ".mp4",
             "application/pdf" => ".pdf",
+            "text/plain" => ".txt",
+            "text/csv" => ".csv",
+            "application/json" => ".json",
+            "application/zip" => ".zip",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => ".docx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => ".xlsx",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation" => ".pptx",
             _ => ".bin"
         };
         var name = Guid.NewGuid().ToString("N") + extension;

@@ -56,9 +56,9 @@
 | Ollama | 当前代码走 OpenAI Compatible route | 独立 Worker 分片音频写回通过 | 原生 Ollama 专属输出未覆盖 |
 | Kimi | Chat Completions / MEAI DataContent | 独立 Worker 分片音频写回通过 | 具体厂商是否提供此响应未验收 |
 | DeepSeek | Chat Completions / MEAI DataContent | 独立 Worker 分片音频写回通过 | 具体厂商是否提供此响应未验收 |
-| Anthropic | Messages / Netor.Anthropic.Minimal 0.1.5 | 已检查 SDK mapper；没有二进制输出成功证据 | SDK 仅映射 text/thinking/redacted/tool_use；其他 block 可能被静默丢弃，专属文件输出 codec 未实现 |
+| Anthropic | Messages / Netor.Anthropic.Minimal 0.1.6；Runtime 从原始 SSE 补文件结果映射并调用 Files API | 独立 Worker 多文件下载、文本附件及 CLI Markdown 贯通通过；详见验证记录第 10 节 | 真实厂商生成/下载未验收；未自动启用服务端生成工具 |
 
-Anthropic [Files API 官方文档](https://platform.claude.com/docs/en/build-with-claude/files)明确：由 Skills 或代码执行工具生成的文件，其 file_id 可出现在 Messages 的 bash_code_execution_tool_result 中，通过 Files API 下载；用户上传文件不能按同样方式下载。当前 Runtime 不启用这些服务端生成能力，不能把普通 Messages 文字成功当成文件收件成功，也不能宣称所有 Anthropic 服务都不输出文件。专属响应 block 映射和按连接身份取回文件的缺口保留为后续逐协议处理项。
+Anthropic [Files API 官方文档](https://platform.claude.com/docs/en/build-with-claude/files)明确：由 Skills 或代码执行工具生成的文件，其 file_id 可出现在 Messages 的 bash_code_execution_tool_result 中，通过 Files API 下载；用户上传文件不能按同样方式下载。0.1.6 包已发布并还原，但实际 DLL 的 Minimal mapper 仍未映射文件结果；本批在 Runtime 流式边界补取原始 SSE，不将包版本升级等同于 SDK 功能完成。当前 Runtime 不自动启用服务端生成工具，不能把普通 Messages 文字成功当成文件收件成功。
 
 ### 5.2 本批边界
 
@@ -66,3 +66,17 @@ Anthropic [Files API 官方文档](https://platform.claude.com/docs/en/build-wit
 - SDK 需要完整缓冲的内容仍受 invocation 上限控制；Worker IPC 和 Runtime Pipe 有界分块不代表上游 SDK 常量内存。
 - `.attach` 路径取 `AppContext.BaseDirectory`，不取工作目录/Provider 文件名；GUID + MIME 扩展名、CreateNew 防覆盖，长度/SHA 校验后才组装 Markdown。失败删除本次创建文件。
 - 多附件、音视频实际厂商输出、取消/崩溃恢复、Outbox 重放、Session 生命周期、正式 AOT 仍按既有门禁逐项验收，不将本批落盘交付通过等同本步骤整体完成。
+
+### 5.3 Anthropic 文件结果增量（2026-10-31）
+
+- [x] 升级 `Netor.Anthropic.Minimal` / `Extensions` 至 0.1.6，检查实际还原 DLL；确认 `MinimalStreamEvent.Data` 可保留原始内容块，SDK 尚无 Files 下载服务。
+- [x] 解析 `container_upload`、`code_execution_tool_result`、`bash_code_execution_tool_result`、`text_editor_code_execution_tool_result` 的文件引用，在对应 `content_block_stop` 后按顺序下载；识别 `code_execution_output` / `bash_code_execution_output.file_id`。服务端工具不交给本地 ToolGateway 重复执行。
+- [x] 使用当前 Provider 地址和连接凭据访问固定 `/v1/files/{id}` 元数据、`/v1/files/{id}/content` 路径；发送 Files beta header，禁用重定向。验证 downloadable、ID、长度、MIME、调用累计配额，单文件请求限时两分钟并响应取消。
+- [x] 文件正文进入 StoreOutputBlob 与既有 IPC 3，不增加 IPC 版本；CLI 在 `.attach` 使用 GUID 文件名落盘，文本/CSV/JSON/ZIP/Office 使用固定安全扩展名，未知 MIME 仍为 `.bin`。
+- [x] Provider 输出使用 `provider-output:` Blob scope，历史 Stream 查询保留文本附件引用，避免把附件重新展开为正文；普通正文 offload 的展开行为保持原有语义。
+- [x] 完整下载的音频文件使用独立文件内容标记，与流式音频片段合并区分；多个文件逐个发布，不合成一个附件。
+- [x] 本地模拟 HTTP、真实独立 Worker 和 LocalRuntime → 宿主 Markdown 贯通验证；首次贯通发现文本附件被展开，修正后回归通过。测试统计见验证记录第 10 节。
+- [x] 当前 Windows win-x64 Anthropic Worker Native AOT 发布成功，零警告、零错误；使用已发布原生 exe 重跑输出/交付专项 19 项通过。其余 RID 和完整 CLI 发布仍按步骤 07 验收。
+- [ ] 真实 Anthropic 服务端生成文件与 Files API 下载验收；代理端点是否透传 Files API 必须实测。
+
+下载使用独立禁重定向的 SocketsHttpHandler，沿用系统代理，暂不继承注入聊天 IHttpClientFactory 的自定义 handler/代理策略。部署若依赖专用 handler，文件下载需单独核验。注入纯 IChatClient 的测试/扩展入口没有连接身份时，遇到文件引用明确失败。上游完整文件仍在调用配额内缓冲，不宣称全链路常量内存。

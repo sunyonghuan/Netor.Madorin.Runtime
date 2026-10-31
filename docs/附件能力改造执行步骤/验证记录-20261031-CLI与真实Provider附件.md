@@ -200,3 +200,42 @@ Aliyun 第一次运行到 90 秒取消；排查发现 HistoryMessageCount 没有
 - Anthropic Files API / 服务端代码执行结果引用、其他 route 的 HostedFileContent/UriContent 安全下载 codec 未实现。当前遇到 SDK 已暴露的 file/URI 内容明确失败；SDK 自身丢弃未知 block 的缺口仍需专属 codec 修复。
 - 未调用真实厂商生成接口，不开启新的生成工具，不自动下载普通文本 URL。各厂商真实媒体输出、崩溃/half-close/慢消费者故障矩阵、会话保留回收、重放、正式 AOT/manifest 仍需逐项完成。
 - CLI 与全部 Worker 的协议版本现为 IPC 3，必须同批构建部署，不能混用 IPC 2 二进制。
+
+## 10. Anthropic 服务端文件结果与 Files API 下载增量
+
+本节更新第 9.3 节当时的 Anthropic codec 缺口，保留其他厂商引用下载和真实输出验收。用户确认新包发布后，已将 `Netor.Anthropic.Minimal` / `Extensions` 还原至 0.1.6。检查实际 DLL 发现 Minimal 响应模型/mapper 仍不包含文件结果，客户端也没有 Files 服务；Runtime 利用 SDK 保留的原始 SSE 增补解析，而不是假定升级已解决。
+
+### 10.1 实现路径
+
+1. Messages 原始 SSE 的服务端文件结果块，在 `content_block_stop` 后取 `file_id`；支持 container_upload、代码执行、bash 代码执行及文本编辑结果中的正式文件输出字段。`server_tool_use` 不作为本地工具调用重新执行。
+2. 用当前连接身份依次请求文件元数据和内容，固定到当前 Provider base URL 的 `v1/files/{id}` 与 `v1/files/{id}/content`；携带 `anthropic-version: 2023-06-01`、`anthropic-beta: files-api-2025-04-14`。依据 [Files API 官方文档](https://platform.claude.com/docs/en/build-with-claude/files)，只下载 `downloadable=true` 的文件。
+3. 检查 ID、元数据上限 64 KiB、文件长度/MIME、调用累计配额和两分钟单文件超时；禁用 HTTP 重定向，取消向下传递。完整文件经既有 StoreOutputBlob → IPC 3 → Blob 校验 → `.attach/GUID.ext` → Markdown 文字事件交付，不传输文件字节 JSON。
+4. 新增完整文件内容标记，完整音频文件不参加流式音频片段合并。文本/CSV/JSON/ZIP/Office 按固定 MIME 映射扩展名，服务端文件名不能决定磁盘路径。
+5. 贯通测试首次发现 `ConversationStore` 将 text/plain 输出 Blob 展开为正文，修正 Provider 输出 scope 为 `provider-output:` 并在 Stream 查询保留引用；正文 offload 仍沿用原有展开行为。
+
+### 10.2 验证证据
+
+| 测试 | 结果 | 证据 |
+| --- | --- | --- |
+| Anthropic 文件结果专项（包含在联合回归内） | 15 通过，0 失败 | `anthropic-output-regression.trx` |
+| Provider/Worker/媒体/工具联合 Release 回归 | 185 通过，0 失败，4 跳过 | `anthropic-output-regression.trx`、`obj/anthropic-output-final-regression.binlog` |
+| Protocol 全量 | 49 通过，0 失败 | `anthropic-output-protocol.trx` |
+| ConversationStore 持久化回归 | 23 通过，0 失败 | `anthropic-output-history.trx` |
+| Anthropic Worker win-x64 Native AOT 发布 | 成功，零警告、零错误 | `obj/anthropic-output-final-aot-20261031.binlog` |
+| 使用已发布 Native AOT Anthropic Worker 的输出/交付专项 | 19 通过，0 失败 | `anthropic-native-output.trx` |
+
+专项成功用例覆盖进程内与独立 Worker、container_upload、code_execution/bash_code_execution 结果、多文件原始顺序，以及两个独立 audio/wav 文件不被合并。每个 300,001 字节回包在 Blob 中逐字节还原，并核验请求认证和 Files beta header。音频 MIME 用例验证传输与文件边界，不用模拟 ASCII 内容证明音频可播放。
+
+十项失败用例覆盖不可下载、超额、长度不符、MIME 不符、重定向、HTTP 403、非法 ID、未闭合内容块、注入 IChatClient 无下载身份和取消。失败不发布附件/成功终态且不留 staging；重定向目的模拟服务器未收到请求或密钥。
+
+LocalRuntime 贯通使用真实 Anthropic Worker 子进程加模拟 HTTP，确认 `.attach/GUID.txt`、原字节、前文字/文件/后文字顺序、宿主 text.delta Markdown 和历史 BlobRef。联合回归的 4 项跳过为真实联网测试开关未启用，不能计为厂商验收。
+
+Native AOT 首次发布在原生生成阶段以退出码 1 结束且没有诊断输出；补抓 binlog 后发布成功，音频完整文件修正后的最终发布也成功。发布验证仅覆盖当前 Windows win-x64 Anthropic Worker，不代表全 RID 或完整 CLI 发布验收。
+
+原生专项在测试输出目录临时替换 Anthropic Worker exe，执行 15 项文件专项和 4 项交付测试，结束后恢复托管 exe。涉及 Anthropic 子进程的成功用例和 LocalRuntime 贯通实际使用该原生二进制；其余进程内/失败用例保留原测试方式，不将全部 19 项都记为原生子进程调用。
+
+### 10.3 保留边界
+
+- 当前没有自动启用 Anthropic 代码执行/Skills 等服务端生成工具；收到正式文件结果后能下载交付，不代表已经增加生成业务。真实厂商或转发端点是否提供并透传 Files API 仍待验收。
+- Files 下载采用独立禁重定向的 SocketsHttpHandler，使用系统代理；自定义聊天 IHttpClientFactory 的代理/handler 不自动作用于此通道。依赖这类配置的部署需要单独核验。
+- SDK 边界仍在调用限额内完整缓冲文件；不是全链路常量内存。其他协议 HostedFileContent/UriContent 的未实现下载路径保持明确失败，普通文本 URL 不下载。

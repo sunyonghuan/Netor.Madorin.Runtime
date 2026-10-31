@@ -19,6 +19,7 @@ public sealed class ProviderAttachmentDeliveryTests
     [TestMethod]
     [DataRow("direct")]
     [DataRow("worker")]
+    [DataRow("anthropic")]
     [DataRow("missing")]
     [Timeout(30_000, CooperativeCancellation = true)]
     public async Task LocalRuntime_PersistsAttachmentInStartupDirectoryAndPushesMarkdownInOrder(string route)
@@ -28,16 +29,25 @@ public sealed class ProviderAttachmentDeliveryTests
         string? deliveredPath = null;
         try
         {
-            var bytes = RandomNumberGenerator.GetBytes(300_001);
+            var bytes = route == "anthropic"
+                ? System.Text.Encoding.UTF8.GetBytes(new string('a', 300_001))
+                : RandomNumberGenerator.GetBytes(300_001);
             var image = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":0,\"item_id\":\"msg-0\",\"output_index\":0,\"content_index\":0,\"delta\":\"before\",\"logprobs\":[]}\n\n"
                 + "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"sequence_number\":1,\"output_index\":1,\"item\":{\"id\":\"ig\",\"type\":\"image_generation_call\",\"status\":\"completed\",\"result\":\""
                 + Convert.ToBase64String(bytes) + "\"}}\n\n";
-            await using var server = await FakeProviderServer.StartAsync(_ => FakeProviderResponse.EventStream(
-                [new FakeProviderChunk(image), .. ProviderProtocolScripts.NormalText(ProviderAdapterKind.OpenAI).Chunks]),
+            await using var server = await FakeProviderServer.StartAsync(r => route == "anthropic"
+                ? r.Method == "POST"
+                    ? FakeProviderResponse.EventStream(new FakeProviderChunk(AnthropicFileOutputTests.CreateStream("container_upload")))
+                    : r.Path.EndsWith("/content", StringComparison.Ordinal)
+                        ? new(200, "text/plain", [new(System.Text.Encoding.UTF8.GetString(bytes))])
+                        : FakeProviderResponse.Error(200, "{\"id\":\"file_one\",\"filename\":\"result.txt\",\"mime_type\":\"text/plain\",\"size_bytes\":300001,\"downloadable\":true}")
+                : FakeProviderResponse.EventStream(
+                    [new FakeProviderChunk(image), .. ProviderProtocolScripts.NormalText(ProviderAdapterKind.OpenAI).Chunks]),
                 TestContext.CancellationToken);
             await using var supervisor = new ProviderWorkerSupervisor(AppContext.BaseDirectory);
-            IRuntimeProviderAdapter provider = route == "worker"
-                ? supervisor.CreateAdapter("OpenAI", new ProviderConnectionConfig("p", "OpenAI",
+            var protocol = route == "anthropic" ? "Anthropic" : "OpenAI";
+            IRuntimeProviderAdapter provider = route is "worker" or "anthropic"
+                ? supervisor.CreateAdapter(protocol, new ProviderConnectionConfig("p", protocol,
                     new Uri(server.BaseAddress, "v1").AbsoluteUri, "test", Models: ["test"]))
                 : new OutputProvider(bytes, route == "missing");
             var data = Path.Join(root, "data");
@@ -71,16 +81,16 @@ public sealed class ProviderAttachmentDeliveryTests
             var end = text.IndexOf(')', begin);
             deliveredPath = new Uri(text[(begin + 1)..end]).LocalPath;
             Assert.AreEqual(Path.Combine(AppContext.BaseDirectory, ".attach"), Path.GetDirectoryName(deliveredPath));
-            Assert.AreEqual(".png", Path.GetExtension(deliveredPath));
+            Assert.AreEqual(route == "anthropic" ? ".txt" : ".png", Path.GetExtension(deliveredPath));
             Assert.IsTrue(Guid.TryParseExact(Path.GetFileNameWithoutExtension(deliveredPath), "N", out _));
             CollectionAssert.AreEqual(bytes, await File.ReadAllBytesAsync(deliveredPath, TestContext.CancellationToken));
-            Assert.IsTrue(text.StartsWith("before\n\n![", StringComparison.Ordinal));
+            Assert.IsTrue(text.StartsWith(route == "anthropic" ? "before\n\n[" : "before\n\n![", StringComparison.Ordinal));
             Assert.EndsWith(route == "worker" ? "Hello" : "after", text, StringComparison.Ordinal);
             var sessionId = completed.Payload.GetProperty("sessionId").GetString()!;
             var history = await runtime.ReadSessionHistoryAsync(sessionId, TestContext.CancellationToken);
             var assistant = history.Where(r => r.Role == "assistant").Last();
             var blocks = assistant.Content.Deserialize(RuntimeJsonContext.Default.ContentBlockArray)!;
-            Assert.ContainsSingle(blocks.OfType<BlobRefContentBlock>());
+            Assert.ContainsSingle(blocks.OfType<BlobRefContentBlock>(), assistant.Content.GetRawText());
             Assert.IsTrue(blocks.OfType<TextContentBlock>().Any(t => t.Text.Contains("file:///", StringComparison.Ordinal)));
         }
         finally

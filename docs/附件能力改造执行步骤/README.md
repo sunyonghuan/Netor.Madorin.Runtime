@@ -12,6 +12,8 @@ Worker 后续进展：步骤 04 已接通输入 Resolver，十家子进程模拟
 
 后续媒体增量：步骤 05 按 Provider 的原生 API 编码 PDF、Chat WAV/MP3 和 Aliyun MP4（不是改 Blob/Worker 分块协议），详见记录第 8 节；模拟输入通过不等于十家厂商端点均支持这些媒体。
 
+Anthropic 文件输出增量：Minimal 两个包已升级至 0.1.6；实际 SDK 仍缺文件结果映射，Runtime 已从原始 SSE 解析服务端文件引用并经 Files API 下载，接入 IPC 3 与 CLI `.attach`。文本附件历史查询保留 BlobRef，避免展开导致上下文膨胀。独立 Worker 模拟与贯通验证见记录第 10 节，真实厂商文件输出仍未验收。
+
 ## 执行状态
 
 | 顺序 | 执行步骤 | 状态 | 依赖 | 交付重点 |

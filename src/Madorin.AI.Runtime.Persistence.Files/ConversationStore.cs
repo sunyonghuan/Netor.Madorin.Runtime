@@ -2189,8 +2189,10 @@ public sealed class ConversationStore
             }
 
             var mime = blob["contentType"]?.GetValue<string>() ?? string.Empty;
+            var providerAttachment = blob["accessScope"]?.GetValue<string>()?
+                .StartsWith("provider-output:", StringComparison.Ordinal) is true;
             if (options.BlobMode is ConversationBlobReadMode.Stream
-                && (attachment || !IsExpandableTextBlob(mime)))
+                && (attachment || providerAttachment || !IsExpandableTextBlob(mime)))
             {
                 continue;
             }

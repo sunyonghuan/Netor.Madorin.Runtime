@@ -2582,7 +2582,7 @@ public sealed class ExpertModeOrchestrator(
             return null;
         }
         return (stream, mime, length, hash, token) => _toolResultBlobStore.StoreAsync(
-            runId, stream, mime, $"run:{runId}", DateTimeOffset.UtcNow.AddDays(365), length, hash, token);
+            runId, stream, mime, $"provider-output:{runId}", DateTimeOffset.UtcNow.AddDays(365), length, hash, token);
     }
 
     private static void AccumulateAssistantContent(

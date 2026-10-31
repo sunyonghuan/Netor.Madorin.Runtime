@@ -60,6 +60,9 @@ internal sealed class ProviderOutputContentMapper(RuntimeProviderRequest request
     {
         switch (content)
         {
+            case ProviderOutputFileContent file:
+                await AddAsync(file.File, output, ct, reserve).ConfigureAwait(false);
+                break;
             case DataContent data:
                 if (reserve)
                 {
@@ -89,6 +92,9 @@ internal sealed class ProviderOutputContentMapper(RuntimeProviderRequest request
     {
         switch (content)
         {
+            case ProviderOutputFileContent file:
+                Reserve(file.File.Data.Length);
+                break;
             case TextContent text:
                 Reserve(System.Text.Encoding.UTF8.GetByteCount(text.Text));
                 break;
