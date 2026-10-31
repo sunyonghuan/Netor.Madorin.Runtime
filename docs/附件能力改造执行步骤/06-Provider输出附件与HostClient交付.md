@@ -79,4 +79,6 @@ Anthropic [Files API 官方文档](https://platform.claude.com/docs/en/build-wit
 - [x] 当前 Windows win-x64 Anthropic Worker Native AOT 发布成功，零警告、零错误；使用已发布原生 exe 重跑输出/交付专项 19 项通过。其余 RID 和完整 CLI 发布仍按步骤 07 验收。
 - [ ] 真实 Anthropic 服务端生成文件与 Files API 下载验收；代理端点是否透传 Files API 必须实测。
 
+真实端点进度：已使用全局配置的 axis-code/claude-opus-4-6 和 magpie/group/auto-claude-opus-4-8 做六次生成请求（两版正式代码执行工具），均未返回文件 ID；两个连接的 Files 列表路由均为 HTTP 404，不能继续真实文件下载。此项保持未通过，详细工具结果和证据见验证记录第 11 节，不将 HTTP 200 计为文件输出支持。
+
 下载使用独立禁重定向的 SocketsHttpHandler，沿用系统代理，暂不继承注入聊天 IHttpClientFactory 的自定义 handler/代理策略。部署若依赖专用 handler，文件下载需单独核验。注入纯 IChatClient 的测试/扩展入口没有连接身份时，遇到文件引用明确失败。上游完整文件仍在调用配额内缓冲，不宣称全链路常量内存。

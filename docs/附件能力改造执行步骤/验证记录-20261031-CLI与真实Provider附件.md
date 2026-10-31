@@ -239,3 +239,31 @@ Native AOT 首次发布在原生生成阶段以退出码 1 结束且没有诊断
 - 当前没有自动启用 Anthropic 代码执行/Skills 等服务端生成工具；收到正式文件结果后能下载交付，不代表已经增加生成业务。真实厂商或转发端点是否提供并透传 Files API 仍待验收。
 - Files 下载采用独立禁重定向的 SocketsHttpHandler，使用系统代理；自定义聊天 IHttpClientFactory 的代理/handler 不自动作用于此通道。依赖这类配置的部署需要单独核验。
 - SDK 边界仍在调用限额内完整缓冲文件；不是全链路常量内存。其他协议 HostedFileContent/UriContent 的未实现下载路径保持明确失败，普通文本 URL 不下载。
+
+## 11. 已配置 Anthropic 连接的真实文件输出验收（2026-10-31 20:00）
+
+用户要求使用已配置模型测试。本批只读取全局配置，不更换地址/凭据、不修改配置；分别使用 `axis-code(Anthropic)` 的 `claude-opus-4-6` 和 `magpie-anthropic` 的 `group/auto-claude-opus-4-8`。六次 Messages 请求均为真实配置端点，未使用 Fake Provider；这些地址是转发服务，并非 Anthropic 官方直连。
+
+### 11.1 方法与官方依据
+
+- 直接请求当前连接的 `/v1/messages`，显式提供正式 `code_execution` 服务端工具，输出预算 2048 tokens，单次超时三分钟。任务为创建 UTF-8 小文件，其内容为随机固定校验串，无换行；要求服务端执行并返回正式文件引用。
+- 对照 [Anthropic 官方代码执行文档](https://platform.claude.com/docs/en/agents-and-tools/tool-use/code-execution-tool)，使用 `code_execution_20250825`，并补测 `code_execution_20260120`。官方说明这些工具版本支持所选 Claude 4.6，代码执行本身无需 beta header；请求同时带 Files API 的 `files-api-2025-04-14` header。
+- 仅从正式文件输出字段提取 `file_id`，取得后才请求元数据/内容并核对原始字节。未把模型文字、HTTP 200、普通 Markdown 路径视为生成成功；未将服务端工具调用交给本地执行。
+- 只读探测两个连接的 `/v1/files?limit=1`；不记录文件列表正文。证据仅保存模型、状态、内容块类型、脱敏工具结果及校验信息，不保存请求头、凭据。
+
+### 11.2 结果
+
+| 连接 / 模型 | 代码执行版本 | 真实响应 | 文件引用 | Files 列表路由 | 结论 |
+| --- | --- | --- | --- | --- | --- |
+| axis-code(Anthropic) / claude-opus-4-6 | 20250825，两次 | HTTP 200；首轮 bash 工具返回 `return_code=1`，stderr 明确 `Server-side code execution is not available on this channel.`；调整为纯 Python 后只返回与任务无关的 Hello, World! | 0 | HTTP 404，`404 page not found` | 未通过 |
+| axis-code(Anthropic) / claude-opus-4-6 | 20260120 | HTTP 200，`stop_reason=tool_use`，普通 `tool_use` 内容块，没有已执行的文件结果 | 0 | HTTP 404 | 未通过 |
+| magpie-anthropic / group/auto-claude-opus-4-8 | 20250825，两次 | HTTP 200；首轮 bash 工具返回 NameError，调整为纯 Python 后只返回与任务无关的 Hello, World! | 0 | HTTP 404，服务错误列出的可用路由不包含 Files | 未通过 |
+| magpie-anthropic / group/auto-claude-opus-4-8 | 20260120 | HTTP 200，`stop_reason=tool_use`，普通 `tool_use` 内容块，没有已执行的文件结果 | 0 | HTTP 404 | 未通过 |
+
+共六次生成尝试，零个正式文件引用，因此没有可合法执行的真实文件下载，也没有进入 Worker/CLI `.attach` 的真实文件交付。本次结果不能关闭步骤 06 的真实验收项；本地模拟和原生 Worker 的通过证据仍仅代表 Runtime 实现验证。
+
+证据位于 `obj/anthropic-live-*.json`：axis-code 时间后缀 `20261031-200025`、`200146`、`200201`；magpie 时间后缀 `20261031-200038`、`200140`、`200159`。本机复测脚本为 `obj/Test-AnthropicGeneratedFile.ps1`，从全局配置取身份，文件引用不存在时不会编造 ID 尝试下载。
+
+### 11.3 后续条件
+
+当前证据将阻塞定位到所测连接的服务端生成/Files API 路线，不能据此断言模型本身没有文件能力，也不外推到全部配置模型或官方直连。继续完成真实验收需要现有转发服务提供正式代码执行和 Files 路由，或在全局配置中增加确实支持这两者的 Anthropic 连接；拿到真实文件引用后，再运行下载、Worker、CLI 落盘与宿主 Markdown 的完整验收。
