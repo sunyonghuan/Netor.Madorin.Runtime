@@ -29,6 +29,10 @@ public sealed class LiveAttachmentProviderTests
     [DataRow("Kimi", true)]
     [DataRow("Aliyun", false)]
     [DataRow("Aliyun", true)]
+    [DataRow("axis-code(gpt)", false)]
+    [DataRow("axis-code(gpt)", true)]
+    [DataRow("axis-code(Anthropic)", false)]
+    [DataRow("axis-code(Anthropic)", true)]
     [Timeout(90_000, CooperativeCancellation = true)]
     public async Task ImageInput_UsesRealEndpointWithLocalResolver(string providerName, bool toolResult)
     {
@@ -44,9 +48,6 @@ public sealed class LiveAttachmentProviderTests
 
         var imagePath = Environment.GetEnvironmentVariable("MADORIN_TEST_ATTACHMENT_IMAGE");
         Assert.IsFalse(string.IsNullOrWhiteSpace(imagePath), "Set MADORIN_TEST_ATTACHMENT_IMAGE to a PNG fixture.");
-        var expectedTerms = Environment.GetEnvironmentVariable("MADORIN_TEST_ATTACHMENT_EXPECTED_TERMS");
-        Assert.IsFalse(string.IsNullOrWhiteSpace(expectedTerms),
-            "Set semicolon-separated expected term groups (pipe-separated alternatives) after inspecting the fixture.");
         var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".madorin", "config.json");
         using var config = JsonDocument.Parse(await File.ReadAllTextAsync(path, TestContext.CancellationToken));
         var providers = config.RootElement.GetProperty("providers").EnumerateArray().ToArray();
@@ -54,6 +55,11 @@ public sealed class LiveAttachmentProviderTests
         var model = providerName switch
         {
             "magpie-openai" => "group/auto-gpt-5-6",
+            "magpie-anthropic" => "group/auto-claude-opus-4-8",
+            "axis-code(gpt)" => "gpt-5.6-sol",
+            "axis-code(Anthropic)" => "claude-opus-4-6",
+            "deepseek" => "deepseek-v4-flash",
+            "Aliyun" => "qwen3.8-max",
             "Kimi" => "kimi-k3.1-pro",
             _ => entry.GetProperty("models")[0].GetString()!
         };
@@ -83,11 +89,16 @@ public sealed class LiveAttachmentProviderTests
         // 媒体 flags 故意为 false；仅声明工具/思考能力，避免与附件无关的历史检查干扰。
         ProviderModel[] models = [new(model, model, Capabilities: new(Streaming: true, Reasoning: true))];
         using var http = new InspectingHttpFactory(bytes);
+        // 独立 Chat Adapter 无 HTTP 注入点；测试 relay 保持路径/正文不变，只转发到配置端点。
+        await using var relay = protocol is "DeepSeek" or "Kimi"
+            ? await LiveAttachmentHttpRelay.StartAsync(new Uri(baseUrl), http.Handler.Inspect,
+                TestContext.CancellationToken) : null;
+        baseUrl = relay?.AdapterBaseUrl ?? baseUrl;
         var runtime = CreateAdapter(protocol, providerName, key, baseUrl, models, resolver, http);
         using var lifetime = runtime as IDisposable;
         using var args = JsonDocument.Parse("{}");
-        var prompt = new TextContentBlock("Describe only the shapes and colors actually visible in the attached image. " +
-            "If the image is not accessible, say so. Do not use tools or infer content from file metadata.");
+        var prompt = new TextContentBlock("Can you access the attached image? Give a brief answer and a short description " +
+            "if accessible. If it is not accessible, say so. Do not use tools or infer content from file metadata.");
         RuntimeProviderMessage[] messages = toolResult
             ? [new(RuntimeProviderRoles.User, [prompt]),
                 new(RuntimeProviderRoles.Assistant, [new ToolCallContentBlock("call-live-image",
@@ -99,7 +110,8 @@ public sealed class LiveAttachmentProviderTests
         var request = new RuntimeProviderRequest(Guid.NewGuid().ToString("N"), "live-test", providerName,
             model, messages, Tools: toolResult
                 ? [.. new BuiltinToolRegistry().GetTools([BuiltinToolRegistry.FileAttachToolId])] : null,
-            MaxTokens: protocol == "Kimi" ? 2048 : 512, CancellationToken: TestContext.CancellationToken);
+            MaxTokens: protocol is "Kimi" or "Aliyun" ? 2048 : 512,
+            CancellationToken: TestContext.CancellationToken);
         var events = new List<RuntimeProviderEvent>();
         try
         {
@@ -128,22 +140,10 @@ public sealed class LiveAttachmentProviderTests
         }
         Assert.IsEmpty(failures, "A Provider rejection is recorded as a failed live test, not attachment support.");
         Assert.AreEqual(1, resolver.Calls);
-        var completed = Assert.ContainsSingle(events.OfType<InvocationCompletedProviderEvent>());
-        Assert.AreNotEqual("length", completed.FinishReason, "Truncated output does not verify image understanding.");
-        Assert.IsFalse(string.IsNullOrWhiteSpace(text));
-        if (protocol is "OpenAI" or "Anthropic" or "Aliyun")
-        {
-            Assert.AreEqual(1, http.Handler.VerifiedImageParts,
-                "The native HTTP image part must decode to the exact fixture bytes.");
-        }
-
-        foreach (var group in expectedTerms.Split(';', StringSplitOptions.RemoveEmptyEntries))
-        {
-            Assert.IsTrue(group.Split('|', StringSplitOptions.RemoveEmptyEntries)
-                .Any(term => text.Contains(term, StringComparison.OrdinalIgnoreCase)),
-                $"The response did not match expected image content group: {group}");
-        }
-        // 关键词仅阻止明显的不可见/错误图像假成功，仍需人工对照，不能外推 Worker 或二进制输出。
+        Assert.ContainsSingle(events.OfType<InvocationCompletedProviderEvent>());
+        Assert.AreEqual(1, http.Handler.VerifiedImageParts,
+            "The native HTTP image part must decode to the exact fixture bytes.");
+        // 传输验收不评估颜色/物体识别准确率；不可见回包单独记录，不推断为本地丢图。
     }
 
     private static IRuntimeProviderAdapter CreateAdapter(string protocol, string name, string key, string baseUrl,
@@ -181,11 +181,17 @@ public sealed class LiveAttachmentProviderTests
             if (request.Content is { } content)
             {
                 var bytes = await content.ReadAsByteArrayAsync(ct);
-                RequestBytes = bytes.LongLength;
-                using var document = JsonDocument.Parse(bytes);
-                VerifyParts(document.RootElement);
+                Inspect(bytes, RequestPath ?? string.Empty);
             }
             return await base.SendAsync(request, ct);
+        }
+
+        public void Inspect(byte[] bytes, string path)
+        {
+            RequestPath = path;
+            RequestBytes = bytes.LongLength;
+            using var document = JsonDocument.Parse(bytes);
+            VerifyParts(document.RootElement);
         }
 
         private void VerifyParts(JsonElement value)

@@ -1,6 +1,8 @@
 # 2026-10-31 CLI 与真实 Provider 附件验证
 
 > 状态：存在失败项，不通过附件端到端门禁。本记录是执行中的验证证据，不改变 01-07 的实施顺序，不把局部 Adapter 成功标为 Worker/Host 完成。
+>
+> 最新判定以第 6 节为准：按用户修订，只验附件传输与可见性，不考核识别准确率。第 1-5 节是前一轮历史记录，其模型选择和关键词门禁不再作为当前通过条件。
 
 ## 1. 环境与证据边界
 
@@ -81,3 +83,57 @@ dotnet test tests/Madorin.AI.Runtime.Provider.Tests/Madorin.AI.Runtime.Provider.
 - 步骤 05 需复核 Anthropic tool-result 在本机网关的映射/处理、DeepSeek 和 Aliyun 当前模型的实际媒体行为，以及 Aliyun reasoning 历史回放的独立阻断。
 - OpenAICompatible、AzureOpenAI、Gemini、GLM、Ollama 没有对应全局测试连接，真实调用未执行。Aliyun 上的 glm 模型不是 GLM Adapter 测试，方舟配置为 OpenAI 也不是 OpenAICompatible Adapter 的证明。
 - CodeMap 基线仍被任务外未提交源码阻塞；未把别人的代码强行提交或声称语义索引已刷新。
+
+## 6. 充值后复测与验收口径修订
+
+### 6.1 用户确认的口径
+
+- 用户说明 axis-code 原 403 来自欠费，充值完成后重新测试；不再沿用前一轮未定位的权限猜测。
+- 本专项验收图片原始内容能通过正确的附件字段传给端点，记录模型是否可见；颜色、物体、图案描述准确率属于模型识别质量，不是附件传输门禁。删除测试中的关键词准确率断言，不因错色/错图就判本地映射失败。
+- 传输自动化门禁：Resolver 读取受控 fixture、最终 HTTP 原生 image 字段解码后字节完全一致、Provider 没有失败事件且有完成事件。回包可见性和 finish reason 单列；空文本/length 不能自动证明可见，必要时补足输出预算重跑。HTTP 200 或模型口头确认本身仍不能替代字节核验。
+- 根据用户指定方向选择实际测试模型：Aliyun Qwen 3.8 系列、DeepSeek 最新配置 Flash、Anthropic Opus 4.6 以上。不把本次测试选型变成生产能力黑名单，也不据此宣称其他 Anthropic 型号一律不支持视觉。
+
+### 6.2 模型与配置
+
+- axis-code GPT/Anthropic `/models` 均 HTTP 200。使用 `gpt-5.6-sol` 与接口返回的 `claude-opus-4-6`；后者已先备份全局配置再追加，保留旧模型、凭据、端点与默认选择不变。
+- magpie Anthropic 选择已有 `group/auto-claude-opus-4-8`；DeepSeek 选择已有 `deepseek-v4-flash`；Kimi 沿用 `kimi-k3.1-pro`。
+- Aliyun 首试字面 ID `qwen3.8` 在文本和图片请求均返回 404。随后查询当前账号 `/models`，HTTP 200 返回 `qwen3.8-max`、`qwen3.8-max-0902`、`qwen3.8-flash` 等，但无字面 `qwen3.8`；改用全局配置中已有 `qwen3.8-max` 后文本成功、图片成功，不另造模型别名。
+- 测试保留媒体 flags=false；仍不要求用户先勾选视觉能力才能发图片。全局配置没有补虚构窗口或修改媒体能力来绕过附件检查。
+
+### 6.3 真实进程内传输矩阵
+
+| 连接 / 模型 | 顶层图片 | 工具结果图片 | 原生字段及最终字节核验 | 回包可见性 |
+| --- | --- | --- | --- | --- |
+| magpie-openai / group/auto-gpt-5-6 | 通过 | 通过 | `/v1/responses`，各 1 image part，15,515 / 17,377 bytes | 两项均明确能看到图片 |
+| magpie-anthropic / group/auto-claude-opus-4-8 | 通过 | 重跑通过 | `/v1/messages`，各 1 image part，16,604 / 17,200 bytes | 两项均确认可见；首轮工具请求 90 秒取消，第二轮完成，不隐去超时记录 |
+| axis-code(gpt) / gpt-5.6-sol | 通过 | 通过 | `/v1/responses`，各 1 image part，15,508 / 17,370 bytes | 两项均确认可见，充值后的 403 已消失 |
+| axis-code(Anthropic) / claude-opus-4-6 | 通过 | 通过 | `/v1/messages`，各 1 image part，16,593 / 17,189 bytes | 两项均确认可见，充值后的 403 已消失 |
+| DeepSeek / deepseek-v4-flash | 通过 | 通过 | `/chat/completions`，各 1 image part，15,488 / 17,348 bytes | 两项均确认可见；与前一轮 Pro 结果分开 |
+| Kimi / kimi-k3.1-pro | 通过 | 通过 | `/v1/chat/completions`，各 1 image part，16,660 / 17,367 bytes | 两项均确认可见；描述颜色差异不判传输失败 |
+| Aliyun / qwen3.8-max | 通过 | 通过 | `/compatible-mode/v1/chat/completions`，各 1 image part，15,483 / 16,245 bytes | 两项均确认可见；初次 512 输出预算工具结果为 length/空文本，2048 预算复跑后 stop/有文本 |
+
+所有附件仍为第 1 节同一 PNG，11,297 bytes，SHA-256 完全一致。请求 bytes 包含各自协议元数据和 Base64 编码，只是测量，不作跨协议大小推断。
+
+DeepSeek/Kimi 本次新增 `LiveAttachmentHttpRelay`，只用于测试：SDK 指向 loopback 随机端口，relay 固定转发到该连接原有 origin，保持 path/query 和正文，内存核验后不保存 Header/body，不跟随重定向。生产 Adapter 未新增任意文件/网络读取能力；其原有 reasoning/thinking handler 仍执行。相比前一轮，此次两家也有真实请求附件字节核验，不再只有 Resolver 读取证据。
+
+### 6.4 结果数量与 CLI 边界
+
+- 首轮 14 项：11 通过、3 失败，TRX `attachment-live-vision-retest.trx`。失败为 Aliyun 字面 `qwen3.8` 两项 404、magpie Opus 4.8 工具一项超时。
+- Aliyun `qwen3.8-max` 两项通过，TRX `attachment-live-qwen38max.trx`；补输出预算确认可见的两项再次通过，TRX `attachment-live-qwen38max-visible.trx`。magpie Opus 4.8 两项重跑通过，TRX `attachment-live-opus48-retry.trx`。每次单连接复跑另外 12 项明确跳过。上述矩阵是多次运行合并证据，不是一次 14/14 全绿。
+- CLI 充值复跑：axis-code GPT、axis-code Opus 4.6、DeepSeek Flash 文本均成功；三个 attach 工具均完成，但续调仍失败于 Worker 无 Blob Resolver。Aliyun `qwen3.8-max` 文本成功，attach 后仍被本地 reasoning 能力检查拦截。事件目录为 `obj/attachment-cli-recharge-20261031-161501`，未修改生产实现掩盖问题。
+- 因此：7 连接的进程内 PNG 顶层/工具结果传输已取得通过证据；**CLI 生产完整附件链路仍未通过**。不将进程内 Resolver 注入测试当成步骤 04 已完成，也不外推 PDF、视频、音频或 Provider 输出附件。
+- 收尾 Release 本地回归：85 通过、14 条联网测试在开关关闭时跳过，构建零警告/错误；TRX `attachment-recharge-regression.trx`。本地回归数字与上述真实调用结果分开，不计作 14 条真实重跑通过。
+
+### 6.5 当前复跑命令
+
+不再使用 `MADORIN_TEST_ATTACHMENT_EXPECTED_TERMS`；旧第 5 节示例仅保留为历史。
+
+```powershell
+$env:MADORIN_TEST_LIVE_ATTACHMENTS = '1'
+$env:MADORIN_TEST_ATTACHMENT_IMAGE = '<PNG 绝对路径>'
+# 可选单连接；不设置则运行当前 7 个连接的 14 项。
+$env:MADORIN_TEST_LIVE_PROVIDER = 'axis-code(Anthropic)'
+dotnet test tests/Madorin.AI.Runtime.Provider.Tests/Madorin.AI.Runtime.Provider.Tests.csproj --no-restore --filter 'FullyQualifiedName~LiveAttachmentProviderTests' --logger 'trx;LogFileName=attachment-live-retest.trx' -v q
+```
+
+命令完成后恢复各环境变量原值；凭据从全局配置读取，不写进命令或文档。测试选择的模型清单见第 6.3 节，不自动切换模型或协议。
