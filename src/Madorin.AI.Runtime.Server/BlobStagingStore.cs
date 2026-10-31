@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using Madorin.AI.Runtime.Contracts;
@@ -95,6 +96,87 @@ internal sealed class BlobStagingStore : IToolResultBlobStore, IAsyncDisposable
             await AbortUploadAsync(uploadId, owner, CancellationToken.None).ConfigureAwait(false);
             throw;
         }
+    }
+
+    /// <inheritdoc />
+    public async Task<BlobReference> StoreAsync(
+        string runId,
+        Stream content,
+        string contentType,
+        string accessScope,
+        DateTimeOffset expiresAt,
+        long? expectedLength = null,
+        string? expectedSha256 = null,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(content);
+        if (!content.CanRead)
+        {
+            throw new ArgumentException("The Blob source must be readable.", nameof(content));
+        }
+
+        var uploadId = Guid.NewGuid().ToString("N");
+        var owner = $"runtime-tool-result:{runId}";
+        await BeginAsync(new BlobBeginRequest(uploadId, runId, contentType, accessScope,
+            expiresAt, expectedLength), owner, ct).ConfigureAwait(false);
+        byte[]? buffer = null;
+        try
+        {
+            buffer = ArrayPool<byte>.Shared.Rent(128 * 1024);
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            long length = 0;
+            int read;
+            while ((read = await content.ReadAsync(buffer.AsMemory(0, 128 * 1024), ct)
+                       .ConfigureAwait(false)) != 0)
+            {
+                length = checked(length + read);
+                if (expectedLength is { } limit && length > limit)
+                {
+                    throw new InvalidDataException("The Blob source grew beyond its expected length.");
+                }
+
+                hash.AppendData(buffer.AsSpan(0, read));
+                await AppendChunkAsync(new BlobChunkRequest(uploadId), buffer.AsMemory(0, read), owner, ct)
+                    .ConfigureAwait(false);
+            }
+
+            if (expectedLength is { } expected && length != expected)
+            {
+                throw new InvalidDataException("The Blob source length changed while reading.");
+            }
+
+            var actualHash = Convert.ToHexString(hash.GetHashAndReset());
+            if (expectedSha256 is not null
+                && !string.Equals(actualHash, expectedSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException("The Blob source does not match its expected SHA-256.");
+            }
+
+            ct.ThrowIfCancellationRequested();
+            return await CompleteAsync(new BlobCompleteRequest(uploadId, length, actualHash), owner, ct)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            await AbortUploadAsync(uploadId, owner, CancellationToken.None).ConfigureAwait(false);
+            throw;
+        }
+        finally
+        {
+            if (buffer is not null)
+            {
+                ArrayPool<byte>.Shared.Return(buffer, clearArray: true);
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<Stream> OpenReadAsync(BlobReference reference, CancellationToken ct = default)
+    {
+        await ValidateReferenceAsync(reference, ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
+        return new FileStream(GetBlobPath(reference.BlobId), FileMode.Open, FileAccess.Read,
+            FileShare.Read, 128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
     }
 
     public async Task ValidateReferenceAsync(

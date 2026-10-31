@@ -71,6 +71,10 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
                 workspaceRoot,
                 BuiltinFsToolExecutor.GetRequiredString(arguments, "path"),
                 "file read"),
+            BuiltinToolRegistry.FileAttachToolId => FileReadScope(
+                workspaceRoot,
+                BuiltinFsToolExecutor.GetRequiredString(arguments, "path"),
+                "file attachment read"),
             BuiltinToolRegistry.FileSearchToolId => FileReadScope(
                 workspaceRoot,
                 BuiltinFsToolExecutor.GetRequiredString(arguments, "path"),

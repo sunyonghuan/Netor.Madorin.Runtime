@@ -579,6 +579,7 @@ public sealed class ToolAuthorizationService(
     private static bool IsDefaultAllowedTool(string toolId) =>
         string.Equals(toolId, "mcli_memory_read", StringComparison.Ordinal)
         || string.Equals(toolId, "mcli_fs_read", StringComparison.Ordinal)
+        || string.Equals(toolId, "mcli_fs_attach", StringComparison.Ordinal)
         || string.Equals(toolId, "mcli_fs_list", StringComparison.Ordinal)
         || string.Equals(toolId, "mcli_fs_stat", StringComparison.Ordinal)
         || string.Equals(toolId, "mcli_fs_inspect", StringComparison.Ordinal)

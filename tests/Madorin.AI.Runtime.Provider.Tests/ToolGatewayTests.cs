@@ -6,6 +6,7 @@ using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Persistence.Abstractions;
 using Madorin.AI.Runtime.Persistence.Sqlite;
 using Madorin.AI.Runtime.Services.Tools;
+using Madorin.AI.Runtime.Server;
 using Madorin.AI.Runtime.Tools.Abstractions;
 using Madorin.AI.Runtime.Tools.Builtin;
 using Microsoft.Data.Sqlite;
@@ -389,6 +390,40 @@ public sealed class ToolGatewayTests
         Assert.IsNull(await repository.GetIntentAsync(
             retryInvocation.CallId,
             TestContext.CancellationToken));
+    }
+
+    [TestMethod]
+    public async Task ExecuteAsync_AttachmentPreservesMetadataHashAndBlobAcrossRetry()
+    {
+        await File.WriteAllBytesAsync(Path.Join(_workspaceRoot, "attachment.bin"), [1, 2, 3],
+            TestContext.CancellationToken);
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync(TestContext.CancellationToken);
+        await SqliteSchema.EnsureCreatedAsync(connection, TestContext.CancellationToken);
+        using var repository = new SqliteToolIntentRepository(connection);
+        using var outbox = new SqliteEventOutbox(connection);
+        await using var blobs = new BlobStagingStore(Path.Join(_workspaceRoot, "store"),
+            new RuntimeLimits(), 16 * 1024 * 1024);
+        var validator = new JsonSchemaToolValidator();
+        using var gateway = new ToolGateway(
+            new ToolCatalogStore(new BuiltinToolRegistry(), validator), validator,
+            new ToolAuthorizationService(repository, RuntimeToolPolicy.CreateRestricted(_workspaceRoot)),
+            [new BuiltinFsToolExecutor(blobStore: blobs)], repository, outbox, resultBlobStore: blobs);
+        var invocation = CreateFileInvocation(BuiltinToolRegistry.FileAttachToolId,
+            CreateArguments(("path", "attachment.bin")), "call-attachment");
+        var first = await gateway.ExecuteAsync(invocation, null, TestContext.CancellationToken);
+        Assert.AreEqual(ToolGatewayResultKind.Success, first.Kind, first.Error?.Message);
+        Assert.IsNotNull(first.Result);
+        Assert.IsNotNull(first.Result.ResultBlob);
+        Assert.IsNotNull(first.Result.OutputJson);
+        Assert.AreEqual(Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(first.Result.OutputJson))),
+            first.Result.ResultHash);
+        Assert.AreNotEqual(first.Result.ResultHash, first.Result.ResultBlob.Sha256);
+        File.Delete(Path.Join(_workspaceRoot, "attachment.bin"));
+        var retry = await gateway.ExecuteAsync(invocation, CreatePermission(), TestContext.CancellationToken);
+        Assert.AreEqual(ToolGatewayResultKind.Success, retry.Kind);
+        Assert.AreEqual(first.Result, retry.Result);
+        await blobs.ValidateReferenceAsync(retry.Result!.ResultBlob!, TestContext.CancellationToken);
     }
 
     [TestMethod]

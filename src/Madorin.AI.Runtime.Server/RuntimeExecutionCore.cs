@@ -135,7 +135,7 @@ internal sealed class RuntimeExecutionCore(
         var conversationStore = new ConversationStore(_dataDirectory);
         var executors = new List<IToolExecutor>
         {
-            new BuiltinFsToolExecutor(_memoryFiles.WorkspaceMutationLock),
+            new BuiltinFsToolExecutor(_memoryFiles.WorkspaceMutationLock, _resultBlobStore),
             new BuiltinProcessToolExecutor(),
             new BuiltinHttpToolExecutor(),
             new BuiltinMemoryToolExecutor(_memoryFiles),

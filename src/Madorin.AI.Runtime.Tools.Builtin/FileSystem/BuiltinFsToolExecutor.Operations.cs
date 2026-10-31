@@ -50,6 +50,7 @@ public sealed partial class BuiltinFsToolExecutor
             BuiltinToolRegistry.FileListToolId => PrepareList(invocation, arguments, policy),
             BuiltinToolRegistry.FileStatusToolId => PrepareStatus(invocation, arguments, policy),
             BuiltinToolRegistry.FileReadToolId => PrepareRead(invocation, arguments, policy),
+            BuiltinToolRegistry.FileAttachToolId => PrepareAttach(invocation, arguments, policy),
             BuiltinToolRegistry.FileWriteToolId =>
                 PrepareWriteMerged(invocation, arguments, permission, policy),
             BuiltinToolRegistry.FileAppendToolId =>

@@ -2149,11 +2149,33 @@ public sealed class ConversationStore
 
         var contentNode = JsonNode.Parse(record.Content.GetRawText()) as JsonArray
             ?? throw new InvalidOperationException("Conversation content must be a JSON array.");
+        var changed = await TransformContentAsync(contentNode, options, attachment: false, ct)
+            .ConfigureAwait(false);
+        return changed ? record with { Content = ToElement(contentNode) } : record;
+    }
+
+    private async Task<bool> TransformContentAsync(JsonArray contentNode, ConversationReadOptions options,
+        bool attachment, CancellationToken ct)
+    {
         var changed = false;
         for (var index = 0; index < contentNode.Count; index++)
         {
-            if (contentNode[index] is not JsonObject block
-                || block["type"]?.GetValue<string>() is not "blob_ref"
+            ct.ThrowIfCancellationRequested();
+            if (contentNode[index] is not JsonObject block)
+            {
+                continue;
+            }
+
+            if (block["type"]?.GetValue<string>() is "tool_result"
+                && block["content"] is JsonArray nested)
+            {
+                changed |= await TransformContentAsync(nested, options,
+                    attachment || block["toolId"]?.GetValue<string>() == "mcli_fs_attach", ct)
+                    .ConfigureAwait(false);
+                continue;
+            }
+
+            if (block["type"]?.GetValue<string>() is not "blob_ref"
                 || block["blob"] is not JsonObject blob)
             {
                 continue;
@@ -2162,6 +2184,13 @@ public sealed class ConversationStore
             var blobId = blob["blobId"]?.GetValue<string>();
             var length = blob["length"]?.GetValue<long>() ?? -1;
             if (string.IsNullOrWhiteSpace(blobId))
+            {
+                continue;
+            }
+
+            var mime = blob["contentType"]?.GetValue<string>() ?? string.Empty;
+            if (options.BlobMode is ConversationBlobReadMode.Stream
+                && (attachment || !IsExpandableTextBlob(mime)))
             {
                 continue;
             }
@@ -2194,11 +2223,19 @@ public sealed class ConversationStore
             }
         }
 
-        return changed
-            ? record with { Content = ToElement(contentNode) }
-            : record;
+        return changed;
     }
 
+    private static bool IsExpandableTextBlob(string mime)
+    {
+        var separator = mime.IndexOf(';');
+        var mediaType = (separator < 0 ? mime : mime[..separator]).Trim();
+        return mediaType.StartsWith("text/", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(mediaType, "application/json", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(mediaType, "application/xml", StringComparison.OrdinalIgnoreCase)
+            || mediaType.EndsWith("+json", StringComparison.OrdinalIgnoreCase)
+            || mediaType.EndsWith("+xml", StringComparison.OrdinalIgnoreCase);
+    }
 
     private static JsonElement ToElement(JsonNode node)
     {
@@ -2215,6 +2252,15 @@ public sealed class ConversationStore
 
         foreach (var block in content.EnumerateArray())
         {
+            if (block.ValueKind is JsonValueKind.Object
+                && block.TryGetProperty("type", out var blockType)
+                && blockType.GetString() is "tool_result"
+                && block.TryGetProperty("content", out var nested))
+            {
+                CollectBlobIds(nested, blobIds);
+                continue;
+            }
+
             if (block.ValueKind is not JsonValueKind.Object
                 || !block.TryGetProperty("type", out var type)
                 || type.GetString() is not "blob_ref"

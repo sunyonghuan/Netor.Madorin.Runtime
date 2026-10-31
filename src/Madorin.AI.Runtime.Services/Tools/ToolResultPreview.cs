@@ -11,7 +11,7 @@ namespace Madorin.AI.Runtime.Services.Tools;
 public static class ToolResultPreview
 {
     /// <summary>
-    /// 按 Provider 能力决定模型可见正文。文本类 Blob 不依赖 Files 能力。
+    /// 附件保留原始引用；普通过大文本结果生成有界预览。
     /// </summary>
     public static async Task<ToolResultContentBlock> MaterializeAsync(
         ToolResultContentBlock result,
@@ -28,19 +28,23 @@ public static class ToolResultPreview
         {
             switch (block)
             {
+                case BlobRefContentBlock blob when result.ToolId == "mcli_fs_attach":
+                    content.Add(blob);
+                    break;
+                case ToolResultContentBlock nested:
+                    content.Add(await MaterializeAsync(nested, supportsFileBlobs, blobStore, maxInlineBytes, ct)
+                        .ConfigureAwait(false));
+                    break;
                 case TextContentBlock text when Encoding.UTF8.GetByteCount(text.Text) > maxInlineBytes:
                     content.Add(new TextContentBlock(FitUtf8(text.Text, maxInlineBytes, text.Text.Length)));
                     break;
-                case BlobRefContentBlock blob when supportsFileBlobs && !IsTextual(blob.Blob.ContentType):
+                case BlobRefContentBlock blob when !IsTextual(blob.Blob.ContentType):
                     content.Add(blob);
                     break;
                 case BlobRefContentBlock blob when IsTextual(blob.Blob.ContentType):
                     content.Add(new TextContentBlock(
                         await ReadTextPreviewAsync(blob.Blob, blobStore, maxInlineBytes, ct)
                             .ConfigureAwait(false)));
-                    break;
-                case BlobRefContentBlock blob:
-                    content.Add(new TextContentBlock(DescribeUntypedBlob(blob.Blob)));
                     break;
                 default:
                     content.Add(block);

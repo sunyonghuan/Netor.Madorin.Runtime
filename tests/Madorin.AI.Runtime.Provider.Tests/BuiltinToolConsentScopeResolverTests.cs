@@ -30,6 +30,18 @@ public sealed class BuiltinToolConsentScopeResolverTests
     }
 
     [TestMethod]
+    public void Resolve_AttachmentUsesExistingReadGrantScope()
+    {
+        File.WriteAllText(Path.Join(_workspace, "data.bin"), "content");
+        var resolution = Resolve(BuiltinToolRegistry.FileAttachToolId, """{"path":"data.bin"}""");
+        Assert.IsTrue(resolution.IsSuccess, resolution.Error);
+        Assert.IsNotNull(resolution.Scope);
+        CollectionAssert.AreEqual(new[] { Path.Join(_workspace, "data.bin") }, resolution.Scope.AllowedReadRoots);
+        Assert.IsEmpty(resolution.Scope.AllowedWriteRoots);
+        Assert.IsTrue(resolution.Scope.CanGrantForRun);
+    }
+
+    [TestMethod]
     public void Resolve_FileReadWithChineseAndSpaces_UsesExactNormalizedTarget()
     {
         var relativePath = Path.Combine("资料 目录", "说明 文件.txt");

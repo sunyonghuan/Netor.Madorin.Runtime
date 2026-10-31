@@ -3,6 +3,8 @@ using System.Buffers;
 using System.Text;
 using System.Text.Json;
 using Madorin.AI.Runtime.Core.Concurrency;
+using Madorin.AI.Runtime.Contracts;
+using Madorin.AI.Runtime.Server;
 using Madorin.AI.Runtime.Tools.Abstractions;
 using Madorin.AI.Runtime.Tools.Builtin;
 
@@ -29,6 +31,56 @@ public sealed class BuiltinFileToolTests
         {
             Directory.Delete(_root, recursive: true);
         }
+    }
+
+    [TestMethod]
+    [DataRow("png", "image/png")]
+    [DataRow("jpeg", "image/jpeg")]
+    [DataRow("pdf", "application/pdf")]
+    [DataRow("unknown", "application/octet-stream")]
+    public async Task AttachFile_StoresBytesAndBoundedMetadata(string format, string expectedType)
+    {
+        byte[] bytes = format switch
+        {
+            "png" => Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC1lEQVR42mP8/x8AAwMCAO+jP1kAAAAASUVORK5CYII="),
+            "jpeg" => [255, 216, 255, 224, 0, 16],
+            "pdf" => "%PDF-1.7\n"u8.ToArray(),
+            _ => RandomNumberGenerator.GetBytes(2 * 1024 * 1024)
+        };
+        var path = Path.Join(_root, "attachment.png");
+        await File.WriteAllBytesAsync(path, bytes, TestContext.CancellationToken);
+        await using var store = new BlobStagingStore(Path.Join(_root, "store"), new RuntimeLimits(), 16 * 1024 * 1024);
+        var executor = new BuiltinFsToolExecutor(blobStore: store);
+        var result = await ExecuteAsync(executor, BuiltinToolRegistry.FileAttachToolId,
+            """{"path":"attachment.png"}""", CreatePermission());
+        Assert.IsTrue(result.Success, result.Error);
+        Assert.IsNotNull(result.ResultBlob);
+        Assert.AreEqual(expectedType, result.ResultBlob.ContentType);
+        Assert.IsNull(result.ResultHash);
+        Assert.IsLessThan(512, result.OutputJson!.Length);
+        Assert.DoesNotContain(_root, result.OutputJson, StringComparison.OrdinalIgnoreCase);
+        using var metadata = JsonDocument.Parse(result.OutputJson);
+        Assert.AreEqual("attachment.png", metadata.RootElement.GetProperty("fileName").GetString());
+        Assert.AreEqual(bytes.LongLength, metadata.RootElement.GetProperty("byteLength").GetInt64());
+        Assert.AreEqual(result.ResultBlob.Sha256, metadata.RootElement.GetProperty("sha256").GetString());
+        await using var read = await store.OpenReadAsync(result.ResultBlob, TestContext.CancellationToken);
+        Assert.AreEqual(Convert.ToHexString(SHA256.HashData(bytes)),
+            Convert.ToHexString(await SHA256.HashDataAsync(read, TestContext.CancellationToken)));
+    }
+
+    [TestMethod]
+    public async Task AttachFile_RejectsWrongHashWithoutPublishingBlob()
+    {
+        await File.WriteAllBytesAsync(Path.Join(_root, "data.bin"), [1, 2, 3], TestContext.CancellationToken);
+        var storage = Path.Join(_root, "store");
+        await using var store = new BlobStagingStore(storage, new RuntimeLimits(), 16 * 1024 * 1024);
+        var executor = new BuiltinFsToolExecutor(blobStore: store);
+        var result = await ExecuteAsync(executor, BuiltinToolRegistry.FileAttachToolId,
+            $$"""{"path":"data.bin","expectedHash":"{{new string('0', 64)}}"}""", CreatePermission());
+        Assert.IsFalse(result.Success);
+        Assert.IsNull(result.ResultBlob);
+        Assert.IsEmpty(Directory.GetFiles(Path.Join(storage, "staging")));
+        Assert.IsEmpty(Directory.GetFiles(Path.Join(storage, "blobs")));
     }
 
     [TestMethod]

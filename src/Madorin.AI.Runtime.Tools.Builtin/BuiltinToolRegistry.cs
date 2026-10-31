@@ -14,6 +14,7 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
     public const string FileListToolId = "mcli_fs_list";
     public const string FileStatusToolId = "mcli_fs_stat";
     public const string FileReadToolId = "mcli_fs_read";
+    public const string FileAttachToolId = "mcli_fs_attach";
     public const string FileWriteToolId = "mcli_fs_write";
     public const string FileAppendToolId = "mcli_fs_append";
     public const string DirectoryCreateToolId = "mcli_fs_mkdir";
@@ -74,6 +75,15 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
             "Reads a text file by line range.",
             """{"type":"object","properties":{"path":{"type":"string"},"encoding":{"type":"string","enum":["auto","utf-8","utf-16le","utf-16be","gb2312","gbk","gb18030","ascii","latin1"]},"startLine":{"type":"integer","minimum":1},"endLine":{"type":"integer","minimum":1}},"required":["path","encoding"],"additionalProperties":false}""",
             """{"type":"object","properties":{"content":{"type":"string"},"encoding":{"type":"string"},"codePage":{"type":"integer"},"byteLength":{"type":"integer"},"startLine":{"type":"integer"},"endLine":{"type":"integer"},"totalLines":{"type":"integer"},"sha256":{"type":"string"},"hasBom":{"type":"boolean"},"lineEnding":{"type":"string"},"endsWithNewline":{"type":"boolean"},"truncated":{"type":"boolean"}},"required":["content","encoding","codePage","byteLength","startLine","endLine","totalLines","sha256","hasBom","lineEnding","endsWithNewline","truncated"],"additionalProperties":false}""",
+            Capabilities: ["filesystem.read"],
+            Risk: ToolRiskLevel.SensitiveRead),
+        new(
+            FileAttachToolId,
+            "mcli",
+            "Attach file",
+            "Reads one authorized local file as an attachment. Returns bounded metadata and a separate Blob, without decoding the file as text.",
+            """{"type":"object","properties":{"path":{"type":"string"},"expectedHash":{"type":"string"}},"required":["path"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"fileName":{"type":"string"},"contentType":{"type":"string"},"byteLength":{"type":"integer"},"sha256":{"type":"string"}},"required":["fileName","contentType","byteLength","sha256"],"additionalProperties":false}""",
             Capabilities: ["filesystem.read"],
             Risk: ToolRiskLevel.SensitiveRead),
         new(
@@ -305,7 +315,7 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
     private static readonly IReadOnlyList<ToolDescriptor> Tools = Array.AsReadOnly(
         [.. AdvertisedTools, .. BuiltinToolAliasCatalog.Tools]);
 
-    public string CatalogVersion => "3.5.1";
+    public string CatalogVersion => "3.5.2";
 
     public IReadOnlyList<ToolDescriptor> GetTools() => Tools;
 
