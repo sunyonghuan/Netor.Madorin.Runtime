@@ -11,7 +11,7 @@ public static class SkillResponses
     {
         var providerError = providerCode is null ? null : Obj(("code", S(providerCode)), ("message", S(message)));
         return Obj(("schema_version", S(SkillProtocol.ContractVersion)), ("response_id", S(invocation.ResponseId)), ("status", S("failed")),
-            ("task_id", null), ("task_context", null), ("error", Obj(("code", S(code)), ("message", S(message)), ("provider_error", providerError))),
+            ("task_id", S(invocation.TaskId)), ("task_context", invocation.TaskContext?.DeepClone()), ("error", Obj(("code", S(code)), ("message", S(message)), ("provider_error", providerError))),
             ("provider_metadata", ProviderMetadata(provider, invocation)),
             ("ignored_parameters", invocation.IgnoredParameters.DeepClone()), ("converted_parameters", invocation.ConvertedParameters.DeepClone()));
     }
@@ -25,12 +25,12 @@ public static class SkillResponses
 
     public static JsonObject Generated(string provider, string mediaType, SkillInvocation invocation, JsonArray artifacts) =>
         Obj(("schema_version", S(SkillProtocol.ContractVersion)), ("response_id", S(invocation.ResponseId)), ("status", S("success")),
-            ("task_id", null), ("task_context", null), ("type", S(mediaType)), ("artifacts", artifacts), ("errors", new JsonArray()),
+            ("task_id", S(invocation.TaskId)), ("task_context", invocation.TaskContext?.DeepClone()), ("type", S(mediaType)), ("artifacts", artifacts), ("errors", new JsonArray()),
             ("provider_metadata", ProviderMetadata(provider, invocation)), ("ignored_parameters", invocation.IgnoredParameters.DeepClone()), ("converted_parameters", invocation.ConvertedParameters.DeepClone()));
 
     public static JsonObject ProviderMetadata(string provider, SkillInvocation invocation) =>
         Obj(("provider", S(provider)), ("model", S(invocation.Model)), ("request_id", S(invocation.ProviderRequestId)),
-            ("generation_time_ms", N(invocation.ElapsedMilliseconds)), ("remote_status", null), ("remote_cancellation", null));
+            ("generation_time_ms", N(invocation.ElapsedMilliseconds)), ("remote_status", S(invocation.RemoteStatus)), ("remote_cancellation", S(invocation.RemoteCancellation)));
 
     public static JsonObject NoSideEffects() => Obj(("network_request", B(false)), ("output_files_written", B(false)), ("directories_created", B(false)));
 

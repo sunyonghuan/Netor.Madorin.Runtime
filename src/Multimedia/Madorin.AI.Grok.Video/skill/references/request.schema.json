@@ -1,0 +1,47 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version"],
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "request_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "task": { "type": "string" },
+    "model": { "type": "string" },
+    "prompt": { "type": "string" },
+    "attachments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "role", "source"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "role": { "type": "string", "enum": ["reference", "source", "first_frame", "last_frame"] },
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "oneOf": [{ "required": ["path"] }, { "required": ["uri"] }],
+            "properties": {
+              "path": { "type": "string", "minLength": 1 },
+              "uri": { "type": "string", "minLength": 1, "sensitive": true }
+            }
+          }
+        }
+      }
+    },
+    "parameters": { "type": "object", "additionalProperties": true },
+    "provider_parameters": { "type": "object", "additionalProperties": { "type": "object" } },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "output_dir": { "type": "string", "minLength": 1 },
+        "timeout": { "type": "integer", "minimum": 1 },
+        "try_run": { "type": "boolean" },
+        "verbose": { "type": "boolean" },
+        "no_wait": { "type": "boolean" },
+        "output_format": { "type": "string", "const": "json" }
+      }
+    }
+  }
+}

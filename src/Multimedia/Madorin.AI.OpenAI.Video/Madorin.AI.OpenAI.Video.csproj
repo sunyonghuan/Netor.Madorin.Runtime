@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>skill-openai-video</AssemblyName>
+    <RootNamespace>Madorin.AI.OpenAI.Video</RootNamespace>
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <Version>0.1.0</Version>
+    <SkillContractVersion>1.0</SkillContractVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Madorin.AI.Multimedia.Core/Madorin.AI.Multimedia.Core.csproj" />
+    <InternalsVisibleTo Include="Madorin.AI.Multimedia.Tests" />
+    <EmbeddedResource Include="skill/references/request.schema.json" LogicalName="Madorin.AI.OpenAI.Video.request.schema.json" />
+    <Content Include="tools/$(RuntimeIdentifier)/**/*" CopyToPublishDirectory="PreserveNewest" Link="%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+  <Target Name="CheckVideoTools" BeforeTargets="Publish" Condition="'$(RuntimeIdentifier)' != ''">
+    <PropertyGroup><VideoToolExtension Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('win-'))">.exe</VideoToolExtension></PropertyGroup>
+    <Error Condition="!Exists('tools/$(RuntimeIdentifier)/ffmpeg$(VideoToolExtension)') Or !Exists('tools/$(RuntimeIdentifier)/ffprobe$(VideoToolExtension)') Or !Exists('tools/$(RuntimeIdentifier)/LICENSE.txt')" Text="Video release requires ffmpeg, ffprobe and LICENSE.txt under tools/$(RuntimeIdentifier)." />
+  </Target>
+</Project>

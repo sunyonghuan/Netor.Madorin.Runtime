@@ -1,0 +1,32 @@
+{
+    "mode":  "approved-findings-revision",
+    "dimensions_done":  [
+                            "D1",
+                            "D2",
+                            "D3",
+                            "D4",
+                            "D5",
+                            "D6",
+                            "D7",
+                            "D8",
+                            "D9",
+                            "D10"
+                        ],
+    "workdir":  "E:\\Netor.me\\Madorin\\Netor.Madorin.Ai.Runtime\\图片视频",
+    "round":  1,
+    "d11":  "N/A: no implemented multimedia CLI",
+    "phase":  3,
+    "target":  "docs/图标视频/策划/技能CLI设计方案.md",
+    "dimensions_pending":  [
+
+                           ],
+    "approved":  [
+                     "F01 authority correction",
+                     "F02",
+                     "F03",
+                     "F04",
+                     "F05",
+                     "F06",
+                     "downstream consistency"
+                 ]
+}

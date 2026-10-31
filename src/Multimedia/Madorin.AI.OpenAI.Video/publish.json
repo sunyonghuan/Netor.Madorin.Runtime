@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "skill_name": "skill-openai-video",
+  "project": "Madorin.AI.OpenAI.Video.csproj",
+  "executable": "skill-openai-video",
+  "platforms": [
+    "win-x64",
+    "win-arm64",
+    "linux-x64",
+    "linux-arm64",
+    "osx-x64",
+    "osx-arm64"
+  ]
+}

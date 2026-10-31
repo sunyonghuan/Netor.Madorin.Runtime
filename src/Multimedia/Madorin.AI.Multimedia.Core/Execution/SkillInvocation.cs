@@ -40,7 +40,12 @@ public sealed class SkillInvocation : IAsyncDisposable
     }
     public string? Model { get; set; }
     public string? ProviderRequestId { get; set; }
+    public string? TaskId { get; set; }
+    public JsonObject? TaskContext { get; set; }
+    public string? RemoteStatus { get; set; }
+    public string? RemoteCancellation { get; set; }
     public bool TryRun { get; set; }
+    public bool Verbose { get; set; }
     public bool CredentialPresent { get; set; }
     public JsonArray IgnoredParameters { get; } = [];
     public JsonArray ConvertedParameters { get; } = [];

@@ -10,5 +10,7 @@
     <ProjectReference Include="../../src/Multimedia/Madorin.AI.Multimedia.Core/Madorin.AI.Multimedia.Core.csproj" />
     <ProjectReference Include="../../src/Multimedia/Madorin.AI.OpenAI.Image/Madorin.AI.OpenAI.Image.csproj" />
     <ProjectReference Include="../../src/Multimedia/Madorin.AI.Grok.Image/Madorin.AI.Grok.Image.csproj" />
+    <ProjectReference Include="../../src/Multimedia/Madorin.AI.OpenAI.Video/Madorin.AI.OpenAI.Video.csproj" />
+    <ProjectReference Include="../../src/Multimedia/Madorin.AI.Grok.Video/Madorin.AI.Grok.Video.csproj" />
   </ItemGroup>
 </Project>
