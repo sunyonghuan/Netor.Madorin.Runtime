@@ -105,13 +105,6 @@ public static class OpenAIMessageMapper
 
     private static object ToResultObject(ToolResultContentBlock result)
     {
-        if (result.Content is [TextContentBlock text])
-        {
-            return text.Text;
-        }
-
-        return JsonSerializer.SerializeToElement(
-            result.Content,
-            RuntimeJsonContext.Default.ContentBlockArray);
+        return ProviderToolResultMapper.ToTextOrJson(result);
     }
 }

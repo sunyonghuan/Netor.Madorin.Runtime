@@ -210,11 +210,8 @@ public static class ProviderRequestCompatibilityProjector
                 case ReasoningContentBlock:
                     diagnostics.FilteredContentBlockCount++;
                     break;
-                case BlobRefContentBlock blob when IsBlobSupported(capabilities, blob.Blob.ContentType):
-                    output.Add(block);
-                    break;
                 case BlobRefContentBlock:
-                    diagnostics.FilteredContentBlockCount++;
+                    output.Add(block);
                     break;
                 case ToolCallContentBlock when preserveToolProtocol:
                     output.Add(block);
@@ -311,9 +308,6 @@ public static class ProviderRequestCompatibilityProjector
                 ReasoningContentBlock when !capabilities.Reasoning => "reasoning",
                 ToolCallContentBlock or ToolResultContentBlock when !capabilities.ToolCalling =>
                     "tool_calling",
-                BlobRefContentBlock blob when !IsBlobSupported(
-                    capabilities,
-                    blob.Blob.ContentType) => GetBlobCapability(blob.Blob.ContentType),
                 _ => null
             };
             if (unsupportedCapability is not null)
@@ -326,28 +320,6 @@ public static class ProviderRequestCompatibilityProjector
                 ValidateCurrentContent(result.Content, capabilities);
             }
         }
-    }
-
-    private static bool IsBlobSupported(
-        ProviderCapabilities capabilities,
-        string contentType) =>
-        GetBlobCapability(contentType) switch
-        {
-            "vision" => capabilities.Vision,
-            "audio" => capabilities.Audio,
-            _ => capabilities.Files
-        };
-
-    private static string GetBlobCapability(string contentType)
-    {
-        if (contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
-        {
-            return "vision";
-        }
-
-        return contentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase)
-            ? "audio"
-            : "files";
     }
 
     private static RuntimeProviderException CreateCapabilityException(string capability) =>

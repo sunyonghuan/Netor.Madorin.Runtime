@@ -36,13 +36,15 @@ public sealed class DeepSeekProviderAdapter : IRuntimeProviderAdapter, IDisposab
         new(StringComparer.Ordinal);
 
     private readonly HttpClient _httpClient;
+    private readonly IProviderBlobResolver? _blobResolver;
 
     public DeepSeekProviderAdapter(
         string baseUrl,
         string apiKey,
         ILoggerFactory? loggerFactory = null,
         IReadOnlyList<ProviderModel>? models = null,
-        string providerId = "deepseek")
+        string providerId = "deepseek",
+        IProviderBlobResolver? blobResolver = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(baseUrl);
         ArgumentException.ThrowIfNullOrWhiteSpace(apiKey);
@@ -51,6 +53,7 @@ public sealed class DeepSeekProviderAdapter : IRuntimeProviderAdapter, IDisposab
         _loggerFactory = loggerFactory ?? Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance;
         ProviderId = providerId;
         Models = models ?? DeepSeekModelCatalog.All;
+        _blobResolver = blobResolver;
 
         // ── HTTP 管道：DeepSeekOverrideHandler → 实际 HTTP 发送 ──────────────
         var overrideHandler = new DeepSeekOverrideHandler(
@@ -111,7 +114,27 @@ public sealed class DeepSeekProviderAdapter : IRuntimeProviderAdapter, IDisposab
             FlattenContent(request.Messages),
             effectiveCt).ConfigureAwait(false);
         var chatClient = _chatClientFactory(request.ModelId);
-        var messages = ConvertMessages(request.Messages, request.Tools);
+        ChatMessage[]? messages = null;
+        RuntimeError? attachmentFailure = null;
+        try
+        {
+            messages = await ConvertMessagesAsync(request.Messages, request.Tools, effectiveCt).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (effectiveCt.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            attachmentFailure = ex is RuntimeProviderException runtimeException
+                ? runtimeException.Error : ProviderErrorFactory.Create("DeepSeek", ex);
+        }
+
+        if (attachmentFailure is not null)
+        {
+            yield return new InvocationFailedProviderEvent(request.InvocationId, attachmentFailure);
+            yield break;
+        }
         var options = new ChatOptions
         {
             ModelId = request.ModelId,
@@ -129,7 +152,7 @@ public sealed class DeepSeekProviderAdapter : IRuntimeProviderAdapter, IDisposab
         await foreach (var update in MafSkillsAgentFactory.CreateResponseStream(
                                chatClient,
                                request,
-                               messages,
+                               messages!,
                                options,
                                effectiveCt)
                            .ConfigureAwait(false))
@@ -190,9 +213,10 @@ public sealed class DeepSeekProviderAdapter : IRuntimeProviderAdapter, IDisposab
         }
     }
 
-    private static ChatMessage[] ConvertMessages(
+    private async ValueTask<ChatMessage[]> ConvertMessagesAsync(
         RuntimeProviderMessage[] source,
-        ToolDescriptor[]? tools)
+        ToolDescriptor[]? tools,
+        CancellationToken ct)
     {
         var messages = new List<ChatMessage>(source.Length);
         foreach (var message in source)
@@ -220,7 +244,11 @@ public sealed class DeepSeekProviderAdapter : IRuntimeProviderAdapter, IDisposab
                     case ToolResultContentBlock toolResult:
                         content.Add(new FunctionResultContent(
                             toolResult.CallId,
-                            ConvertToolResult(toolResult)));
+                            await ProviderToolResultMapper.ToContentAsync(
+                                toolResult, ResolveBlobAsync, ct).ConfigureAwait(false)));
+                        break;
+                    case BlobRefContentBlock blob:
+                        content.Add(await ResolveBlobAsync(blob.Blob, ct).ConfigureAwait(false));
                         break;
                     default:
                         throw new InvalidOperationException(
@@ -231,8 +259,11 @@ public sealed class DeepSeekProviderAdapter : IRuntimeProviderAdapter, IDisposab
             messages.Add(new ChatMessage(ConvertRole(message.Role), content));
         }
 
-        return [.. messages];
+        return ProviderToolResultMapper.ProjectForChatCompletions([.. messages]);
     }
+
+    private ValueTask<DataContent> ResolveBlobAsync(BlobReference blob, CancellationToken ct) =>
+        ProviderBlobContentResolver.ResolveAsync(_blobResolver, blob, ct);
 
     private static List<AITool>? CreateTools(ToolDescriptor[]? tools)
     {
@@ -281,18 +312,6 @@ public sealed class DeepSeekProviderAdapter : IRuntimeProviderAdapter, IDisposab
         }
 
         return converted;
-    }
-
-    private static object ConvertToolResult(ToolResultContentBlock toolResult)
-    {
-        if (toolResult.Content is [TextContentBlock text])
-        {
-            return text.Text;
-        }
-
-        return JsonSerializer.SerializeToElement(
-            toolResult.Content,
-            RuntimeJsonContext.Default.ContentBlockArray);
     }
 
     private static string ResolveToolId(ToolDescriptor[]? tools, string name) =>

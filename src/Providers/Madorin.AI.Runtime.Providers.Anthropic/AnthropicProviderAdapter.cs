@@ -1,7 +1,6 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Runtime.CompilerServices;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -423,7 +422,8 @@ public sealed class AnthropicProviderAdapter :
                     case ToolResultContentBlock toolResult:
                         content.Add(new FunctionResultContent(
                         toolResult.CallId,
-                        ConvertToolResult(toolResult)));
+                        await ProviderToolResultMapper.ToContentAsync(
+                            toolResult, ResolveBlobAsync, ct).ConfigureAwait(false)));
                         break;
                     case BlobRefContentBlock blobReference:
                         content.Add(await ResolveBlobAsync(blobReference.Blob, ct).ConfigureAwait(false));
@@ -440,38 +440,8 @@ public sealed class AnthropicProviderAdapter :
         return [.. messages];
     }
 
-    private async ValueTask<DataContent> ResolveBlobAsync(
-        BlobReference blob,
-        CancellationToken ct)
-    {
-        if (_blobResolver is null)
-        {
-            throw new InvalidOperationException(
-                $"Blob '{blob.BlobId}' cannot be sent because no Provider Blob resolver is configured.");
-        }
-
-        var resolved = await _blobResolver.ResolveAsync(blob, ct).ConfigureAwait(false);
-        if (resolved.Data.Length != blob.Length)
-        {
-            throw new InvalidDataException($"Blob '{blob.BlobId}' length does not match its descriptor.");
-        }
-
-        var sha256 = Convert.ToHexString(SHA256.HashData(resolved.Data.Span)).ToLowerInvariant();
-        if (!string.Equals(sha256, blob.Sha256, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidDataException($"Blob '{blob.BlobId}' SHA-256 does not match its descriptor.");
-        }
-
-        if (!string.Equals(resolved.ContentType, blob.ContentType, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidDataException($"Blob '{blob.BlobId}' content type does not match its descriptor.");
-        }
-
-        return new DataContent(resolved.Data, resolved.ContentType)
-        {
-            Name = resolved.FileName
-        };
-    }
+    private ValueTask<DataContent> ResolveBlobAsync(BlobReference blob, CancellationToken ct) =>
+        ProviderBlobContentResolver.ResolveAsync(_blobResolver, blob, ct);
 
     private static ChatRole ConvertRole(string role) => role switch
     {
@@ -499,18 +469,6 @@ public sealed class AnthropicProviderAdapter :
         }
 
         return converted;
-    }
-
-    private static object ConvertToolResult(ToolResultContentBlock toolResult)
-    {
-        if (toolResult.Content is [TextContentBlock text])
-        {
-            return text.Text;
-        }
-
-        return JsonSerializer.SerializeToElement(
-            toolResult.Content,
-            RuntimeJsonContext.Default.ContentBlockArray);
     }
 
     private static IEnumerable<RuntimeProviderEvent> MapUpdate(
@@ -698,6 +656,11 @@ public sealed class AnthropicProviderAdapter :
 
     private static RuntimeError CreateProviderError(Exception exception)
     {
+        if (exception is RuntimeProviderException runtimeException)
+        {
+            return runtimeException.Error;
+        }
+
         var statusCode = exception switch
         {
             AnthropicMinimalException anthropicException when anthropicException.StatusCode > 0 =>
