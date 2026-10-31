@@ -71,6 +71,71 @@ public sealed class WorkerBlobInputTests
     }
 
     [TestMethod]
+    [DataRow("OpenAI", "openai", "application/pdf", "input_file")]
+    [DataRow("Anthropic", "anthropic", "application/pdf", "document")]
+    [DataRow("OpenAI Compatible", "openai-compatible", "application/pdf", "file")]
+    [DataRow("Azure OpenAI", "azure-openai", "application/pdf", "file")]
+    [DataRow("Aliyun", "aliyun", "application/pdf", "file")]
+    [DataRow("Gemini", "gemini", "application/pdf", "file")]
+    [DataRow("GLM", "glm", "application/pdf", "file")]
+    [DataRow("Ollama", "ollama", "application/pdf", "file")]
+    [DataRow("Kimi", "kimi", "application/pdf", "file")]
+    [DataRow("DeepSeek", "deepseek", "application/pdf", "file")]
+    [DataRow("OpenAI Compatible", "openai-compatible", "audio/wav", "input_audio")]
+    [DataRow("Azure OpenAI", "azure-openai", "audio/wav", "input_audio")]
+    [DataRow("Aliyun", "aliyun", "audio/wav", "input_audio")]
+    [DataRow("Gemini", "gemini", "audio/wav", "input_audio")]
+    [DataRow("GLM", "glm", "audio/wav", "input_audio")]
+    [DataRow("Ollama", "ollama", "audio/wav", "input_audio")]
+    [DataRow("Kimi", "kimi", "audio/wav", "input_audio")]
+    [DataRow("DeepSeek", "deepseek", "audio/wav", "input_audio")]
+    [DataRow("Aliyun", "aliyun", "video/mp4", "video_url")]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task Workers_ResolveOtherMediaWithNativeHttpPart(
+        string protocol, string slug, string mime, string expectedType)
+    {
+        var kind = slug == "openai" ? ProviderAdapterKind.OpenAI
+            : slug == "anthropic" ? ProviderAdapterKind.Anthropic : ProviderAdapterKind.OpenAICompatible;
+        await using var server = await FakeProviderServer.StartAsync(
+            _ => ProviderProtocolScripts.NormalText(kind), TestContext.CancellationToken);
+        await using var supervisor = new ProviderWorkerSupervisor(AppContext.BaseDirectory);
+        var connection = new ProviderConnectionConfig("worker-media", protocol,
+            new Uri(server.BaseAddress, "v1").AbsoluteUri, ProviderAdapterTestFactory.ApiKey,
+            Models: [ProviderAdapterTestFactory.ModelId], Capabilities: new(Streaming: true));
+        var bytes = RandomNumberGenerator.GetBytes(300_001);
+        var blob = Reference(bytes) with { ContentType = mime };
+        using var args = JsonDocument.Parse("{}");
+        var opens = 0;
+        var request = ProviderAdapterTestFactory.CreateRequest() with
+        {
+            ProviderId = connection.ProviderId,
+            InvocationId = Guid.NewGuid().ToString("N"),
+            Messages = [new("user", [new TextContentBlock("inspect")]),
+                new("assistant", [new ToolCallContentBlock("c", "attach", "attach", args.RootElement.Clone())]),
+                new("tool", [new ToolResultContentBlock("c", "attach", true, [new BlobRefContentBlock(blob)])])],
+            OpenBlobRead = (reference, ct) =>
+            {
+                Assert.AreEqual(blob, reference);
+                ct.ThrowIfCancellationRequested();
+                Interlocked.Increment(ref opens);
+                return Task.FromResult<Stream>(new MemoryStream(bytes, writable: false));
+            }
+        };
+        var events = await ProviderAdapterTestFactory.CollectAsync(
+            supervisor.CreateAdapter(protocol, connection), request, TestContext.CancellationToken);
+        Assert.IsEmpty(events.OfType<InvocationFailedProviderEvent>(),
+            string.Join(" | ", events.OfType<InvocationFailedProviderEvent>().Select(e => e.Error.Message)));
+        Assert.ContainsSingle(events.OfType<InvocationCompletedProviderEvent>());
+        Assert.AreEqual(1, opens);
+        var captured = Assert.ContainsSingle(server.Requests);
+        using var body = JsonDocument.Parse(captured.Body);
+        var encoded = FindMedia(body.RootElement, expectedType);
+        Assert.IsNotNull(encoded);
+        CollectionAssert.AreEqual(bytes, Convert.FromBase64String(encoded[(encoded.IndexOf(',') + 1)..]));
+        Assert.DoesNotContain(blob.BlobId, captured.Body, StringComparison.Ordinal);
+    }
+
+    [TestMethod]
     [DataRow("generation")]
     [DataRow("scope")]
     [DataRow("hash")]
@@ -307,6 +372,43 @@ public sealed class WorkerBlobInputTests
 
     private static BlobReference Reference(byte[] bytes) => new("private-test-blob", bytes.Length,
         Convert.ToHexString(SHA256.HashData(bytes)), "image/png", "run:test", DateTimeOffset.UtcNow.AddHours(1));
+
+    private static string? FindMedia(JsonElement node, string type)
+    {
+        if (node.ValueKind == JsonValueKind.Object)
+        {
+            if (node.TryGetProperty("type", out var kind) && kind.GetString() == type)
+            {
+                return type switch
+                {
+                    "document" => node.GetProperty("source").GetProperty("data").GetString(),
+                    "input_file" => node.GetProperty("file_data").GetString(),
+                    "file" => node.GetProperty("file").GetProperty("file_data").GetString(),
+                    "input_audio" => node.GetProperty("input_audio").GetProperty("data").GetString(),
+                    "video_url" => node.GetProperty("video_url").GetProperty("url").GetString(),
+                    _ => null
+                };
+            }
+            foreach (var property in node.EnumerateObject())
+            {
+                if (FindMedia(property.Value, type) is { } found)
+                {
+                    return found;
+                }
+            }
+        }
+        else if (node.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var child in node.EnumerateArray())
+            {
+                if (FindMedia(child, type) is { } found)
+                {
+                    return found;
+                }
+            }
+        }
+        return null;
+    }
 
     private static string? FindImage(JsonElement value)
     {

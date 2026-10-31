@@ -157,3 +157,14 @@ dotnet test tests/Madorin.AI.Runtime.Provider.Tests/Madorin.AI.Runtime.Provider.
 Aliyun 第一次运行到 90 秒取消；排查发现 HistoryMessageCount 没有跨 IPC 传递，本批补入 Invoke 控制字段并让 Worker 使用现有历史兼容投影。对已生成的历史 reasoning 可投影，对本轮 reasoning 仍执行原校验，新增测试验证两种情况，未全局关闭 reasoning 能力门禁。
 
 这组结果取代“Worker 永远缺 Resolver”的现状描述，前面第 1-6 节仍保留历史时间点结论。十家 Worker 的模拟装配测试与五条真实账号路线分开记；输出附件、其他模态、正式 AOT 与发布包兼容尚未验收。
+
+## 8. PDF、音频、视频输入增量与真实端点
+
+用户确认视频与图片应复用 Blob 分块，但仍需对每家接口验证原生 part；代码新增 route 级媒体 codec，保留 Blob 通道不变。阿里云官方[图像与视频理解](https://help.aliyun.com/zh/model-studio/vision)要求直接传视频时使用 `video_url.url`，Base64 data URI 编码后的字符串小于 10 MB，故仅阿里云 Chat route 为 MP4 使用该扩展，写入 SDK 原生 JSON patch，视频不进入普通文本或 Worker Invoke JSON。相应大小限制在读取 Blob 前拒绝，未替用户维护模型能力黑名单。
+
+- 进程内协议模拟：`ProviderMediaAttachmentTests` 20 通过，包含 PDF/MP3/WAV/MP4 字节还原、顶层与工具续调、缺 codec 明确拒绝、阿里云视频大小拒绝。十家 Worker 子进程媒体测试 19 通过：PDF 十家、Chat WAV 八家、阿里云 MP4；300,001 字节均经分块读取在模拟 HTTP 的附件字段还原。最终 Release 联合回归 140 通过、0 失败，TRX `attachment-media-final.trx`；编译零警告、零错误。模拟端点不是厂商已支持所有这些模态的证据。
+- 真实 CLI，隔离目录 `obj/attachment-media-cli-20261031`：`axis-code(gpt)`/`gpt-5.6-sol` 调用 `mcli_fs_attach(sample.pdf)`，443 字节、SHA-256 `C4E981AD759043D19469EA9A15133D62586EF208973CBBF7EBAA2C2FEBAA216D`，最终 `run.completed` 并读出页面 `Attachment PDF Test`；证据 `openai-pdf.jsonl` 和工作区历史。
+- 阿里云真实 `qwen3.8-max` 的 `mcli_fs_attach(sample.mp4)` 3 秒 MP4、9,335 字节、SHA-256 `A6AC23A3A0E8539EF76076CE471FDDDF53703E91CFEE55272DEE2A80AB2CF052`，`run.completed`，模型回复包含同一静态画面的白底黑色交织图案，区别于元数据；证据 `aliyun-video-visual.jsonl`、权威历史。描述正确度不是独立验收门禁，但可用来交叉检验模型看到帧内容。
+- 失败也保留：第一次 1 秒视频、7,667 字节返回 HTTP 400（`aliyun-video.jsonl`），补至 3 秒后成功。阿里云[官方视频限制](https://help.aliyun.com/zh/model-studio/vision/)写明 Qwen3.8 系列视频时长至少 2 秒，因此首轮失败与此限制一致；由于 SDK 只呈现泛化 HTTP 400，未捕获服务端具体错误体，不声称已唯一确定成因。阿里云 `qwen3.8-max` 的 2 秒 WAV（64,078 字节）工具续调返回 HTTP 400（`aliyun-audio.jsonl`）；当前 `input_audio` 模拟请求字段不能视为该模型/端点支持音频。原始请求/密钥未写入文档或仓库。
+
+尚未完成其余真实厂商 PDF/音频/视频矩阵与 Provider 输出写回；步骤 04 输出、02 生命周期和 03 外部授权仍开放。

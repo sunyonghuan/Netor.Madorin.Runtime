@@ -28,6 +28,7 @@ public sealed class OpenAIProviderAdapter :
         new(StringComparer.Ordinal);
     private readonly IProviderBlobResolver? _blobResolver;
     private readonly bool _projectToolAttachmentsForChat;
+    private readonly bool _useVideoUrlContent;
     private readonly ApiKeyCredential? _credential;
     private readonly HttpClient? _ownedHttpClient;
 
@@ -44,12 +45,14 @@ public sealed class OpenAIProviderAdapter :
         Func<string, IChatClient> chatClientFactory,
         IReadOnlyList<ProviderModel>? models = null,
         IProviderBlobResolver? blobResolver = null,
-        bool projectToolAttachmentsForChat = false)
+        bool projectToolAttachmentsForChat = false,
+        bool useVideoUrlContent = false)
     {
         ArgumentNullException.ThrowIfNull(chatClientFactory);
         _chatClientFactory = chatClientFactory;
         _blobResolver = blobResolver;
         _projectToolAttachmentsForChat = projectToolAttachmentsForChat;
+        _useVideoUrlContent = useVideoUrlContent;
         ProviderId = "openai";
         Models = models ?? [];
     }
@@ -463,8 +466,20 @@ public sealed class OpenAIProviderAdapter :
             : [.. messages];
     }
 
-    private ValueTask<DataContent> ResolveBlobAsync(BlobReference blob, CancellationToken ct) =>
-        ProviderBlobContentResolver.ResolveAsync(_blobResolver, blob, ct);
+    private async ValueTask<DataContent> ResolveBlobAsync(BlobReference blob, CancellationToken ct)
+    {
+        var route = _useVideoUrlContent ? ProviderAttachmentRoute.AliyunChatCompletions
+            : _projectToolAttachmentsForChat ? ProviderAttachmentRoute.OpenAIChatCompletions
+            : ProviderAttachmentRoute.OpenAIResponses;
+        var content = await ProviderBlobContentResolver.ResolveAsync(_blobResolver, blob, route, ct)
+            .ConfigureAwait(false);
+        if (_useVideoUrlContent && content.HasTopLevelMediaType("video"))
+        {
+            content.RawRepresentation = Protocol.OpenAIChatVideoContent.Create(content);
+        }
+
+        return content;
+    }
 
     private static ChatRole ConvertRole(string role) => role switch
     {

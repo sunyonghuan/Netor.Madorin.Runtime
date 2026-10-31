@@ -155,7 +155,8 @@ public sealed class OpenAICompatibleProviderAdapter :
                 id => openAIClient.GetChatClient(id).AsIChatClient()),
             Models,
             blobResolver,
-            projectToolAttachmentsForChat: true);
+            projectToolAttachmentsForChat: true,
+            useVideoUrlContent: options.UseVideoUrlContent);
     }
 
     public string ProviderId { get; }

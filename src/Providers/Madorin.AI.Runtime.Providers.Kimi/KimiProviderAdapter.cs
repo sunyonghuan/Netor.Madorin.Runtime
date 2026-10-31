@@ -272,7 +272,7 @@ public sealed class KimiProviderAdapter : IRuntimeProviderAdapter
     }
 
     private ValueTask<DataContent> ResolveBlobAsync(BlobReference blob, CancellationToken ct) =>
-        ProviderBlobContentResolver.ResolveAsync(_blobResolver, blob, ct);
+        ProviderBlobContentResolver.ResolveAsync(_blobResolver, blob, ProviderAttachmentRoute.OpenAIChatCompletions, ct);
 
     private List<AITool>? CreateTools(ToolDescriptor[]? tools)
     {

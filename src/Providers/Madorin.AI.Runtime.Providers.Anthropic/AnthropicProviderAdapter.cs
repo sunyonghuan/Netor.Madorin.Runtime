@@ -441,7 +441,7 @@ public sealed class AnthropicProviderAdapter :
     }
 
     private ValueTask<DataContent> ResolveBlobAsync(BlobReference blob, CancellationToken ct) =>
-        ProviderBlobContentResolver.ResolveAsync(_blobResolver, blob, ct);
+        ProviderBlobContentResolver.ResolveAsync(_blobResolver, blob, ProviderAttachmentRoute.AnthropicMessages, ct);
 
     private static ChatRole ConvertRole(string role) => role switch
     {

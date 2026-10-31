@@ -1,6 +1,6 @@
 # 执行步骤 05：十个 Provider 的附件输入
 
-> 状态：待执行 · 0%。前置：[01 P0](./01-P0-工具结果附件映射与上下文保护.md)、[04 Worker Blob 管道](./04-ProviderWorker双向Blob管道.md)。
+> 状态：输入媒体子任务进行中；十家真实端点与输出尚未验收。前置：[01 P0](./01-P0-工具结果附件映射与上下文保护.md)、[04 Worker Blob 管道](./04-ProviderWorker双向Blob管道.md)。
 
 ## 1. 目标
 
@@ -59,3 +59,11 @@
 最新补测：用户确认 axis-code 欠费已充值，并指定视觉测试选型后，7 个连接的进程内顶层/工具结果 PNG 原生字段、原始字节及端点接受均通过；识别描述不准确仅作备注。Aliyun 用接口实际返回的 `qwen3.8-max`，DeepSeek 用 `deepseek-v4-flash`，Anthropic 用 Opus 4.6/4.8。此前错图不能直接归为映射错误，按[记录第 6 节](./验证记录-20261031-CLI与真实Provider附件.md)修订当前结论。CLI Worker 链路仍未通过，输出及其他模态未测，本步骤状态不变。
 
 Worker 后续修复：输入分块桥与十家 Resolver 装配已实现，五条真实 CLI PNG 工具续调成功，见[记录第 7 节](./验证记录-20261031-CLI与真实Provider附件.md)。这替代上一时间点的 CLI 输入失败结论；其他模态、全十家真实账号及输出仍未验证。
+
+2026-10-31 媒体 codec 增量（进行中）：Blob Store/Worker `blob.read/chunk` 不按图像、音频、视频分别实现；完成输入后仍须经过当前 Adapter 的 SDK/API 原生内容转换，不能把二进制 Blob 引用当文本 JSON。已去除工具结果映射的全局图片-only 拦截，改为依 API route 选择有实现的 MIME codec：OpenAI Responses 图片/PDF；Anthropic Messages 图片/PDF；OpenAI Chat-compatible 图片/PDF/MP3/WAV；Aliyun Chat 在上述基础上增加官方 `video_url` MP4 扩展。其他媒体/路线仍在发 HTTP 前明确报缺 codec，不由模型手填能力 flags 决定。协议模拟与真实端点验证需继续补测，不能将代码已映射直接标为支持。
+
+本批协议模拟已验证 19 项：PDF 的 OpenAI Responses/Anthropic/Chat（含工具结果）、Chat WAV/MP3 及 Aliyun MP4 顶层/工具结果均在原生 part 还原原字节；无 codec 的媒体在 HTTP 前失败。Aliyun 扩展最初用 SDK 反序列化未知类型被本地拒绝，现改用 SDK `JsonPatch` 原生根字段，模拟 HTTP 均已发出且视频与工具文本分离。尚缺十个 Worker 逐家媒体测试与真实厂商视频/音频/PDF 验证，不能把协议模拟结果外推为厂商端点支持。
+
+Worker 补测：十个独立子进程 PDF + 八个 Chat WAV + Aliyun MP4，共 19 项，各用 300,001 字节分块输入，在 Fake HTTP 的原生附件字段还原字节并核对 BlobId 不进入 HTTP 正文。此项关闭“Worker 逐家媒体模拟未测”，但真实厂商音视频/PDF 接受度、返回附件、别的媒体格式仍待逐项验证。
+
+真实端点增量见[记录第 8 节](./验证记录-20261031-CLI与真实Provider附件.md)：axis-code(gpt)/gpt-5.6-sol PDF 工具续调成功读取页面文字；Aliyun/qwen3.8-max 3 秒 MP4 工具续调成功描述帧画面。Aliyun 的 1 秒 MP4、WAV 均返回真实 HTTP 400，原因/所需协议或模型路线未定，不把 SDK 的 input_audio 结构模拟成功当作阿里云该端点实际音频支持。状态仍进行中，未验收其余厂商和 Provider 输出。

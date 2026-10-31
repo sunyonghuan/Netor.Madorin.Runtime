@@ -72,3 +72,7 @@
 - 输出 Blob write sink/frames 未实现；本步骤仍不能标记双向完成。
 - 非图片 codec、SDK 峰值内存采样、Worker kill/half-close 故障矩阵、恶意帧压力与正式 AOT 发布/manifest 仍待完成；不宣称全格式或全厂商真实输出通过。
 - 本批真实 CLI 证明 PNG 输入主业务链路；02 的元数据归属/保留/Invocation 配额、03 的外部 Grant 专项验收仍保留，未扩大文件授权。
+
+2026-10-31 媒体输入分层补记：Worker 输入分块帧与 BlobStore 对媒体字节通用，视频不需要另发 JSON 二进制；Provider 的 HTTP 请求格式仍按步骤 05 的具体 route 转换。音视频和 PDF 尚未做各 Worker 的模拟/真实接口回归，本步骤的输出写回、故障与 AOT 门禁仍未关闭。
+
+随后补测：真实十个 Worker 子进程分别以 300,001 字节 PDF 分块走完工具结果输入；八家 Chat 路线的 WAV、Aliyun 的 MP4 也各经独立 Worker 完整分块传输，模拟 HTTP 原生字段还原原字节，合计 19 项通过。仍不代表服务端接受该模态，更不代表 Worker 输出写回已完成。

@@ -263,7 +263,7 @@ public sealed class DeepSeekProviderAdapter : IRuntimeProviderAdapter, IDisposab
     }
 
     private ValueTask<DataContent> ResolveBlobAsync(BlobReference blob, CancellationToken ct) =>
-        ProviderBlobContentResolver.ResolveAsync(_blobResolver, blob, ct);
+        ProviderBlobContentResolver.ResolveAsync(_blobResolver, blob, ProviderAttachmentRoute.OpenAIChatCompletions, ct);
 
     private static List<AITool>? CreateTools(ToolDescriptor[]? tools)
     {

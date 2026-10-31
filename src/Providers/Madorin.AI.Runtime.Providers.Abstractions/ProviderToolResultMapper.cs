@@ -42,15 +42,6 @@ public static class ProviderToolResultMapper
                     content.Add(new TextContent(text.Text));
                     break;
                 case BlobRefContentBlock blob:
-                    // P0 只开放已核验的图片 codec；其他媒体在后续步骤逐类接入。
-                    if (!blob.Blob.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
-                    {
-                        throw new RuntimeProviderException(new RuntimeError(
-                            RuntimeErrorCodes.ProviderProtocolError, "protocol",
-                            "No tool-result attachment codec is configured for this media type.",
-                            false, null, Guid.NewGuid().ToString("N")));
-                    }
-
                     content.Add(await resolveBlob(blob.Blob, ct).ConfigureAwait(false));
                     break;
                 case ToolResultContentBlock nested:
@@ -62,7 +53,7 @@ public static class ProviderToolResultMapper
         }
     }
 
-    /// <summary>Chat 协议的工具回执保留原 CallId，图片延后到整组工具回执之后的用户消息。</summary>
+    /// <summary>Chat 协议的工具回执保留原 CallId，附件延后到整组工具回执之后的用户消息。</summary>
     public static ChatMessage[] ProjectForChatCompletions(ChatMessage[] messages)
     {
         var output = new List<ChatMessage>(messages.Length);

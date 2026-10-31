@@ -35,7 +35,8 @@ public sealed class AliyunProviderAdapter :
             Models: models,
             ConfigurationVersion: options.ConfigurationVersion,
             ProbePath: null,
-            MaximumProbeResponseBytes: options.MaximumModelCatalogResponseBytes);
+            MaximumProbeResponseBytes: options.MaximumModelCatalogResponseBytes,
+            UseVideoUrlContent: true);
         _innerAdapter = new OpenAICompatibleProviderAdapter(
             compatibleOptions,
             factory.CreateClient($"{options.ProviderId}.chat"),
