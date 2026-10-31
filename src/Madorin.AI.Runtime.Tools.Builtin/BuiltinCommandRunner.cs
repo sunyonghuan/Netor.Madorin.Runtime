@@ -7,7 +7,7 @@ namespace Madorin.AI.Runtime.Tools.Builtin;
 /// <summary>Resolves the host shell and prepares a bounded, UTF-8 command invocation.</summary>
 internal static class BuiltinCommandRunner
 {
-    private const int MaxScriptBytes = 1024 * 1024;
+    private const int MaxScriptBytes = 8 * 1024;
     private static readonly UTF8Encoding Utf8 = new(false, false);
 
     public static string NormalizeShell(string? requested)
@@ -60,7 +60,7 @@ internal static class BuiltinCommandRunner
         {
             return shell switch
             {
-                "cmd" => ["/d", "/s", "/c", script],
+                "cmd" => ["/d", "/s", "/c", "chcp 65001>nul & " + script],
                 "pwsh" or "powershell" => ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
                     "[Console]::InputEncoding=[Text.UTF8Encoding]::new($false);" +
                     "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);" +

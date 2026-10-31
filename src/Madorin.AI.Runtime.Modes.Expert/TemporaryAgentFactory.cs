@@ -18,7 +18,7 @@ internal static class TemporaryAgentFactory
 
     private static readonly HashSet<string> DangerousTools = new(StringComparer.Ordinal)
     {
-        "mcli_process",
+        "mcli_command",
         "mcli_http",
         "mcli_fs_copy",
         "mcli_fs_move",

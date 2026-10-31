@@ -831,7 +831,7 @@ public sealed class ToolConsentCoordinator
 
     private static bool ExpandsToWorkspace(string toolId) =>
         toolId.StartsWith("mcli_fs_", StringComparison.Ordinal)
-        || string.Equals(toolId, "mcli_process", StringComparison.Ordinal);
+        || string.Equals(toolId, "mcli_command", StringComparison.Ordinal);
 
     private static bool IsRunFileWrite(string toolId) =>
         string.Equals(toolId, "mcli_fs_write", StringComparison.Ordinal);
