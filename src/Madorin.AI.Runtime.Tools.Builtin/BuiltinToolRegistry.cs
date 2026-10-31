@@ -23,7 +23,7 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
     public const string FileDeleteToolId = "mcli_fs_delete";
     public const string FileSearchToolId = "mcli_fs_search";
     public const string FileEditToolId = "mcli_fs_edit";
-    public const string ProcessRunToolId = "mcli_process";
+    public const string CommandToolId = "mcli_command";
     public const string HttpRequestToolId = "mcli_http";
     public const string DelegateToAgentToolId = "mcli_delegate_agent";
     public const string AgentJobCreateToolId = "mcli_agent_job_create";
@@ -147,12 +147,12 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
             Risk: ToolRiskLevel.Write,
             IsIdempotent: false),
         new(
-            ProcessRunToolId,
+            CommandToolId,
             "mcli",
-            "Run process",
-            "Runs an allowed executable.",
-            """{"type":"object","properties":{"fileName":{"type":"string"},"arguments":{"type":"array","items":{"type":"string"}},"workingDirectory":{"type":"string"},"environment":{"type":"object","additionalProperties":{"type":"string"}},"stdin":{"type":"string"}},"required":["fileName"],"additionalProperties":false}""",
-            """{"type":"object","properties":{"exitCode":{"type":"integer"},"stdout":{"type":"string"},"stderr":{"type":"string"},"stdoutTruncated":{"type":"boolean"},"stderrTruncated":{"type":"boolean"}},"required":["exitCode","stdout","stderr","stdoutTruncated","stderrTruncated"],"additionalProperties":false}""",
+            "Run command",
+            "Runs a multi-command script through the host platform shell.",
+            """{"type":"object","properties":{"script":{"type":"string","minLength":1},"shell":{"type":"string","enum":["auto","pwsh","powershell","cmd","bash","zsh","sh"]},"workingDirectory":{"type":"string"},"environment":{"type":"object","additionalProperties":{"type":"string"}},"stdin":{"type":"string"}},"required":["script"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"exitCode":{"type":"integer"},"stdout":{"type":"string"},"stderr":{"type":"string"},"stdoutTruncated":{"type":"boolean"},"stderrTruncated":{"type":"boolean"},"shell":{"type":"string"}},"required":["exitCode","stdout","stderr","stdoutTruncated","stderrTruncated","shell"],"additionalProperties":false}""",
             Capabilities: ["process.execute"],
             Risk: ToolRiskLevel.Process,
             IsIdempotent: false),

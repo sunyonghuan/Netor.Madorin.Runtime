@@ -3,12 +3,12 @@ using Madorin.AI.Runtime.Tools.Abstractions;
 
 namespace Madorin.AI.Runtime.Tools.Builtin;
 
-/// <summary>Executes explicitly allowlisted programs without invoking a command shell.</summary>
-public sealed class BuiltinProcessToolExecutor : IToolExecutor
+/// <summary>Executes a multi-command script through the host platform's shell.</summary>
+public sealed class BuiltinCommandToolExecutor : IToolExecutor
 {
     public bool CanExecute(string toolId) => string.Equals(
         toolId,
-        BuiltinToolRegistry.ProcessRunToolId,
+        BuiltinToolRegistry.CommandToolId,
         StringComparison.Ordinal);
 
     public ValueTask<IPreparedToolExecution> PrepareAsync(
@@ -19,15 +19,14 @@ public sealed class BuiltinProcessToolExecutor : IToolExecutor
         ct.ThrowIfCancellationRequested();
         if (!CanExecute(invocation.ToolId))
         {
-            throw new InvalidOperationException("The process executor cannot execute this tool.");
+            throw new InvalidOperationException("The command executor cannot execute this tool.");
         }
 
         var permission = invocation.PermissionContext
             ?? throw new UnauthorizedAccessException("A tool permission grant is required.");
         if (!string.Equals(permission.RunId, invocation.RunId, StringComparison.Ordinal))
         {
-            throw new UnauthorizedAccessException(
-                "The tool permission grant belongs to another Run.");
+            throw new UnauthorizedAccessException("The tool permission grant belongs to another Run.");
         }
 
         using var document = JsonDocument.Parse(invocation.ArgumentsJson);
@@ -37,29 +36,29 @@ public sealed class BuiltinProcessToolExecutor : IToolExecutor
             throw new JsonException("Tool arguments must be a JSON object.");
         }
 
-        var fileName = GetRequiredString(arguments, "fileName");
-        var executable = BuiltinProcessRunner.ResolveAndPinExecutable(
-            fileName,
-            permission.AllowedExecutables);
+        var script = GetRequiredString(arguments, "script");
+        var shell = BuiltinCommandRunner.NormalizeShell(GetOptionalString(arguments, "shell"));
+        var executable = BuiltinCommandRunner.ResolveShell(shell, permission.AllowedExecutables);
         try
         {
             var policy = new BuiltinFsPathPolicy(permission);
             var workingDirectory = policy.PinReadDirectory(
                 GetOptionalString(arguments, "workingDirectory") ?? permission.WorkspaceRoot);
-            var processArguments = BuiltinProcessRunner.ParseArguments(arguments);
             var environment = BuiltinProcessRunner.BuildEnvironment(
                 arguments,
                 permission.AllowedEnvironmentVariables);
             var standardInput = BuiltinProcessRunner.ParseStandardInput(arguments);
+            var effectiveShell = ResolveEffectiveShell(executable.Path, shell);
+            var processArguments = BuiltinCommandRunner.BuildArguments(effectiveShell, script);
             return ValueTask.FromResult<IPreparedToolExecution>(
-                new PreparedProcessExecution(
+                new PreparedCommandExecution(
                     invocation,
                     executable,
                     workingDirectory,
                     processArguments,
                     environment,
                     standardInput,
-                    $"process:{Path.GetFileName(executable.Path)}"));
+                    $"shell:{Path.GetFileName(executable.Path)}"));
         }
         catch
         {
@@ -68,9 +67,7 @@ public sealed class BuiltinProcessToolExecutor : IToolExecutor
         }
     }
 
-    public async Task<ToolResult> ExecuteAsync(
-        ToolInvocation invocation,
-        CancellationToken ct = default)
+    public async Task<ToolResult> ExecuteAsync(ToolInvocation invocation, CancellationToken ct = default)
     {
         try
         {
@@ -81,17 +78,9 @@ public sealed class BuiltinProcessToolExecutor : IToolExecutor
         {
             throw;
         }
-        catch (Exception ex) when (ex is JsonException
-            or ArgumentException
-            or InvalidDataException
-            or IOException
-            or UnauthorizedAccessException)
+        catch (Exception ex)
         {
-            return new ToolResult(
-                invocation.CallId,
-                invocation.ToolId,
-                false,
-                Error: ex.Message);
+            return new ToolResult(invocation.CallId, invocation.ToolId, false, Error: ex.Message);
         }
     }
 
@@ -114,7 +103,20 @@ public sealed class BuiltinProcessToolExecutor : IToolExecutor
         return property.GetString();
     }
 
-    internal sealed class PreparedProcessExecution(
+    private static string ResolveEffectiveShell(string path, string requested)
+    {
+        if (requested != "auto")
+        {
+            return requested;
+        }
+
+        var name = Path.GetFileNameWithoutExtension(path).ToLowerInvariant();
+        return name is "pwsh" or "powershell" or "cmd" or "bash" or "zsh" or "sh"
+            ? name
+            : throw new InvalidOperationException("The resolved shell is not supported.");
+    }
+
+    internal sealed class PreparedCommandExecution(
         ToolInvocation invocation,
         BuiltinProcessRunner.PinnedExecutable executable,
         PinnedPath workingDirectory,
@@ -124,30 +126,41 @@ public sealed class BuiltinProcessToolExecutor : IToolExecutor
         string targetSummary) : IPreparedToolExecution
     {
         private int _disposed;
-
         public string TargetSummary { get; } = targetSummary;
 
         public async Task<ToolResult> ExecuteAsync(CancellationToken ct = default)
         {
             ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-            var output = await BuiltinProcessRunner.RunAsync(
-                executable.Path,
-                arguments,
-                workingDirectory.Path,
-                environment,
-                standardInput,
-                ct).ConfigureAwait(false);
-            var json = ToolJson.Write(writer =>
+            try
             {
-                writer.WriteStartObject();
-                writer.WriteNumber("exitCode", output.ExitCode);
-                writer.WriteString("stdout", output.StandardOutput);
-                writer.WriteString("stderr", output.StandardError);
-                writer.WriteBoolean("stdoutTruncated", output.StandardOutputTruncated);
-                writer.WriteBoolean("stderrTruncated", output.StandardErrorTruncated);
-                writer.WriteEndObject();
-            });
-            return new ToolResult(invocation.CallId, invocation.ToolId, true, json);
+                var output = await BuiltinProcessRunner.RunAsync(
+                    executable.Path,
+                    arguments,
+                    workingDirectory.Path,
+                    environment,
+                    standardInput,
+                    ct).ConfigureAwait(false);
+                var json = ToolJson.Write(writer =>
+                {
+                    writer.WriteStartObject();
+                    writer.WriteNumber("exitCode", output.ExitCode);
+                    writer.WriteString("stdout", output.StandardOutput);
+                    writer.WriteString("stderr", output.StandardError);
+                    writer.WriteBoolean("stdoutTruncated", output.StandardOutputTruncated);
+                    writer.WriteBoolean("stderrTruncated", output.StandardErrorTruncated);
+                    writer.WriteString("shell", Path.GetFileName(executable.Path));
+                    writer.WriteEndObject();
+                });
+                return new ToolResult(invocation.CallId, invocation.ToolId, true, json);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                return new ToolResult(invocation.CallId, invocation.ToolId, false, Error: ex.Message);
+            }
         }
 
         public ValueTask DisposeAsync()

@@ -136,7 +136,7 @@ internal sealed class RuntimeExecutionCore(
         var executors = new List<IToolExecutor>
         {
             new BuiltinFsToolExecutor(_memoryFiles.WorkspaceMutationLock, _resultBlobStore),
-            new BuiltinProcessToolExecutor(),
+            new BuiltinCommandToolExecutor(),
             new BuiltinHttpToolExecutor(),
             new BuiltinMemoryToolExecutor(_memoryFiles),
             new BuiltinDelegateAgentToolExecutor(),

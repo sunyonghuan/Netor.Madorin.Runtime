@@ -99,7 +99,7 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
             BuiltinToolRegistry.MemoryAppendToolId => MemoryScope(arguments, "append memory lines"),
             BuiltinToolRegistry.MemoryUpdateToolId => MemoryScope(arguments, "update memory lines"),
             BuiltinToolRegistry.MemoryDeleteToolId => MemoryScope(arguments, "delete memory lines"),
-            BuiltinToolRegistry.ProcessRunToolId => ProcessScope(workspaceRoot, arguments),
+            BuiltinToolRegistry.CommandToolId => CommandScope(workspaceRoot, arguments),
             BuiltinToolRegistry.HttpRequestToolId => HttpScope(arguments),
             BuiltinToolRegistry.DelegateToAgentToolId => Create(
                 "agent:delegate",
@@ -352,13 +352,13 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
             canGrantForRun: canGrantForRun);
     }
 
-    private static ToolRequestedScope ProcessScope(
+    private static ToolRequestedScope CommandScope(
         string workspaceRoot,
         JsonElement arguments)
     {
-        var executable = BuiltinProcessRunner.NormalizeRequestedExecutable(
-            BuiltinProcessToolExecutor.GetRequiredString(arguments, "fileName"));
-        var processArguments = BuiltinProcessRunner.ParseArguments(arguments);
+        var script = BuiltinCommandToolExecutor.GetRequiredString(arguments, "script");
+        var shell = BuiltinCommandRunner.NormalizeShell(
+            BuiltinCommandToolExecutor.GetOptionalString(arguments, "shell"));
         var standardInput = BuiltinProcessRunner.ParseStandardInput(arguments);
         var requestedEnvironmentNames = BuiltinProcessRunner.ParseRequestedEnvironmentVariableNames(
             arguments);
@@ -369,13 +369,16 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
             SkillScriptEnvironmentPolicy.InheritedVariableNames.Contains);
         var workingDirectory = BuiltinFsPathPolicy.ResolveRequestedPath(
             workspaceRoot,
-            BuiltinProcessToolExecutor.GetOptionalString(arguments, "workingDirectory")
+            BuiltinCommandToolExecutor.GetOptionalString(arguments, "workingDirectory")
                 ?? workspaceRoot);
+        var shells = shell == "auto"
+            ? BuiltinCommandRunner.GetAllowedShellNames()
+            : [shell];
         return Create(
-            $"process:{Path.GetFileName(executable)}",
-            $"{processArguments.Length} arguments; stdin {standardInput?.Length ?? 0} characters",
+            $"shell:{shell}",
+            $"{script.Length} script characters; stdin {standardInput?.Length ?? 0} characters",
             readRoots: [workingDirectory],
-            allowedExecutables: [executable],
+            allowedExecutables: shells,
             allowedEnvironmentVariables: environmentNames,
             canGrantForRun: canGrantForRun);
     }

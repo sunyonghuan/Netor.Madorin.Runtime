@@ -74,7 +74,7 @@ internal sealed class StandaloneToolGrantFactory(TimeProvider? timeProvider = nu
             && (descriptor.ToolId.StartsWith("mcli_fs_", StringComparison.Ordinal)
                 || string.Equals(
                     descriptor.ToolId,
-                    BuiltinToolRegistry.ProcessRunToolId,
+                    BuiltinToolRegistry.CommandToolId,
                     StringComparison.Ordinal));
         var allowedReadRoots = expandWorkspaceRoots && scope.AllowedReadRoots.Length > 0
             ? [normalizedWorkspace]
