@@ -24,6 +24,14 @@ public sealed record RuntimeProviderRequest(
     [property: JsonIgnore] SkillsInvocationContext? Skills = null,
     ExpertRequestControl? RequestControl = null)
 {
+    /// <summary>仅由 Runtime 注入的受控 Blob 读取入口，不跨 JSON 传递委托或磁盘路径。</summary>
+    [JsonIgnore]
+    public Func<BlobReference, CancellationToken, Task<Stream>>? OpenBlobRead { get; init; }
+
+    /// <summary>SDK 需要完整缓冲时的单次调用附件总字节上限。</summary>
+    [JsonIgnore]
+    public int MaximumBufferedBlobBytes { get; init; } = 64 * 1024 * 1024;
+
     /// <summary>Gets the number of leading messages that belong to canonical history.</summary>
     [JsonIgnore]
     public int HistoryMessageCount { get; init; }

@@ -137,3 +137,23 @@ dotnet test tests/Madorin.AI.Runtime.Provider.Tests/Madorin.AI.Runtime.Provider.
 ```
 
 命令完成后恢复各环境变量原值；凭据从全局配置读取，不写进命令或文档。测试选择的模型清单见第 6.3 节，不自动切换模型或协议。
+
+## 7. Worker 输入桥实现后的真实 CLI 复测
+
+用户确认继续修复 Worker Resolver 后，IPC 升为 2，十家 Worker 都装配 invocation-scoped Resolver。实现在[步骤 04](./04-ProviderWorker双向Blob管道.md)，只新增受控分块输入，不赋予 Worker 任意磁盘读取权。
+
+使用同一 fixture、隔离工作区、`mcli_fs_attach` 和 2048 输出预算：
+
+| 真实 CLI 路线 | 终态 | 图片回包 | 证据文件 |
+| --- | --- | --- | --- |
+| deepseek / deepseek-v4-flash | run.completed | 能看到，并描述交织环/六边形 | `deepseek.jsonl` |
+| axis-code(gpt) / gpt-5.6-sol | run.completed | 能看到黑色标志 | `axis-code_gpt_.jsonl` |
+| axis-code(Anthropic) / claude-opus-4-6 | run.completed | 可以看到，描述几何交织结构 | `axis-code_Anthropic_.jsonl` |
+| Kimi / kimi-k3.1-pro | run.completed | 能看到，描述几何花形 | `Kimi.jsonl` |
+| Aliyun / qwen3.8-max | 重跑 run.completed | 能看到黑色线条六角结 | `Aliyun-history-fix.jsonl` |
+
+本机证据目录 `obj/worker-blob-cli-20261031-164403`。五次 attach 权威历史均成功，JSON 元数据为 146 bytes，Blob 为 11,297 bytes，SHA-256 与前述 fixture 相同，staging 无残留；模型不只返回元数据，均确认图片可见。描述准确率不作为本轮传输判定。
+
+Aliyun 第一次运行到 90 秒取消；排查发现 HistoryMessageCount 没有跨 IPC 传递，本批补入 Invoke 控制字段并让 Worker 使用现有历史兼容投影。对已生成的历史 reasoning 可投影，对本轮 reasoning 仍执行原校验，新增测试验证两种情况，未全局关闭 reasoning 能力门禁。
+
+这组结果取代“Worker 永远缺 Resolver”的现状描述，前面第 1-6 节仍保留历史时间点结论。十家 Worker 的模拟装配测试与五条真实账号路线分开记；输出附件、其他模态、正式 AOT 与发布包兼容尚未验收。

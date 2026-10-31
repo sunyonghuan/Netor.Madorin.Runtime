@@ -28,7 +28,7 @@ var declaredCapabilities = new ProviderCapabilities(
     ToolCalling: true,
     Reasoning: true,
     Usage: true);
-return await ProviderWorkerHost.RunAsync(
+return await ProviderWorkerHost.RunWithBlobResolverAsync(
     Protocol,
     Slug,
     BuildAdapter,
@@ -38,7 +38,7 @@ return await ProviderWorkerHost.RunAsync(
     declaredCapabilities: declaredCapabilities,
     declaredModels: Madorin.AI.Runtime.Providers.DeepSeek.Models.DeepSeekModelCatalog.All);
 
-static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config)
+static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config, IProviderBlobResolver blobResolver)
 {
     ArgumentNullException.ThrowIfNull(config);
     return new DeepSeekProviderAdapter(
@@ -47,5 +47,5 @@ static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config)
             : config.BaseUrl.Trim(),
         config.ApiKey,
         models: ProviderConnectionModels.Resolve(config, Madorin.AI.Runtime.Providers.DeepSeek.Models.DeepSeekModelCatalog.All),
-        providerId: config.ProviderId);
+        providerId: config.ProviderId, blobResolver: blobResolver);
 }

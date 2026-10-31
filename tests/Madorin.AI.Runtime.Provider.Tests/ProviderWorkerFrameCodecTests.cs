@@ -60,7 +60,7 @@ public sealed class ProviderWorkerFrameCodecTests
         await using var stdout = new MemoryStream();
         await ProviderWorkerFrameCodec.WriteAsync(
             stdin,
-            new HelloFrame(2, "OpenAI Compatible", "openai-compatible", "0.1.46"));
+            new HelloFrame(ProviderWorkerIpc.Version - 1, "OpenAI Compatible", "openai-compatible", "0.1.46"));
         stdin.Position = 0;
 
         var exit = await ProviderWorkerHost.RunAsync(

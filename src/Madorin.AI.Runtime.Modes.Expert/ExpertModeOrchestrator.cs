@@ -571,7 +571,9 @@ public sealed class ExpertModeOrchestrator(
             Skills: CreateSkillsContext(snapshot, runId, sessionId),
             RequestControl: (expert.RequestControl ?? new ExpertRequestControl()) with { MaxTokens = budget.OutputLimit })
         {
-            HistoryMessageCount = Math.Max(0, providerMessages.Count - 1)
+            HistoryMessageCount = Math.Max(0, providerMessages.Count - 1),
+            OpenBlobRead = _toolResultBlobStore is null ? null : _toolResultBlobStore.OpenReadAsync,
+            MaximumBufferedBlobBytes = (int)Math.Min(64L * 1024 * 1024, _runtimeLimits.MaxBlobBytes)
         };
         long runSequence = 1;
         var startedPayload = JsonSerializer.SerializeToElement(
@@ -3283,7 +3285,11 @@ public sealed class ExpertModeOrchestrator(
                 Tools: tools,
                 CancellationToken: ct,
                 Skills: null,
-                RequestControl: null);
+                RequestControl: null)
+            {
+                OpenBlobRead = _toolResultBlobStore is null ? null : _toolResultBlobStore.OpenReadAsync,
+                MaximumBufferedBlobBytes = (int)Math.Min(64L * 1024 * 1024, _runtimeLimits.MaxBlobBytes)
+            };
 
             // Call provider
             var completed = false;

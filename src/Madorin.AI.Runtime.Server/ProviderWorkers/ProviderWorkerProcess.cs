@@ -25,6 +25,7 @@ public sealed partial class ProviderWorkerProcess : IAsyncDisposable
         new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, TaskCompletionSource<bool>> _pings =
         new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, WorkerBlobInputLease> _blobInputs = new(StringComparer.Ordinal);
     private Process? _process;
     private Stream? _stdin;
     private CancellationTokenSource? _readerCts;

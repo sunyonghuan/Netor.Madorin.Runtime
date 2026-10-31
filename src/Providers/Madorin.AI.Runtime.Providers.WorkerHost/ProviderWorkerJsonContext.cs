@@ -19,6 +19,8 @@ namespace Madorin.AI.Runtime.Providers.WorkerHost;
 [JsonSerializable(typeof(PongFrame))]
 [JsonSerializable(typeof(ShutdownFrame))]
 [JsonSerializable(typeof(ErrorFrame))]
+[JsonSerializable(typeof(BlobReadFrame))]
+[JsonSerializable(typeof(BlobChunkFrame))]
 [JsonSerializable(typeof(ProviderConnectionConfig))]
 [JsonSerializable(typeof(ProviderCapabilities))]
 [JsonSerializable(typeof(ProviderModel))]

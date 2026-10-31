@@ -31,6 +31,22 @@ public static partial class ProviderWorkerHost
         IReadOnlyList<ProviderModel>? declaredModels,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(adapterFactory);
+        return await RunWithBlobResolverAsync(protocol, slug, (config, _) => adapterFactory(config),
+            stdin, stdout, stderr, declaredCapabilities, declaredModels, cancellationToken).ConfigureAwait(false);
+    }
+
+    public static async Task<int> RunWithBlobResolverAsync(
+        string protocol,
+        string slug,
+        Func<ProviderConnectionConfig, IProviderBlobResolver, IRuntimeProviderAdapter> adapterFactory,
+        Stream stdin,
+        Stream stdout,
+        TextWriter stderr,
+        ProviderCapabilities? declaredCapabilities = null,
+        IReadOnlyList<ProviderModel>? declaredModels = null,
+        CancellationToken cancellationToken = default)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(protocol);
         ArgumentException.ThrowIfNullOrWhiteSpace(slug);
         ArgumentNullException.ThrowIfNull(adapterFactory);
@@ -54,7 +70,7 @@ public static partial class ProviderWorkerHost
     private sealed partial class Session(
         string protocol,
         string slug,
-        Func<ProviderConnectionConfig, IRuntimeProviderAdapter> adapterFactory,
+        Func<ProviderConnectionConfig, IProviderBlobResolver, IRuntimeProviderAdapter> adapterFactory,
         Stream stdin,
         Stream stdout,
         TextWriter stderr,
@@ -68,6 +84,7 @@ public static partial class ProviderWorkerHost
         private readonly CancellationTokenSource _shutdownCts =
             CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         private bool _helloCompleted;
+        private readonly ConcurrentDictionary<string, WorkerInputBlobResolver> _blobResolvers = new(StringComparer.Ordinal);
 
         public async Task<int> RunAsync()
         {
@@ -79,6 +96,7 @@ public static partial class ProviderWorkerHost
                         .ConfigureAwait(false);
                     if (read.Status == ProviderWorkerFrameReadStatus.EndOfStream)
                     {
+                        CancelAllInvocations();
                         return _helloCompleted ? 0 : 1;
                     }
 

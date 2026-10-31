@@ -29,7 +29,12 @@ public static class ProviderWorkerFrameCodec
         var json = JsonSerializer.SerializeToUtf8Bytes(
             frame,
             ProviderWorkerJsonContext.Default.ProviderWorkerFrame);
-        if (json.Length > ProviderWorkerIpc.MaxFrameLength)
+        if (frame is BlobChunkFrame chunkFrame && chunkFrame.Data.Length > ProviderWorkerIpc.MaxBlobChunkBytes)
+        {
+            throw new InvalidDataException("Worker Blob chunk exceeds the data quota.");
+        }
+        if (json.Length > ProviderWorkerIpc.MaxFrameLength
+            || frame is BlobChunkFrame && json.Length > ProviderWorkerIpc.MaxBlobChunkFrameBytes)
         {
             throw new ProviderWorkerFrameTooLargeException(json.Length);
         }
@@ -60,7 +65,7 @@ public static class ProviderWorkerFrameCodec
         }
 
         var length = (int)BinaryPrimitives.ReadUInt32BigEndian(header);
-        if (length > ProviderWorkerIpc.MaxFrameLength)
+        if (length <= 0 || length > ProviderWorkerIpc.MaxFrameLength)
         {
             return new ProviderWorkerFrameReadResult(ProviderWorkerFrameReadStatus.Oversize, null, length);
         }
@@ -74,6 +79,11 @@ public static class ProviderWorkerFrameCodec
 
         var frame = JsonSerializer.Deserialize(body, ProviderWorkerJsonContext.Default.ProviderWorkerFrame)
             ?? throw new JsonException("Worker frame JSON deserialized to null.");
+        if (frame is BlobChunkFrame chunk && (length > ProviderWorkerIpc.MaxBlobChunkFrameBytes
+            || chunk.Data.Length > ProviderWorkerIpc.MaxBlobChunkBytes))
+        {
+            throw new InvalidDataException("Worker Blob chunk exceeds the frame quota.");
+        }
         return new ProviderWorkerFrameReadResult(ProviderWorkerFrameReadStatus.Frame, frame, length);
     }
 

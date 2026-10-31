@@ -18,7 +18,17 @@ public static partial class ProviderWorkerHost
                     await WriteAsync(new PongFrame(ping.Id), _shutdownCts.Token).ConfigureAwait(false);
                     return null;
                 case CancelFrame cancel when _helloCompleted:
-                    CancelInvocation(cancel.InvocationId);
+                    if (cancel.Generation is null || (_blobResolvers.TryGetValue(cancel.InvocationId, out var current)
+                        && current.Generation == cancel.Generation))
+                    {
+                        CancelInvocation(cancel.InvocationId);
+                    }
+                    return null;
+                case BlobChunkFrame chunk when _helloCompleted:
+                    if (_blobResolvers.TryGetValue(chunk.InvocationId, out var resolver))
+                    {
+                        resolver.Accept(chunk);
+                    }
                     return null;
                 case InvokeFrame invoke when _helloCompleted:
                     QueueInvoke(invoke);

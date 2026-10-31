@@ -1,5 +1,6 @@
 using System.Text.Json.Serialization;
 using Madorin.AI.Runtime.Providers.Abstractions;
+using Madorin.AI.Runtime.Contracts;
 
 namespace Madorin.AI.Runtime.Providers.WorkerHost;
 
@@ -14,6 +15,8 @@ namespace Madorin.AI.Runtime.Providers.WorkerHost;
 [JsonDerivedType(typeof(PongFrame), "pong")]
 [JsonDerivedType(typeof(ShutdownFrame), "shutdown")]
 [JsonDerivedType(typeof(ErrorFrame), "error")]
+[JsonDerivedType(typeof(BlobReadFrame), "blob.read")]
+[JsonDerivedType(typeof(BlobChunkFrame), "blob.chunk")]
 public abstract record ProviderWorkerFrame;
 
 public sealed record HelloFrame(
@@ -37,13 +40,22 @@ public sealed record HelloRejectedFrame(
 public sealed record InvokeFrame(
     string InvocationId,
     ProviderConnectionConfig Connection,
-    RuntimeProviderRequest Request) : ProviderWorkerFrame;
+    RuntimeProviderRequest Request,
+    string? Generation = null,
+    int MaximumBufferedBlobBytes = ProviderWorkerIpc.MaxBufferedBlobBytes,
+    int HistoryMessageCount = 0) : ProviderWorkerFrame;
+
+public sealed record BlobReadFrame(string InvocationId, string Generation, string TransferId,
+    BlobReference Blob, long Offset, int Count) : ProviderWorkerFrame;
+
+public sealed record BlobChunkFrame(string InvocationId, string Generation, string TransferId,
+    long Offset, byte[] Data, bool EndOfBlob, string? Error = null) : ProviderWorkerFrame;
 
 public sealed record EventFrame(
     string InvocationId,
     RuntimeProviderEvent Event) : ProviderWorkerFrame;
 
-public sealed record CancelFrame(string InvocationId) : ProviderWorkerFrame;
+public sealed record CancelFrame(string InvocationId, string? Generation = null) : ProviderWorkerFrame;
 
 public sealed record PingFrame(string Id) : ProviderWorkerFrame;
 

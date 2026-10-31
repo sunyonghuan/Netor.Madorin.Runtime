@@ -37,7 +37,7 @@ public sealed partial class ProviderWorkerProcess
         {
             FailAll("Provider worker reader cancelled.");
         }
-        catch (IOException)
+        catch (Exception ex) when (ex is IOException or System.Text.Json.JsonException or InvalidDataException)
         {
             RecordUnexpectedCrash();
             FailAll("Provider worker I/O failed.");
@@ -66,9 +66,39 @@ public sealed partial class ProviderWorkerProcess
             case EventFrame ev:
                 CompleteEvent(ev.InvocationId, ev.Event);
                 break;
+            case BlobReadFrame read:
+                _ = RespondToBlobReadAsync(read);
+                break;
             case ErrorFrame error:
                 CompleteError(error);
                 break;
+        }
+    }
+
+    private async Task RespondToBlobReadAsync(BlobReadFrame read)
+    {
+        BlobChunkFrame response;
+        try
+        {
+            if (!_blobInputs.TryGetValue(read.InvocationId, out var lease))
+            {
+                return;
+            }
+            response = await lease.ReadAsync(read).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException
+            or InvalidOperationException or ArgumentException or OperationCanceledException)
+        {
+            response = new BlobChunkFrame(read.InvocationId, read.Generation, read.TransferId,
+                read.Offset, [], false, "Worker attachment read denied, cancelled, invalid or unavailable.");
+        }
+        try
+        {
+            await WriteFrameAsync(response, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
+        {
+            // 调用取消或 Worker 退出后不重开传输。
         }
     }
 

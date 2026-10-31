@@ -65,12 +65,19 @@ public static partial class ProviderWorkerHost
             }
 
             IRuntimeProviderAdapter adapter;
+            using var blobResolver = new WorkerInputBlobResolver(invoke.InvocationId,
+                invoke.Generation ?? string.Empty, invoke.MaximumBufferedBlobBytes, WriteAsync);
+            if (!_blobResolvers.TryAdd(invoke.InvocationId, blobResolver))
+            {
+                throw new InvalidOperationException("Duplicate Worker Blob invocation.");
+            }
             try
             {
-                adapter = adapterFactory(invoke.Connection);
+                adapter = adapterFactory(invoke.Connection, blobResolver);
             }
             catch (Exception ex)
             {
+                _blobResolvers.TryRemove(invoke.InvocationId, out _);
                 await WriteSafeErrorAsync(
                         invoke.InvocationId,
                         ProviderWorkerIpc.ErrorInvokeFailed,
@@ -85,11 +92,12 @@ public static partial class ProviderWorkerHost
                 var request = invoke.Request with
                 {
                     CancellationToken = ct,
-                    Skills = null
+                    Skills = null,
+                    HistoryMessageCount = invoke.HistoryMessageCount
                 };
 
                 var sawTerminal = false;
-                await foreach (var providerEvent in adapter.CompleteStreamingAsync(request, ct)
+                await foreach (var providerEvent in ProviderInvocationBoundary.CompleteStreamingAsync(adapter, request, ct)
                     .ConfigureAwait(false))
                 {
                     sawTerminal |= providerEvent is InvocationCompletedProviderEvent
@@ -112,6 +120,7 @@ public static partial class ProviderWorkerHost
             }
             finally
             {
+                _blobResolvers.TryRemove(invoke.InvocationId, out _);
                 switch (adapter)
                 {
                     case IAsyncDisposable asyncDisposable:

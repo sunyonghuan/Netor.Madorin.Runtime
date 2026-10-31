@@ -55,56 +55,71 @@ public sealed partial class ProviderWorkerProcess
             throw new InvalidOperationException($"Duplicate invocationId '{request.InvocationId}'.");
         }
 
-        using var cancelReg = cancellationToken.Register(() =>
-            _ = SendCancelAsync(request.InvocationId));
-
-        RuntimeError? writeFailure = null;
-        try
-        {
-            await WriteFrameAsync(
-                    new InvokeFrame(request.InvocationId, connection, request),
-                    cancellationToken)
-                .ConfigureAwait(false);
-        }
-        catch (ProviderWorkerFrameTooLargeException ex)
-        {
-            writeFailure = InvokeFailedError($"Invoke frame exceeds 16 MiB ({ex.Length} bytes).");
-        }
-        catch (IOException)
-        {
-            writeFailure = WorkerExitedError("Provider worker stdin closed.");
-        }
-        catch (ObjectDisposedException)
-        {
-            writeFailure = WorkerExitedError("Provider worker stdin closed.");
-        }
-
-        if (writeFailure is not null)
-        {
-            _invokes.TryRemove(request.InvocationId, out _);
-            yield return new InvocationFailedProviderEvent(request.InvocationId, writeFailure);
-            yield break;
-        }
+        var generation = Guid.NewGuid().ToString("N");
+        await using var blobInput = new WorkerBlobInputLease(request, generation, cancellationToken);
+        _blobInputs[request.InvocationId] = blobInput;
 
         try
         {
-            await foreach (var providerEvent in channel.Reader.ReadAllAsync(cancellationToken)
-                .ConfigureAwait(false))
+            using var cancelReg = cancellationToken.Register(() =>
+                _ = SendCancelAsync(request.InvocationId, generation));
+
+            RuntimeError? writeFailure = null;
+            try
             {
-                yield return providerEvent;
+                await WriteFrameAsync(
+                        new InvokeFrame(request.InvocationId, connection, request, generation,
+                            Math.Clamp(request.MaximumBufferedBlobBytes, 1, ProviderWorkerIpc.MaxBufferedBlobBytes),
+                            request.HistoryMessageCount),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (ProviderWorkerFrameTooLargeException ex)
+            {
+                writeFailure = InvokeFailedError($"Invoke frame exceeds 16 MiB ({ex.Length} bytes).");
+            }
+            catch (IOException)
+            {
+                writeFailure = WorkerExitedError("Provider worker stdin closed.");
+            }
+            catch (ObjectDisposedException)
+            {
+                writeFailure = WorkerExitedError("Provider worker stdin closed.");
+            }
+
+            if (writeFailure is not null)
+            {
+                _invokes.TryRemove(request.InvocationId, out _);
+                yield return new InvocationFailedProviderEvent(request.InvocationId, writeFailure);
+                yield break;
+            }
+
+            try
+            {
+                await foreach (var providerEvent in channel.Reader.ReadAllAsync(cancellationToken)
+                    .ConfigureAwait(false))
+                {
+                    yield return providerEvent;
+                }
+            }
+            finally
+            {
+                _invokes.TryRemove(request.InvocationId, out _);
             }
         }
         finally
         {
+            _blobInputs.TryRemove(request.InvocationId, out _);
             _invokes.TryRemove(request.InvocationId, out _);
+            await SendCancelAsync(request.InvocationId, generation).ConfigureAwait(false);
         }
     }
 
-    private async Task SendCancelAsync(string invocationId)
+    private async Task SendCancelAsync(string invocationId, string generation)
     {
         try
         {
-            await WriteFrameAsync(new CancelFrame(invocationId), CancellationToken.None)
+            await WriteFrameAsync(new CancelFrame(invocationId, generation), CancellationToken.None)
                 .ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
