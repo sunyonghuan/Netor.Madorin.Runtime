@@ -78,7 +78,13 @@ public sealed class BuiltinCommandToolExecutor : IToolExecutor
         {
             throw;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is JsonException
+            or ArgumentException
+            or InvalidDataException
+            or IOException
+            or UnauthorizedAccessException
+            or InvalidOperationException
+            or System.ComponentModel.Win32Exception)
         {
             return new ToolResult(invocation.CallId, invocation.ToolId, false, Error: ex.Message);
         }
@@ -157,7 +163,10 @@ public sealed class BuiltinCommandToolExecutor : IToolExecutor
             {
                 throw;
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is IOException
+                or InvalidOperationException
+                or UnauthorizedAccessException
+                or System.ComponentModel.Win32Exception)
             {
                 return new ToolResult(invocation.CallId, invocation.ToolId, false, Error: ex.Message);
             }

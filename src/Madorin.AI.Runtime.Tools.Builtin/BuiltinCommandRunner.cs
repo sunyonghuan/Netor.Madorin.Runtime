@@ -71,7 +71,8 @@ internal static class BuiltinCommandRunner
 
         return shell switch
         {
-            "bash" or "zsh" or "sh" => ["-lc", "export LANG=C.UTF-8 LC_ALL=C.UTF-8; " + script],
+            "bash" or "zsh" => ["-lc", "export LANG=C.UTF-8 LC_ALL=C.UTF-8; " + script],
+            "sh" => ["-c", "export LANG=C.UTF-8 LC_ALL=C.UTF-8; " + script],
             _ => throw new ArgumentException("The selected shell is not available on this platform.")
         };
     }
