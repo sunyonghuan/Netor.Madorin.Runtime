@@ -57,11 +57,10 @@
 - ToolResultPreview 保留 attach 工具的文本类 Blob intent，不按手填 Files 能力替换二进制附件；普通过大文本仍生成预览。ConversationStore 已递归收集/转换嵌套工具 Blob，Stream 模式不把附件 UTF-8 解码，Omit 只操作读取副本，删除 Session 时保护另一 Session 的嵌套共享 Blob。
 - Debug 定向 78 项通过，ConversationStore 测试 23 项通过。包括 2 MiB 分块读取、失败清理、真实文件字节/哈希、扩展名伪装、Gateway 幂等恢复与嵌套历史读取/共享删除保护；JPEG/PDF 夹具只验证签名和字节保存，不能充当厂商可读文件验收。
 - Release 附件/工具/授权联合回归 144 项通过，ConversationStore Release 23 项通过，Protocol 49 项通过，构建零警告。补测授权与 Expert 共 38 项，35 通过、3 项既有 summary/compaction 失败，与步骤 01 全量记录相同；未修改 summary 业务。
-- BlobTransferTests 端到端回归：4 项 Blob 读写/配额/取消/哈希测试通过；`OversizedInlineText_IsUploadedAndReplacedWithBlobReference` 等待 Provider 捕获引用超时，单独重跑仍失败，尚未定位，不能宣称端到端全部通过。
+- BlobTransferTests 端到端回归：5 项全部通过。初跑超大内联文本测试等待 Provider 引用超时；读取事件后定位为测试 Provider 未声明 ContextWindow 导致 `context_window_unknown`。仅补夹具 ContextWindow 和 run.failed 诊断，不放宽生产上下文检查，复跑通过。此回归验证既有 Blob 通道，不等于附件工具经 Worker 到真实模型的端到端验收。
 
 ### 未关闭项
 
 - 现有 BlobStagingStore 的 `BlobId -> BlobReference` 下载元数据仍可能被同 hash 不同 MIME 的后续写入覆盖；引用本身和工具 JSON 保留各自 MIME，但下载接口的归属/恢复问题尚未关闭，不能标记本步骤完成。
 - Invocation 配额的累计预留、崩溃重启后的 staging 回收、磁盘满注入、可配置 Session retention、完整跨 Session 清理恢复仍需补齐。
 - Provider SDK 的整块附件缓冲上限和 Worker invocation-scoped 通道在步骤 04 接通；当前工具读取不等于已在实际 Worker 中把附件交给模型。
-- 继续定位上述超大内联文本端到端超时，确认是否属于本阶段回归；在定位前不关闭门禁。

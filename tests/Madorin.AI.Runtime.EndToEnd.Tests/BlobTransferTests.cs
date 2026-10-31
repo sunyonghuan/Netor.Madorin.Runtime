@@ -271,7 +271,25 @@ public sealed class BlobTransferTests
                     ExpectedRuntimeInstanceId: server.InstanceId));
             await client.ConnectAsync();
             const string expected = "路径=https://example.test/商品，提示词=你好";
-            await client.StartNewSessionRunAsync(CreateRequest(expected));
+            var runId = await client.StartNewSessionRunAsync(CreateRequest(expected));
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await foreach (var envelope in client.ReadEventsAsync(0, timeout.Token))
+            {
+                if (envelope.RunId != runId)
+                {
+                    continue;
+                }
+
+                if (envelope.MessageType == MessageTypes.RunFailed)
+                {
+                    Assert.Fail($"Run failed before the Provider observed the Blob: {envelope.Payload}");
+                }
+
+                if (envelope.MessageType == MessageTypes.RunCompleted)
+                {
+                    break;
+                }
+            }
 
             var reference = await provider.ReferenceObserved.WaitAsync(TimeSpan.FromSeconds(10));
             Assert.AreEqual(Encoding.UTF8.GetByteCount(expected), reference.Length);
@@ -387,7 +405,7 @@ public sealed class BlobTransferTests
         public ProviderCapabilities Capabilities { get; } = new(Streaming: true, Files: true);
 
         public IReadOnlyList<ProviderModel> Models { get; } =
-            [new("capture-model", "Capture Model")];
+            [new("capture-model", "Capture Model", ContextWindow: 32_768)];
 
         public Task<BlobReference> ReferenceObserved => _referenceObserved.Task;
 
