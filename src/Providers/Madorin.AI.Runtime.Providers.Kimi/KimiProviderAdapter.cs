@@ -190,6 +190,11 @@ public sealed class KimiProviderAdapter : IRuntimeProviderAdapter
                         yield return new TextDeltaProviderEvent(request.InvocationId, text.Text);
                         break;
 
+                    case ProviderOutputAttachmentContent attachment:
+                        yield return new AttachmentCompletedProviderEvent(request.InvocationId,
+                            attachment.Blob, attachment.FileName);
+                        break;
+
                     case FunctionCallContent functionCall:
                         var argumentsJson = SerializeArguments(functionCall.Arguments);
                         var callId = functionCall.CallId ?? string.Empty;

@@ -168,3 +168,35 @@ Aliyun 第一次运行到 90 秒取消；排查发现 HistoryMessageCount 没有
 - 失败也保留：第一次 1 秒视频、7,667 字节返回 HTTP 400（`aliyun-video.jsonl`），补至 3 秒后成功。阿里云[官方视频限制](https://help.aliyun.com/zh/model-studio/vision/)写明 Qwen3.8 系列视频时长至少 2 秒，因此首轮失败与此限制一致；由于 SDK 只呈现泛化 HTTP 400，未捕获服务端具体错误体，不声称已唯一确定成因。阿里云 `qwen3.8-max` 的 2 秒 WAV（64,078 字节）工具续调返回 HTTP 400（`aliyun-audio.jsonl`）；当前 `input_audio` 模拟请求字段不能视为该模型/端点支持音频。原始请求/密钥未写入文档或仓库。
 
 尚未完成其余真实厂商 PDF/音频/视频矩阵与 Provider 输出写回；步骤 04 输出、02 生命周期和 03 外部授权仍开放。
+
+## 9. Provider 输出写回与启动目录落盘
+
+本节为后续输出实现的增量，更新第 8 节当时的“输出未实现”结论；这里的 HTTP 回包为模拟服务，不计作真实厂商生成成功。
+
+### 9.1 实现与交付路径
+
+- SDK 二进制内容 → invocation StoreOutputBlob → Worker IPC 3 begin/chunk/complete/ack → Runtime 有界 Pipe → BlobStore 校验长度/SHA → AttachmentCompleted 引用事件。
+- Orchestrator 在 CLI 进程中将确认附件写入 `AppContext.BaseDirectory/.attach`；目录不存在则创建，GUID + MIME 扩展名，FileMode.CreateNew。校验保存结果后生成图片 Markdown 或普通附件链接，经既有 text.delta 按原顺序推送宿主。
+- 权威 assistant 历史保留 BlobRef 和 Markdown。落盘失败返回 `AttachmentDeliveryFailed`，已确认 Blob 保留在部分回复中，不发送不存在的文件链接。未改工作区/外部路径授权规则。
+- 音频分片不能直接每片落一个文件，现已在 SDK 边界有界合并至完成标记再发布；延迟文字和附件计入 invocation 配额，避免漏计/重复计数。无完成标记的音频以失败结束。
+
+### 9.2 本地验证结果
+
+| 测试 | 结果 | 证据 |
+| --- | --- | --- |
+| Provider/Worker/媒体/工具联合 Release 回归 | 168 通过，0 失败 | `output-blob-final-release.trx` |
+| Protocol 全量 | 49 通过，0 失败 | `output-blob-protocol.trx` |
+| 既有 BlobTransfer E2E | 5 通过，0 失败 | `output-blob-transfer.trx` |
+
+本批输出专项包含在 168 项中：八条独立 Chat Worker 路线各接收 300,001 字节分片音频，字节和哈希一致、前文字/附件/后文字顺序一致；OpenAI Responses 完成图片写回，保存两次生成不同文件名，单调用配额不足时失败且不发布附件。补测音频加延迟文字的配额边界、跨附件累计限额、输出帧上限，以及 generation/hash/offset/quota/cancel 反例，失败不留 staging。
+
+贯通测试使用真实 OpenAI Worker 子进程及模拟 Responses HTTP，经过 LocalRuntime 编排取得宿主文字事件，解析 Markdown 的 file URI 后确认目标位于测试主程序启动目录 `.attach`、名称为 GUID.png、文件字节完全一致，并核验历史 BlobRef/Markdown。另有直接 Provider 路线和不存在 Blob 路线。测试仅删除自己产生的文件。此处没有启动独立 CLI 可执行进程，也没有人工验证外部宿主 Markdown 渲染器。
+
+第一次较早联合回归暴露同 InvocationId 立即续调时 Worker 尚未释放资源的竞态，已修复为先清理再发布终态；另一次遇 Worker hello 启动超时，同 binary 重跑 162 项通过。最终增补测试和修正后上述 168 项通过，不隐去先前失败。
+
+### 9.3 未关闭事项
+
+- 输出按十家逐条记录在步骤 06：九条 Worker 路线有模拟二进制证据，Anthropic 当前 Minimal SDK 没有二进制输出映射成功证据；不能把共享 sink 装配当成厂商文件输出已支持。
+- Anthropic Files API / 服务端代码执行结果引用、其他 route 的 HostedFileContent/UriContent 安全下载 codec 未实现。当前遇到 SDK 已暴露的 file/URI 内容明确失败；SDK 自身丢弃未知 block 的缺口仍需专属 codec 修复。
+- 未调用真实厂商生成接口，不开启新的生成工具，不自动下载普通文本 URL。各厂商真实媒体输出、崩溃/half-close/慢消费者故障矩阵、会话保留回收、重放、正式 AOT/manifest 仍需逐项完成。
+- CLI 与全部 Worker 的协议版本现为 IPC 3，必须同批构建部署，不能混用 IPC 2 二进制。

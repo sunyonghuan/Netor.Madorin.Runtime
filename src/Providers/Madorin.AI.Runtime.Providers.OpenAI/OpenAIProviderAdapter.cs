@@ -160,7 +160,7 @@ public sealed class OpenAIProviderAdapter :
         };
         var responsesClient = new ResponsesClient(_credential, options);
         _chatClientFactory = modelId =>
-            responsesClient.AsIChatClientWithStoredOutputDisabled(modelId);
+            new Protocol.OpenAIOutputAttachmentChatClient(responsesClient.AsIChatClientWithStoredOutputDisabled(modelId));
     }
 
     public string ProviderId { get; }
@@ -530,6 +530,12 @@ public sealed class OpenAIProviderAdapter :
                 case TextContent text when !string.IsNullOrEmpty(text.Text):
                     draft.EndBlock();
                     yield return new TextDeltaProviderEvent(request.InvocationId, text.Text);
+                    break;
+
+                case ProviderOutputAttachmentContent attachment:
+                    draft.EndBlock();
+                    yield return new AttachmentCompletedProviderEvent(request.InvocationId,
+                        attachment.Blob, attachment.FileName);
                     break;
 
                 case FunctionCallContent functionCall:

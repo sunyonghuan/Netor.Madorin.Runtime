@@ -85,6 +85,7 @@ public static partial class ProviderWorkerHost
             CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         private bool _helloCompleted;
         private readonly ConcurrentDictionary<string, WorkerInputBlobResolver> _blobResolvers = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, WorkerOutputBlobWriter> _blobWriters = new(StringComparer.Ordinal);
 
         public async Task<int> RunAsync()
         {

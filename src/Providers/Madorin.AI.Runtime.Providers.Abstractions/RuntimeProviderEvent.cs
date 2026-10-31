@@ -13,7 +13,11 @@ namespace Madorin.AI.Runtime.Providers.Abstractions;
 [JsonDerivedType(typeof(InvocationCompletedProviderEvent), "invocation_completed")]
 [JsonDerivedType(typeof(InvocationFailedProviderEvent), "invocation_failed")]
 [JsonDerivedType(typeof(ProjectionAdjustedProviderEvent), "projection_adjusted")]
+[JsonDerivedType(typeof(AttachmentCompletedProviderEvent), "attachment_completed")]
 public abstract record RuntimeProviderEvent(string InvocationId);
+
+public sealed record AttachmentCompletedProviderEvent(string InvocationId, BlobReference Blob,
+    string? FileName = null) : RuntimeProviderEvent(InvocationId);
 
 public sealed record TextDeltaProviderEvent(
     string InvocationId,

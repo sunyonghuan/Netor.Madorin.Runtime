@@ -57,7 +57,9 @@ public sealed partial class ProviderWorkerProcess
 
         var generation = Guid.NewGuid().ToString("N");
         await using var blobInput = new WorkerBlobInputLease(request, generation, cancellationToken);
+        await using var blobOutput = new WorkerBlobOutputLease(request, generation, cancellationToken);
         _blobInputs[request.InvocationId] = blobInput;
+        _blobOutputs[request.InvocationId] = blobOutput;
 
         try
         {
@@ -110,6 +112,7 @@ public sealed partial class ProviderWorkerProcess
         finally
         {
             _blobInputs.TryRemove(request.InvocationId, out _);
+            _blobOutputs.TryRemove(request.InvocationId, out _);
             _invokes.TryRemove(request.InvocationId, out _);
             await SendCancelAsync(request.InvocationId, generation).ConfigureAwait(false);
         }

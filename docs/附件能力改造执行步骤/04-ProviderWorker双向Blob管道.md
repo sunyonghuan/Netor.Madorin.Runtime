@@ -1,12 +1,12 @@
 # 执行步骤 04：Provider Worker 双向 Blob 管道
 
-> 状态：输入子任务实施中，输出写回未开始。用户在真实测试后明确要求继续接通 Worker Resolver，允许先实施此断点；[02 Blob 生命周期](./02-附件工具与Blob生命周期.md)、03 授权剩余门禁保留，不视为已完成。
+> 状态：输入已接通，输出写回子任务实施中。用户明确继续 Provider 输出写回；[02 Blob 生命周期](./02-附件工具与Blob生命周期.md)、03 授权剩余门禁保留，不视为已完成。
 
 ## 1. 目标与协议边界
 
 生产路线通过 10 个隔离 Worker 运行 Provider。给每个 invocation 提供只能访问此请求附件的 Blob read capability，给 Provider 回包提供流式 Blob write sink。传二进制时使用有界 chunk frames，不把整个内容加入 `InvokeFrame.Request` JSON。
 
-改造前 Worker IPC Version 1、`MaxFrameLength=16 MiB`、无 Blob 读写帧；本批实现输入读取并升级 IPC 2，CLI/Worker 必须一起构建使用，正式发布/AOT 仍待验证。
+改造前 Worker IPC Version 1、`MaxFrameLength=16 MiB`、无 Blob 读写帧；输入批升级 IPC 2，随后输出批升级 IPC 3。以下输入批记录保留当时范围，当前版本以末尾输出记录为准。CLI/Worker 必须一起构建使用，正式发布/AOT 仍待验证。
 
 ### 本批冻结的输入协议
 
@@ -69,10 +69,19 @@
 
 ### 尚未关闭的门禁
 
-- 输出 Blob write sink/frames 未实现；本步骤仍不能标记双向完成。
+- 输出 Blob write sink/frames 后续已实现并有本地验证（见末尾）；真实输出及完整故障门禁保留，本步骤仍不能标记全部完成。
 - 非图片 codec、SDK 峰值内存采样、Worker kill/half-close 故障矩阵、恶意帧压力与正式 AOT 发布/manifest 仍待完成；不宣称全格式或全厂商真实输出通过。
 - 本批真实 CLI 证明 PNG 输入主业务链路；02 的元数据归属/保留/Invocation 配额、03 的外部 Grant 专项验收仍保留，未扩大文件授权。
 
 2026-10-31 媒体输入分层补记：Worker 输入分块帧与 BlobStore 对媒体字节通用，视频不需要另发 JSON 二进制；Provider 的 HTTP 请求格式仍按步骤 05 的具体 route 转换。音视频和 PDF 尚未做各 Worker 的模拟/真实接口回归，本步骤的输出写回、故障与 AOT 门禁仍未关闭。
 
 随后补测：真实十个 Worker 子进程分别以 300,001 字节 PDF 分块走完工具结果输入；八家 Chat 路线的 WAV、Aliyun 的 MP4 也各经独立 Worker 完整分块传输，模拟 HTTP 原生字段还原原字节，合计 19 项通过。仍不代表服务端接受该模态，更不代表 Worker 输出写回已完成。
+
+### 输出子任务实施中
+
+- 输出帧采用 IPC 3 `blob.write`（begin/chunk/complete）与 `blob.write.ack`。绑定 InvocationId/Generation/TransferId，单块 128 KiB、编码帧 256 KiB；逐块确认，以有界 Pipe 接现有 StoreAsync 流式写入，校验长度/SHA 后才返回引用，主 Provider event 仍只携带引用。
+- Runtime 控制 output sink 的 Run/scope/期限/存储路径，Worker 不传目标路径。确认输出引用白名单后才接受附件完成事件；事件增加 Generation 防止旧轮混入。
+- 用户最新交付要求：CLI 收件后保存到 `AppContext.BaseDirectory/.attach`，不存在就创建；GUID 唯一文件名，完成校验后按输出顺序生成 Markdown，复用现有文字事件推送宿主。完整记录在步骤 06。
+- 八个 Chat Worker 的模拟音频回包分片合并为一个文件；OpenAI Responses 完成图片经原生 SDK 回包补映射后输出。300,001 字节经多块写回与哈希确认；OpenAI Worker → LocalRuntime → `.attach` → 宿主文字事件的贯通测试通过，图片内容与源字节一致。
+- 补齐 invocation 累计配额（含音频延迟内容）、旧代次错误隔离及资源释放后再发终态，避免立即复用 InvocationId 竞态。错误 generation/hash/offset/quota/cancel 不发布附件，输出分块编码上限、配额累计有专项测试。
+- CLI 存盘失败返回 `AttachmentDeliveryFailed`，不发送失效 Markdown；已确认 Blob 进入部分回复历史。详细测试证据与尚未验收厂商列于验证记录第 9 节。

@@ -30,6 +30,12 @@ public static partial class ProviderWorkerHost
                         resolver.Accept(chunk);
                     }
                     return null;
+                case BlobWriteAckFrame ack when _helloCompleted:
+                    if (_blobWriters.TryGetValue(ack.InvocationId, out var writer))
+                    {
+                        writer.Accept(ack);
+                    }
+                    return null;
                 case InvokeFrame invoke when _helloCompleted:
                     QueueInvoke(invoke);
                     return null;

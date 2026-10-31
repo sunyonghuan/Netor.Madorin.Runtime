@@ -35,14 +35,18 @@ public static class MafSkillsAgentFactory
         }
 
         var agent = chatClient.AsAIAgent(agentOptions);
+        using var outputMapper = new ProviderOutputContentMapper(request);
         await foreach (var update in agent.RunStreamingAsync(
                            messages,
                            cancellationToken: ct).ConfigureAwait(false))
         {
+            var contents = await outputMapper.MapAsync(update.Contents.ToArray(), update.FinishReason is not null, ct)
+                .ConfigureAwait(false);
             yield return new MafProviderResponseUpdate(
                 update.FinishReason?.ToString(),
-                update.Contents.ToArray());
+                contents);
         }
+        outputMapper.EnsureCompleted();
     }
 
     /// <summary>

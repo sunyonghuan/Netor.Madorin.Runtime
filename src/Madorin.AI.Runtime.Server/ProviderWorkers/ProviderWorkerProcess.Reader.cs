@@ -30,7 +30,14 @@ public sealed partial class ProviderWorkerProcess
                     return;
                 }
 
-                DispatchFrame(read.Frame!);
+                if (read.Frame is BlobWriteFrame write)
+                {
+                    await RespondToBlobWriteAsync(write).ConfigureAwait(false);
+                }
+                else
+                {
+                    DispatchFrame(read.Frame!);
+                }
             }
         }
         catch (OperationCanceledException)
@@ -64,6 +71,17 @@ public sealed partial class ProviderWorkerProcess
 
                 break;
             case EventFrame ev:
+                if (!_blobOutputs.TryGetValue(ev.InvocationId, out var output)
+                    || ev.Generation != output.Generation)
+                {
+                    break;
+                }
+                if (ev.Event is AttachmentCompletedProviderEvent attachment && !output.Contains(attachment.Blob))
+                {
+                    CompleteError(new ErrorFrame(ev.InvocationId, ProviderWorkerIpc.ErrorInvokeFailed,
+                        "Worker returned an unconfirmed output attachment."));
+                    break;
+                }
                 CompleteEvent(ev.InvocationId, ev.Event);
                 break;
             case BlobReadFrame read:
@@ -72,6 +90,32 @@ public sealed partial class ProviderWorkerProcess
             case ErrorFrame error:
                 CompleteError(error);
                 break;
+        }
+    }
+
+    private async Task RespondToBlobWriteAsync(BlobWriteFrame write)
+    {
+        if (!_blobOutputs.TryGetValue(write.InvocationId, out var lease))
+        {
+            return;
+        }
+        BlobWriteAckFrame response;
+        try
+        {
+            response = await lease.WriteAsync(write).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException
+            or InvalidOperationException or ArgumentException or OperationCanceledException)
+        {
+            response = new(write.InvocationId, write.Generation, write.TransferId, write.Operation, write.Offset,
+                Error: "Worker output attachment denied, cancelled, invalid or unavailable.");
+        }
+        try
+        {
+            await WriteFrameAsync(response, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
+        {
         }
     }
 
@@ -121,6 +165,13 @@ public sealed partial class ProviderWorkerProcess
         if (error.InvocationId is null)
         {
             FailAll(error.Message);
+            return;
+        }
+
+        if (error.Generation is not null
+            && (!_blobOutputs.TryGetValue(error.InvocationId, out var output)
+                || error.Generation != output.Generation))
+        {
             return;
         }
 

@@ -28,6 +28,10 @@ public sealed record RuntimeProviderRequest(
     [JsonIgnore]
     public Func<BlobReference, CancellationToken, Task<Stream>>? OpenBlobRead { get; init; }
 
+    /// <summary>Invocation-scoped output writer; stream ownership remains with the caller.</summary>
+    [JsonIgnore]
+    public Func<Stream, string, long, string, CancellationToken, Task<BlobReference>>? StoreOutputBlob { get; init; }
+
     /// <summary>SDK 需要完整缓冲时的单次调用附件总字节上限。</summary>
     [JsonIgnore]
     public int MaximumBufferedBlobBytes { get; init; } = 64 * 1024 * 1024;

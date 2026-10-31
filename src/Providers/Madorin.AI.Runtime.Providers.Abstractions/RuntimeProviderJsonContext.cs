@@ -9,6 +9,7 @@ namespace Madorin.AI.Runtime.Providers.Abstractions;
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(InvocationCompletedProviderEvent))]
 [JsonSerializable(typeof(InvocationFailedProviderEvent))]
+[JsonSerializable(typeof(AttachmentCompletedProviderEvent))]
 [JsonSerializable(typeof(ProviderCapabilities))]
 [JsonSerializable(typeof(ProviderCapabilityProbeResult))]
 [JsonSerializable(typeof(ProviderConfigurationField))]
