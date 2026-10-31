@@ -23,6 +23,39 @@ public sealed class ExpertOrchestrationRegressionTests
     public TestContext TestContext { get; set; } = null!;
 
     [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public async Task Run_UnknownWindowReachesProviderAndPreservesServerError(bool serverRejects)
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        fixture.Primary.ContextWindow = null;
+        var expectedError = new RuntimeError("provider_context_limit", "provider",
+            "The server rejected the request context.", false, null, "server-diagnostic");
+        fixture.Primary.Failure = serverRejects ? expectedError : null;
+
+        var events = await fixture.RunWithoutContextPolicyAsync();
+
+        var request = Assert.ContainsSingle(fixture.Primary.Requests);
+        Assert.AreEqual("primary-model", request.ModelId);
+        Assert.AreEqual(128, request.MaxTokens);
+        Assert.AreEqual(128, request.RequestControl?.MaxTokens);
+        Assert.IsTrue(request.Messages.SelectMany(message => message.Content)
+            .OfType<TextContentBlock>().Any(block => block.Text == "hello without a configured window"));
+        Assert.IsFalse(events.Any(item => item.MessageType == MessageTypes.ContextProjectionAdjusted));
+        if (serverRejects)
+        {
+            var failed = Assert.ContainsSingle(events.Where(item => item.MessageType == MessageTypes.RunFailed));
+            var payload = failed.Payload.Deserialize(RuntimeJsonContext.Default.RunFailedEvent);
+            Assert.AreEqual(expectedError, payload!.Error);
+        }
+        else
+        {
+            Assert.ContainsSingle(events.Where(item => item.MessageType == MessageTypes.RunCompleted));
+            Assert.IsFalse(events.Any(item => item.MessageType == MessageTypes.RunFailed));
+        }
+    }
+
+    [TestMethod]
     public async Task Run_Delegation_InvokesResolvedProviderAndItsDefaultModel()
     {
         await using var fixture = await Fixture.CreateAsync();
@@ -520,6 +553,26 @@ public sealed class ExpertOrchestrationRegressionTests
         public Task<ConversationCompactCacheV1?> ReadSummaryCacheAsync() =>
             new ConversationStore(Root).ReadCompactCacheAsync(_summarySessionId!);
 
+        public async Task<List<RuntimeEventEnvelope>> RunWithoutContextPolicyAsync()
+        {
+            var repository = new SqliteSessionRepository(_connection);
+            var sessionId = await repository.CreateSessionAsync(
+                RuntimeMode.Expert, "unknown-window-session", TimeSpan.FromHours(1));
+            var runId = await repository.CreateRunAsync(sessionId, "unknown-window-run", TimeSpan.FromHours(1));
+            await repository.TransitionRunStatusAsync(runId, RunStatus.Accepted, RunStatus.Preparing);
+            await repository.TransitionRunStatusAsync(runId, RunStatus.Preparing, RunStatus.Running);
+            var options = Options with { RequestControl = new ExpertRequestControl { MaxTokens = 128 } };
+            var request = new NewSessionRunRequest("s", "r", RuntimeMode.Expert,
+                new NextTurnSelection(1, RuntimeMode.Expert, new("primary", "primary-model"), options),
+                [new TextContentBlock("hello without a configured window")]);
+            var events = new List<RuntimeEventEnvelope>();
+            await foreach (var item in Orchestrator.RunAsync(runId, sessionId, request, "runtime"))
+            {
+                events.Add(item);
+            }
+            return events;
+        }
+
         public async Task ContinueSummarySessionAsync(string text, string modelId = "replacement-model")
         {
             var repository = new SqliteSessionRepository(_connection);
@@ -563,7 +616,9 @@ public sealed class ExpertOrchestrationRegressionTests
     {
         public string ProviderId => id;
         public ProviderCapabilities Capabilities { get; } = new();
-        public IReadOnlyList<ProviderModel> Models { get; } = [new(id + "-model", id, ContextWindow: 128_000)];
+        public int? ContextWindow { get; set; } = 128_000;
+        public RuntimeError? Failure { get; set; }
+        public IReadOnlyList<ProviderModel> Models => [new(id + "-model", id, ContextWindow: ContextWindow)];
         public System.Collections.Concurrent.ConcurrentQueue<RuntimeProviderRequest> Requests { get; } = new();
         public Func<CancellationToken, Task>? BeforeOutput { get; set; }
         public Task ValidateCapabilitiesAsync(ContentBlock[] input, CancellationToken ct = default) => Task.CompletedTask;
@@ -571,6 +626,12 @@ public sealed class ExpertOrchestrationRegressionTests
             RuntimeProviderRequest request, [EnumeratorCancellation] CancellationToken ct = default)
         {
             Requests.Enqueue(request);
+            if (Failure is { } failure)
+            {
+                yield return new InvocationFailedProviderEvent(request.InvocationId, failure);
+                yield break;
+            }
+
             if (BeforeOutput is not null)
             {
                 await BeforeOutput(ct);

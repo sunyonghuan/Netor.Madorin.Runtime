@@ -404,8 +404,9 @@ public sealed class BlobTransferTests
 
         public ProviderCapabilities Capabilities { get; } = new(Streaming: true, Files: true);
 
+        // 未配置窗口也应能进入 Provider，防止恢复旧的 context_window_unknown 硬阻断。
         public IReadOnlyList<ProviderModel> Models { get; } =
-            [new("capture-model", "Capture Model", ContextWindow: 32_768)];
+            [new("capture-model", "Capture Model")];
 
         public Task<BlobReference> ReferenceObserved => _referenceObserved.Task;
 
