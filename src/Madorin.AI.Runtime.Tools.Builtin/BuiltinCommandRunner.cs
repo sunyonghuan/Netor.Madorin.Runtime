@@ -1,14 +1,21 @@
-using System.ComponentModel;
-using System.Diagnostics;
+using System.Globalization;
 using System.Text;
 
 namespace Madorin.AI.Runtime.Tools.Builtin;
 
-/// <summary>Resolves the host shell and prepares a bounded, UTF-8 command invocation.</summary>
+/// <summary>Resolves the host shell and prepares a bounded command invocation.</summary>
 internal static class BuiltinCommandRunner
 {
     private const int MaxScriptBytes = 8 * 1024;
     private static readonly UTF8Encoding Utf8 = new(false, false);
+
+    public static Encoding ResolveEncoding(string? requested) => requested?.Trim().ToLowerInvariant() switch
+    {
+        null or "utf-8" => Utf8,
+        "gbk" => CodePagesEncodingProvider.Instance.GetEncoding(936)!,
+        "gb18030" => CodePagesEncodingProvider.Instance.GetEncoding(54936)!,
+        _ => throw new ArgumentException("Command encoding must be utf-8, gbk, or gb18030.", nameof(requested))
+    };
 
     public static string NormalizeShell(string? requested)
     {
@@ -48,7 +55,7 @@ internal static class BuiltinCommandRunner
             $"None of the requested shells were available: {string.Join(", ", candidates)}.");
     }
 
-    public static IReadOnlyList<string> BuildArguments(string shell, string script)
+    public static IReadOnlyList<string> BuildArguments(string shell, string script, Encoding encoding)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(script);
         if (Utf8.GetByteCount(script) > MaxScriptBytes)
@@ -58,21 +65,24 @@ internal static class BuiltinCommandRunner
 
         if (OperatingSystem.IsWindows())
         {
+            var codePage = encoding.CodePage.ToString(CultureInfo.InvariantCulture);
             return shell switch
             {
-                "cmd" => ["/d", "/s", "/c", "chcp 65001>nul & " + script],
+                "cmd" => ["/d", "/s", "/c", $"chcp {codePage}>nul & " + script],
                 "pwsh" or "powershell" => ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-                    "[Console]::InputEncoding=[Text.UTF8Encoding]::new($false);" +
-                    "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);" +
-                    "$OutputEncoding=[Text.UTF8Encoding]::new($false);" + script],
+                    $"[Console]::InputEncoding=[Text.Encoding]::GetEncoding({codePage});" +
+                    $"[Console]::OutputEncoding=[Text.Encoding]::GetEncoding({codePage});" +
+                    $"$OutputEncoding=[Text.Encoding]::GetEncoding({codePage});" + script],
                 _ => throw new ArgumentException("The selected shell is not available on Windows.")
             };
         }
 
+        var pythonEncoding = encoding.CodePage == 936 ? "gbk" : encoding.WebName;
+        var prefix = $"export PYTHONIOENCODING={pythonEncoding} PYTHONUTF8=1; ";
         return shell switch
         {
-            "bash" or "zsh" => ["-lc", "export PYTHONIOENCODING=utf-8 PYTHONUTF8=1; " + script],
-            "sh" => ["-c", "export PYTHONIOENCODING=utf-8 PYTHONUTF8=1; " + script],
+            "bash" or "zsh" => ["-lc", prefix + script],
+            "sh" => ["-c", prefix + script],
             _ => throw new ArgumentException("The selected shell is not available on this platform.")
         };
     }

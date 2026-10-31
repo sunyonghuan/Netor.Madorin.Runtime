@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using Madorin.AI.Runtime.Tools.Abstractions;
 
@@ -37,6 +38,7 @@ public sealed class BuiltinCommandToolExecutor : IToolExecutor
         }
 
         var script = GetRequiredString(arguments, "script");
+        var encoding = BuiltinCommandRunner.ResolveEncoding(GetOptionalString(arguments, "encoding"));
         var shell = BuiltinCommandRunner.NormalizeShell(GetOptionalString(arguments, "shell"));
         var executable = BuiltinCommandRunner.ResolveShell(shell, permission.AllowedExecutables);
         try
@@ -50,7 +52,7 @@ public sealed class BuiltinCommandToolExecutor : IToolExecutor
                 inheritAll: true);
             var standardInput = BuiltinProcessRunner.ParseStandardInput(arguments);
             var effectiveShell = ResolveEffectiveShell(executable.Path, shell);
-            var processArguments = BuiltinCommandRunner.BuildArguments(effectiveShell, script);
+            var processArguments = BuiltinCommandRunner.BuildArguments(effectiveShell, script, encoding);
             return ValueTask.FromResult<IPreparedToolExecution>(
                 new PreparedCommandExecution(
                     invocation,
@@ -59,6 +61,7 @@ public sealed class BuiltinCommandToolExecutor : IToolExecutor
                     processArguments,
                     environment,
                     standardInput,
+                    encoding,
                     $"shell:{Path.GetFileName(executable.Path)}"));
         }
         catch
@@ -130,6 +133,7 @@ public sealed class BuiltinCommandToolExecutor : IToolExecutor
         IReadOnlyList<string> arguments,
         IReadOnlyDictionary<string, string> environment,
         string? standardInput,
+        Encoding encoding,
         string targetSummary) : IPreparedToolExecution
     {
         private int _disposed;
@@ -146,6 +150,7 @@ public sealed class BuiltinCommandToolExecutor : IToolExecutor
                     workingDirectory.Path,
                     environment,
                     standardInput,
+                    encoding,
                     ct).ConfigureAwait(false);
                 var json = ToolJson.Write(writer =>
                 {

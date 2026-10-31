@@ -357,6 +357,8 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
         JsonElement arguments)
     {
         var script = BuiltinCommandToolExecutor.GetRequiredString(arguments, "script");
+        _ = BuiltinCommandRunner.ResolveEncoding(
+            BuiltinCommandToolExecutor.GetOptionalString(arguments, "encoding"));
         var shell = BuiltinCommandRunner.NormalizeShell(
             BuiltinCommandToolExecutor.GetOptionalString(arguments, "shell"));
         var standardInput = BuiltinProcessRunner.ParseStandardInput(arguments);

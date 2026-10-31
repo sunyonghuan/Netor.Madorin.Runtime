@@ -305,6 +305,7 @@ internal static class BuiltinProcessRunner
         string workingDirectory,
         IReadOnlyDictionary<string, string> environment,
         string? standardInput,
+        Encoding encoding,
         CancellationToken ct)
     {
         var startInfo = new ProcessStartInfo
@@ -316,9 +317,9 @@ internal static class BuiltinProcessRunner
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-            StandardInputEncoding = Utf8,
-            StandardOutputEncoding = Utf8,
-            StandardErrorEncoding = Utf8
+            StandardInputEncoding = encoding,
+            StandardOutputEncoding = encoding,
+            StandardErrorEncoding = encoding
         };
         foreach (var argument in arguments)
         {
@@ -364,8 +365,8 @@ internal static class BuiltinProcessRunner
             var stderr = await stderrTask.ConfigureAwait(false);
             return new ProcessOutput(
                 process.ExitCode,
-                Utf8.GetString(stdout.Content),
-                Utf8.GetString(stderr.Content),
+                encoding.GetString(stdout.Content),
+                encoding.GetString(stderr.Content),
                 stdout.IsTruncated,
                 stderr.IsTruncated);
         }

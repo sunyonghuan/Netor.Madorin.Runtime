@@ -150,8 +150,22 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
             CommandToolId,
             "mcli",
             "Run command",
-            "Runs a multi-command script through the host platform shell.",
-            """{"type":"object","properties":{"script":{"type":"string","minLength":1},"shell":{"type":"string","enum":["auto","pwsh","powershell","cmd","bash","zsh","sh"]},"workingDirectory":{"type":"string"},"environment":{"type":"object","additionalProperties":{"type":"string"}},"stdin":{"type":"string"}},"required":["script"],"additionalProperties":false}""",
+            "Run commands and programs such as git, dotnet, Python, and installed CLIs. Put the command and its arguments in script; separate multiple commands with newlines to execute them in one shell process. Use the current platform's shell syntax and quote paths containing spaces. Script text, paths, and arguments use Unicode. Returns shell, exitCode, stdout, stderr, stdoutTruncated, and stderrTruncated. Example: {\"script\":\"git status\\ngit diff\"}.",
+            """
+            {
+              "type":"object",
+              "properties":{
+                "script":{"type":"string","minLength":1,"description":"Required command or multiline script, including program arguments. Maximum 8 KiB of UTF-8 script text."},
+                "shell":{"type":"string","enum":["auto","pwsh","powershell","cmd","bash","zsh","sh"],"default":"auto","description":"Script interpreter. Default auto: Windows selects pwsh, then powershell, then cmd; macOS/Linux selects bash, then zsh, then sh. Commands and programs belong in script."},
+                "workingDirectory":{"type":"string","description":"Initial working directory. Default: current workspace root. Relative paths resolve from the workspace root."},
+                "environment":{"type":"object","additionalProperties":{"type":"string"},"default":{},"description":"Environment variable overrides, as string values. Default: inherit the full CLI environment. Overrides use the current permission grant."},
+                "stdin":{"type":"string","default":"","description":"Standard input text. Default: empty input followed by EOF."},
+                "encoding":{"type":"string","enum":["utf-8","gbk","gb18030"],"default":"utf-8","description":"Character encoding for stdin, stdout, and stderr. Default utf-8. Select gbk or gb18030 for programs using that stream encoding."}
+              },
+              "required":["script"],
+              "additionalProperties":false
+            }
+            """,
             """{"type":"object","properties":{"exitCode":{"type":"integer"},"stdout":{"type":"string"},"stderr":{"type":"string"},"stdoutTruncated":{"type":"boolean"},"stderrTruncated":{"type":"boolean"},"shell":{"type":"string"}},"required":["exitCode","stdout","stderr","stdoutTruncated","stderrTruncated","shell"],"additionalProperties":false}""",
             Capabilities: ["process.execute"],
             Risk: ToolRiskLevel.Process,
@@ -315,7 +329,7 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
     private static readonly IReadOnlyList<ToolDescriptor> Tools = Array.AsReadOnly(
         [.. AdvertisedTools, .. BuiltinToolAliasCatalog.Tools]);
 
-    public string CatalogVersion => "3.5.2";
+    public string CatalogVersion => "3.5.3";
 
     public IReadOnlyList<ToolDescriptor> GetTools() => Tools;
 
