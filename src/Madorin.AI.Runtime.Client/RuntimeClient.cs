@@ -1962,6 +1962,12 @@ public sealed class RuntimeClient : IRuntimeClient
     {
         if (response.Error is not null)
         {
+            if (response.Error.Code == -32601)
+            {
+                throw new NotSupportedException(
+                    $"The Runtime does not support the requested RPC method: {response.Error.Message}");
+            }
+
             throw new InvalidOperationException(
                 $"Runtime RPC failed ({response.Error.Code}): {response.Error.Message}");
         }
