@@ -481,6 +481,50 @@ public sealed class ToolGatewayTests
     }
 
     [TestMethod]
+    public async Task ExecuteAsync_HttpDnsFailure_ReturnsToolFailureInsteadOfThrowing()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync(TestContext.CancellationToken);
+        await SqliteSchema.EnsureCreatedAsync(connection, TestContext.CancellationToken);
+        using var repository = new SqliteToolIntentRepository(connection);
+        using var outbox = new SqliteEventOutbox(connection);
+        var validator = new JsonSchemaToolValidator();
+        using var gateway = new ToolGateway(
+            new ToolCatalogStore(new BuiltinToolRegistry(), validator),
+            validator,
+            new ToolAuthorizationService(
+                repository,
+                RuntimeToolPolicy.CreateRestricted(_workspaceRoot)),
+            [new BuiltinHttpToolExecutor()],
+            repository,
+            outbox);
+        var invocation = CreateFileInvocation(
+            BuiltinToolRegistry.HttpRequestToolId,
+            CreateArguments(
+                ("method", "GET"),
+                ("url", "https://definitely-not-a-real-host.invalid/")),
+            "call-http-dns-failure");
+        var permission = CreatePermission() with
+        {
+            DenyNetwork = false,
+            AllowedToolIds = [BuiltinToolRegistry.HttpRequestToolId],
+            MaximumRisk = ToolRiskLevel.Network,
+            NetworkPolicy = new NetworkPolicy(
+                DenyAll: false,
+                AllowedHosts: ["definitely-not-a-real-host.invalid"])
+        };
+
+        var result = await gateway.ExecuteAsync(
+            invocation,
+            permission,
+            TestContext.CancellationToken);
+
+        Assert.AreEqual(ToolGatewayResultKind.Failed, result.Kind);
+        Assert.AreEqual(RuntimeErrorCodes.ToolExecutionFailed, result.Error?.Code);
+        Assert.IsFalse(string.IsNullOrWhiteSpace(result.Error?.Message));
+    }
+
+    [TestMethod]
     public async Task ExecuteAsync_PrepareFails_DoesNotReserveCallId()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");

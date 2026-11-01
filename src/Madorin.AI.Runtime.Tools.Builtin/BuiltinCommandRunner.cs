@@ -52,7 +52,11 @@ internal static class BuiltinCommandRunner
         ArgumentException.ThrowIfNullOrWhiteSpace(script);
         if (Utf8.GetByteCount(script) > MaxScriptBytes)
         {
-            throw new InvalidDataException("The command script exceeds the 8 KB limit.");
+            throw new InvalidDataException(
+                "The command script exceeds the 8 KB limit. No command was executed. " +
+                "Use mcli_fs_write to save long text or scripts to files, then pass file paths to the program " +
+                "or invoke the script file with its interpreter. If the program supports standard input, " +
+                "put long text in stdin instead of script. Retry with a shorter script and a new tool call id.");
         }
 
         if (OperatingSystem.IsWindows())

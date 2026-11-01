@@ -1,4 +1,6 @@
 using System.Buffers;
+using System.Net.Http;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -227,8 +229,11 @@ public sealed class ToolGateway(
         }
         catch (Exception ex) when (ex is JsonException
             or ArgumentException
+            or InvalidDataException
+            or HttpRequestException
             or InvalidOperationException
             or IOException
+            or SocketException
             or UnauthorizedAccessException
             or TimeoutException)
         {
@@ -382,8 +387,11 @@ public sealed class ToolGateway(
         }
         catch (Exception ex) when (ex is JsonException
             or ArgumentException
+            or InvalidDataException
+            or HttpRequestException
             or InvalidOperationException
             or IOException
+            or SocketException
             or UnauthorizedAccessException
             or TimeoutException)
         {

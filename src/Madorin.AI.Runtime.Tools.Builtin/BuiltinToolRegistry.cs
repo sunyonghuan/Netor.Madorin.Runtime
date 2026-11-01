@@ -150,7 +150,7 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
             CommandToolId,
             "mcli",
             "Run command",
-            "Run commands and programs such as git, dotnet, Python, and installed CLIs. Put the command and its arguments in script; separate multiple commands with newlines to execute them in one shell process. Use the current platform's shell syntax and quote paths containing spaces. Script text, paths, and arguments use Unicode. Returns shell, exitCode, stdout, stderr, stdoutTruncated, and stderrTruncated. Example: {\"script\":\"git status\\ngit diff\"}.",
+            "Run commands and programs such as git, dotnet, Python, and installed CLIs. Put the command and its arguments in script; separate multiple commands with newlines to execute them in one shell process. Use the current platform's shell syntax and quote paths containing spaces. Script text, paths, and arguments use Unicode. Keep script within 8 KiB UTF-8: use mcli_fs_write for long prompts, request bodies, or scripts, then pass file paths using the program's supported file-input options or invoke script files with their interpreter. Do not read a long file back into a command-line argument. Alternatively, use stdin (up to 1 MiB UTF-8) when the program supports standard input. Input errors are returned as tool failures; correct the input and retry with a new tool call id. Permission denials must not be bypassed. Returns shell, exitCode, stdout, stderr, stdoutTruncated, and stderrTruncated. Example: {\"script\":\"git status\\ngit diff\"}.",
             """
             {
               "type":"object",
@@ -159,7 +159,7 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
                 "shell":{"type":"string","enum":["auto","pwsh","powershell","cmd","bash","zsh","sh"],"default":"auto","description":"Script interpreter. Default auto: Windows selects pwsh, then powershell, then cmd; macOS/Linux selects bash, then zsh, then sh. Commands and programs belong in script."},
                 "workingDirectory":{"type":"string","description":"Initial working directory. Default: current workspace root. Relative paths resolve from the workspace root."},
                 "environment":{"type":"object","additionalProperties":{"type":"string"},"default":{},"description":"Environment variable overrides, as string values. Default: inherit the full CLI environment."},
-                "stdin":{"type":"string","default":"","description":"Standard input text. Default: empty input followed by EOF."},
+                "stdin":{"type":"string","default":"","description":"Standard input text, up to 1 MiB UTF-8. Use for long prompts or request bodies only when the program supports standard input. Default: empty input followed by EOF."},
                 "encoding":{"type":"string","enum":["utf-8","gbk","gb18030"],"default":"utf-8","description":"Character encoding for stdin, stdout, and stderr. Default utf-8. Select gbk or gb18030 for programs using that stream encoding."}
               },
               "required":["script"],
