@@ -1152,11 +1152,20 @@ public sealed class RuntimeClient : IRuntimeClient
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(parameters);
-        return await SendControlRequestAsync(
-            MessageTypes.SessionHistoryRoundsRead,
-            parameters,
-            RuntimeJsonContext.Default.SessionHistoryRoundsReadResult,
-            cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await SendControlRequestAsync(
+                MessageTypes.SessionHistoryRoundsRead,
+                parameters,
+                RuntimeJsonContext.Default.SessionHistoryRoundsReadResult,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (InvalidOperationException ex)
+            when (ex.Message.Contains("Runtime RPC failed (-32601)", StringComparison.Ordinal))
+        {
+            throw new NotSupportedException(
+                "This Runtime does not support round-based history pages.", ex);
+        }
     }
 
     public ValueTask<SessionCompactionResultDto> CompactSessionAsync(
@@ -1962,12 +1971,6 @@ public sealed class RuntimeClient : IRuntimeClient
     {
         if (response.Error is not null)
         {
-            if (response.Error.Code == -32601)
-            {
-                throw new NotSupportedException(
-                    $"The Runtime does not support the requested RPC method: {response.Error.Message}");
-            }
-
             throw new InvalidOperationException(
                 $"Runtime RPC failed ({response.Error.Code}): {response.Error.Message}");
         }
