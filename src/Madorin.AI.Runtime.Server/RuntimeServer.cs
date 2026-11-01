@@ -850,7 +850,8 @@ public sealed class RuntimeServer : IAsyncDisposable
             toolStateStore,
             toolGateway,
             toolCatalogSnapshot,
-            workRecoveryStore: null);
+            workRecoveryStore: null,
+            isRunActive: runId => _activeRuns.ContainsKey(runId));
         try
         {
             await recoveryService.RecoverSentToolIntentsAsync(ct).ConfigureAwait(false);
@@ -999,13 +1000,16 @@ public sealed class RuntimeServer : IAsyncDisposable
             }
 
             var snapshot = session.ToolCatalogStore.ReplaceHostCatalog(parameters);
-            await RecoverSentToolIntentsAsync(
-                session,
-                repository,
-                toolStateStore,
-                outbox,
-                snapshot,
-                ct).ConfigureAwait(false);
+            if (Volatile.Read(ref _startupToolRecoveryPending) != 0)
+            {
+                await RecoverSentToolIntentsAsync(
+                    session,
+                    repository,
+                    toolStateStore,
+                    outbox,
+                    snapshot,
+                    ct).ConfigureAwait(false);
+            }
             var result = JsonSerializer.SerializeToElement(
                 new ToolCatalogUpdateResponse(
                     snapshot.HostCatalogVersion,
@@ -1033,13 +1037,16 @@ public sealed class RuntimeServer : IAsyncDisposable
             }
 
             var snapshot = session.ToolCatalogStore.PatchHostCatalog(parameters);
-            await RecoverSentToolIntentsAsync(
-                session,
-                repository,
-                toolStateStore,
-                outbox,
-                snapshot,
-                ct).ConfigureAwait(false);
+            if (Volatile.Read(ref _startupToolRecoveryPending) != 0)
+            {
+                await RecoverSentToolIntentsAsync(
+                    session,
+                    repository,
+                    toolStateStore,
+                    outbox,
+                    snapshot,
+                    ct).ConfigureAwait(false);
+            }
             var result = JsonSerializer.SerializeToElement(
                 new ToolCatalogUpdateResponse(
                     snapshot.HostCatalogVersion,
@@ -2612,6 +2619,7 @@ public sealed class RuntimeServer : IAsyncDisposable
                     activeRun,
                     refreshCt),
                 () => activeRun.IsTimedOut,
+                isRunActive: runId => _activeRuns.ContainsKey(runId),
                 providerFactory: providerFactory,
                 skillCatalog: session.SkillCatalog,
                 isHostModeSkills: _hostProviderRegistry is not null,

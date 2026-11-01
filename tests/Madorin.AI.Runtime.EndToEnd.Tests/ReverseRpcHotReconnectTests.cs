@@ -248,11 +248,14 @@ public sealed class ReverseRpcHotReconnectTests
 
             recoveryHost.ReleaseQuery();
             await catalogTask;
+            // 恢复门闩清除后，目录刷新不得再次扫描历史 Sent 调用。
+            await PublishCatalogAsync(recoveryClient, timeout.Token);
+            Assert.AreEqual(1, recoveryHost.QueryCount);
             var runId = await runClient.StartNewSessionRunAsync(
                 CreateTextOnlyRequest("after-recovery"),
                 timeout.Token);
             var terminal = await ReadTerminalRunEventAsync(runClient, runId, timeout.Token);
-            Assert.AreEqual(MessageTypes.RunCompleted, terminal.MessageType);
+            Assert.AreEqual(MessageTypes.RunCompleted, terminal.MessageType, terminal.Payload.GetRawText());
             Assert.AreEqual(1, recoveryHost.QueryCount);
 
             shutdown.Cancel();
@@ -760,7 +763,7 @@ public sealed class ReverseRpcHotReconnectTests
         public ProviderCapabilities Capabilities { get; } = new(Streaming: true);
 
         public IReadOnlyList<ProviderModel> Models { get; } =
-            [new("text-only-model", "Text-only Model", ContextWindow: 4096)];
+            [new("text-only-model", "Text-only Model", ContextWindow: 32_768)];
 
         public async IAsyncEnumerable<RuntimeProviderEvent> CompleteStreamingAsync(
             RuntimeProviderRequest request,

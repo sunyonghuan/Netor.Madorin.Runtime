@@ -12,19 +12,22 @@ public sealed class RecoveryService
     private readonly ToolGateway? _toolGateway;
     private readonly IToolStateStore? _toolStateStore;
     private readonly IWorkRecoveryStore? _workRecoveryStore;
+    private readonly Func<string, bool>? _isRunActive;
 
     public RecoveryService(
         ISessionRepository repo,
         IToolStateStore? toolStateStore = null,
         ToolGateway? toolGateway = null,
         ToolCatalogSnapshot? toolCatalogSnapshot = null,
-        IWorkRecoveryStore? workRecoveryStore = null)
+        IWorkRecoveryStore? workRecoveryStore = null,
+        Func<string, bool>? isRunActive = null)
     {
         _repo = repo ?? throw new ArgumentNullException(nameof(repo));
         _toolStateStore = toolStateStore;
         _toolGateway = toolGateway;
         _toolCatalogSnapshot = toolCatalogSnapshot;
         _workRecoveryStore = workRecoveryStore;
+        _isRunActive = isRunActive;
     }
 
     /// <summary>Marks every non-terminal Run and active work step as interrupted.</summary>
@@ -49,6 +52,12 @@ public sealed class RecoveryService
         foreach (var intent in intents)
         {
             ct.ThrowIfCancellationRequested();
+            if (_isRunActive?.Invoke(intent.RunId) == true)
+            {
+                // 活跃 Run 的 Sent 调用仍由原执行路径收口，恢复扫描不得抢先改成 Unknown。
+                continue;
+            }
+
             try
             {
                 var current = intent;

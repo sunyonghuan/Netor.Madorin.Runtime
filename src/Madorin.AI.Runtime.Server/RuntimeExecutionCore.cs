@@ -61,6 +61,7 @@ internal sealed class RuntimeExecutionCore(
         Func<CredentialsRefreshRequestedEvent, CancellationToken, Task<bool>>?
             credentialRefreshHandler = null,
         Func<bool>? isRunTimedOut = null,
+        Func<string, bool>? isRunActive = null,
         Func<string, IRuntimeProviderAdapter>? providerFactory = null,
         IToolConsentHandler? localToolConsentHandler = null,
         SkillCatalogService? skillCatalog = null,
@@ -178,7 +179,8 @@ internal sealed class RuntimeExecutionCore(
             toolStateStore,
             toolGateway,
             gatewayCatalogSnapshot,
-            workRecoveryStore: null);
+            workRecoveryStore: null,
+            isRunActive: isRunActive);
         await recoveryService.RecoverSentToolIntentsAsync(ct).ConfigureAwait(false);
         // Live catalog must stay aligned with search/browse inject; consent re-entry
         // must not freeze the Run-start snapshot or CallId identity will conflict.
