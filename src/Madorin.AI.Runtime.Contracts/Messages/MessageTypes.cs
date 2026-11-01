@@ -13,6 +13,7 @@ public static class MessageTypes
     public const string SessionResume = "session.resume";
     public const string SessionMessagesList = "session.messages.list";
     public const string SessionHistoryRead = "session.history.read";
+    public const string SessionHistoryRoundsRead = "session.history.rounds.read";
     public const string SessionSelectionUpdate = "session.selection.update";
     public const string SessionCompaction = "session.compact";
     public const string SessionContextStatus = "session.context.status";

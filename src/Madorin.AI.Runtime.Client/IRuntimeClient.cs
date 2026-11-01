@@ -93,6 +93,11 @@ public interface IRuntimeClient : IAsyncDisposable
         SessionHistoryReadParameters parameters,
         CancellationToken cancellationToken = default);
 
+    public ValueTask<SessionHistoryRoundsReadResult> ReadSessionHistoryRoundsAsync(
+        SessionHistoryRoundsReadParameters parameters,
+        CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("This Runtime client implementation does not support round-based history pages.");
+
     public ValueTask<SessionCompactionResultDto> CompactSessionAsync(
         SessionCompactionRequest request,
         CancellationToken cancellationToken = default) =>

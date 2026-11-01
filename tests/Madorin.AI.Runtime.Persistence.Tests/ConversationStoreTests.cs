@@ -73,6 +73,84 @@ public sealed class ConversationStoreTests
     }
 
     [TestMethod]
+    [DataRow(1)]
+    [DataRow(29)]
+    [DataRow(30)]
+    [DataRow(31)]
+    [DataRow(95)]
+    public async Task ReadRoundsPageAsync_ReturnsLatestCompleteUserAnchoredRounds(int roundCount)
+    {
+        var dataDirectory = CreateTemporaryDirectory();
+        try
+        {
+            const int rounds = 95;
+            var store = new ConversationStore(dataDirectory);
+            for (var round = 1; round <= rounds; round++)
+            {
+                await store.AppendMessageAsync(
+                    "session-round-pages",
+                    new ConversationRecordV1(
+                        $"user-{round}",
+                        (round - 1) * 3L + 1,
+                        $"invocation-{round}",
+                        "user",
+                        "user",
+                        CreateDraft($"prompt-{round}").Content,
+                        DateTimeOffset.UtcNow),
+                    TestContext.CancellationToken);
+                await store.AppendMessageAsync(
+                    "session-round-pages",
+                    new ConversationRecordV1(
+                        $"assistant-{round}-1",
+                        (round - 1) * 3L + 2,
+                        $"invocation-{round}",
+                        "agent-1",
+                        "assistant",
+                        CreateDraft($"reply-{round}").Content,
+                        DateTimeOffset.UtcNow),
+                    TestContext.CancellationToken);
+                await store.AppendMessageAsync(
+                    "session-round-pages",
+                    new ConversationRecordV1(
+                        $"assistant-{round}-2",
+                        (round - 1) * 3L + 3,
+                        $"invocation-{round}",
+                        "agent-2",
+                        "assistant",
+                        CreateDraft($"follow-up-{round}").Content,
+                        DateTimeOffset.UtcNow),
+                    TestContext.CancellationToken);
+            }
+
+            var firstPage = await store.ReadRoundsPageAsync(
+                "session-round-pages",
+                roundCount,
+                ct: TestContext.CancellationToken);
+            var expectedFirstRound = Math.Max(1, rounds - roundCount + 1);
+            Assert.AreEqual((long)((expectedFirstRound - 1) * 3 + 1), firstPage.OldestUserSequence);
+            Assert.HasCount(roundCount * 3, firstPage.Records);
+            Assert.AreEqual(roundCount < rounds, firstPage.HasOlder);
+            Assert.AreEqual("user", firstPage.Records[0].Role);
+            Assert.AreEqual("assistant", firstPage.Records[^1].Role);
+
+            if (roundCount <= 30)
+            {
+                var olderPage = await store.ReadRoundsPageAsync(
+                    "session-round-pages",
+                    30,
+                    firstPage.OldestUserSequence,
+                    ct: TestContext.CancellationToken);
+                Assert.IsTrue(olderPage.Records.All(record => record.Sequence < firstPage.OldestUserSequence));
+                Assert.AreEqual(rounds - roundCount >= 30, olderPage.HasOlder);
+            }
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(dataDirectory);
+        }
+    }
+
+    [TestMethod]
     [DataRow(ConversationStoreFailurePoint.BeforeFileAppend, 0, false)]
     [DataRow(ConversationStoreFailurePoint.AfterRecordPrefix, 0, true)]
     [DataRow(ConversationStoreFailurePoint.AfterRecordBytes, 1, false)]

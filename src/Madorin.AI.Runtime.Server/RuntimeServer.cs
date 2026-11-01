@@ -32,6 +32,7 @@ public sealed class RuntimeServer : IAsyncDisposable
     private readonly FileStream _instanceNameLock;
     private readonly string _dataDirectory;
     private readonly string _databaseConnectionString;
+    private readonly ConversationStore _conversationStore;
     private readonly string _handshakeSecret;
     private readonly TimeProvider _timeProvider;
     private readonly DateTimeOffset _startedAt;
@@ -83,6 +84,7 @@ public sealed class RuntimeServer : IAsyncDisposable
         _instanceNameLock = instanceNameLock;
         _dataDirectory = options.DataDirectory;
         _databaseConnectionString = databaseConnectionString;
+        _conversationStore = new ConversationStore(options.DataDirectory);
         _handshakeSecret = options.HandshakeSecret
             ?? throw new ArgumentException("A handshake secret is required.", nameof(options));
         _timeProvider = options.TimeProvider;
@@ -1249,6 +1251,12 @@ public sealed class RuntimeServer : IAsyncDisposable
                 .ConfigureAwait(false);
         }
 
+        if (string.Equals(request.Method, MessageTypes.SessionHistoryRoundsRead, StringComparison.Ordinal))
+        {
+            return await CreateSessionHistoryRoundsReadResponseAsync(request, repository, ct)
+                .ConfigureAwait(false);
+        }
+
         if (string.Equals(request.Method, MessageTypes.SessionSelectionUpdate, StringComparison.Ordinal))
         {
             return await CreateSessionSelectionUpdateResponseAsync(request, repository, ct)
@@ -1805,8 +1813,7 @@ public sealed class RuntimeServer : IAsyncDisposable
             return Error(request.Id, -32004, $"Session '{parameters.SessionId}' was not found.");
         }
 
-        var store = new ConversationStore(_dataDirectory);
-        var page = await store.ReadPageAsync(
+        var page = await _conversationStore.ReadPageAsync(
                 parameters.SessionId,
                 parameters.Cursor,
                 parameters.PageSize + 1,
@@ -1826,6 +1833,53 @@ public sealed class RuntimeServer : IAsyncDisposable
         var payload = JsonSerializer.SerializeToElement(
             result,
             RuntimeJsonContext.Default.SessionHistoryReadResult);
+        return new JsonRpcResponse("2.0", request.Id, payload);
+    }
+
+    private async Task<JsonRpcResponse> CreateSessionHistoryRoundsReadResponseAsync(
+        JsonRpcRequest request,
+        SqliteSessionRepository repository,
+        CancellationToken ct)
+    {
+        var parameters = request.Params is { } json
+            ? json.Deserialize(RuntimeJsonContext.Default.SessionHistoryRoundsReadParameters)
+            : null;
+        if (parameters is null
+            || string.IsNullOrWhiteSpace(parameters.SessionId)
+            || parameters.RoundCount is <= 0 or > 100
+            || parameters.BeforeSequence is < 0
+            || !LocalRuntime.TryParseBlobMode(parameters.BlobMode, out var blobMode))
+        {
+            return Error(request.Id, -32602, "The session.history.rounds.read parameters are invalid.");
+        }
+
+        var snapshot = await repository.GetSessionSnapshotAsync(parameters.SessionId, ct)
+            .ConfigureAwait(false);
+        if (snapshot is null)
+        {
+            return Error(request.Id, -32004, $"Session '{parameters.SessionId}' was not found.");
+        }
+
+        var page = await _conversationStore.ReadRoundsPageAsync(
+                parameters.SessionId,
+                parameters.RoundCount,
+                parameters.BeforeSequence,
+                new ConversationReadOptions(blobMode),
+                ct)
+            .ConfigureAwait(false);
+        var messages = page.Records
+            .Select(record => LocalRuntime.MapHistoryMessage(
+                record,
+                parameters.IncludeReasoning,
+                parameters.IncludeToolCalls))
+            .ToArray();
+        var result = new SessionHistoryRoundsReadResult(
+            messages,
+            page.OldestUserSequence,
+            page.HasOlder);
+        var payload = JsonSerializer.SerializeToElement(
+            result,
+            RuntimeJsonContext.Default.SessionHistoryRoundsReadResult);
         return new JsonRpcResponse("2.0", request.Id, payload);
     }
 

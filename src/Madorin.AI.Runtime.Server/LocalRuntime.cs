@@ -26,6 +26,7 @@ public sealed class LocalRuntime : IAsyncDisposable
 {
     private readonly string _dataDirectory;
     private readonly string _databaseConnectionString;
+    private readonly ConversationStore _conversationStore;
     private readonly BlobStagingStore _blobStore;
     private readonly RuntimeExecutionCore _executionCore;
     private readonly ToolCatalogStore _toolCatalogStore = new(
@@ -59,6 +60,7 @@ public sealed class LocalRuntime : IAsyncDisposable
     {
         _dataDirectory = options.DataDirectory;
         _databaseConnectionString = databaseConnectionString;
+        _conversationStore = new ConversationStore(options.DataDirectory);
         _providerResolver = options.ProviderResolver;
         _compactionService = new SessionCompactionService(_dataDirectory, databaseConnectionString, selection => ResolveProvider(selection));
         _toolConsentHandler = options.ToolConsentHandler;
@@ -380,8 +382,7 @@ public sealed class LocalRuntime : IAsyncDisposable
             throw new KeyNotFoundException($"Session '{parameters.SessionId}' was not found.");
         }
 
-        var store = new ConversationStore(_dataDirectory);
-        var page = await store.ReadPageAsync(
+        var page = await _conversationStore.ReadPageAsync(
                 parameters.SessionId,
                 parameters.Cursor,
                 parameters.PageSize + 1,
@@ -398,6 +399,53 @@ public sealed class LocalRuntime : IAsyncDisposable
         return new SessionHistoryReadResult(
             messages,
             hasMore && messages.Length > 0 ? messages[^1].Sequence : null);
+    }
+
+    /// <summary>Reads complete user-anchored rounds for chat display.</summary>
+    public async Task<SessionHistoryRoundsReadResult> ReadSessionHistoryRoundsAsync(
+        SessionHistoryRoundsReadParameters parameters,
+        CancellationToken ct = default)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(parameters);
+        ArgumentException.ThrowIfNullOrWhiteSpace(parameters.SessionId);
+        if (parameters.RoundCount is < 1 or > 100)
+        {
+            throw new ArgumentOutOfRangeException(nameof(parameters));
+        }
+
+        if (parameters.BeforeSequence is < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(parameters));
+        }
+
+        if (!TryParseBlobMode(parameters.BlobMode, out var blobMode))
+        {
+            throw new ArgumentOutOfRangeException(nameof(parameters));
+        }
+
+        if (await GetSessionSnapshotAsync(parameters.SessionId, ct).ConfigureAwait(false) is null)
+        {
+            throw new KeyNotFoundException($"Session '{parameters.SessionId}' was not found.");
+        }
+
+        var page = await _conversationStore.ReadRoundsPageAsync(
+                parameters.SessionId,
+                parameters.RoundCount,
+                parameters.BeforeSequence,
+                new ConversationReadOptions(blobMode),
+                ct)
+            .ConfigureAwait(false);
+        var messages = page.Records
+            .Select(record => MapHistoryMessage(
+                record,
+                parameters.IncludeReasoning,
+                parameters.IncludeToolCalls))
+            .ToArray();
+        return new SessionHistoryRoundsReadResult(
+            messages,
+            page.OldestUserSequence,
+            page.HasOlder);
     }
 
     /// <summary>Reads the canonical message history for Session export.</summary>

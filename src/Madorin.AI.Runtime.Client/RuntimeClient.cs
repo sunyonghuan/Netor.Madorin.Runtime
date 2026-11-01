@@ -1147,6 +1147,18 @@ public sealed class RuntimeClient : IRuntimeClient
             cancellationToken).ConfigureAwait(false);
     }
 
+    public async ValueTask<SessionHistoryRoundsReadResult> ReadSessionHistoryRoundsAsync(
+        SessionHistoryRoundsReadParameters parameters,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(parameters);
+        return await SendControlRequestAsync(
+            MessageTypes.SessionHistoryRoundsRead,
+            parameters,
+            RuntimeJsonContext.Default.SessionHistoryRoundsReadResult,
+            cancellationToken).ConfigureAwait(false);
+    }
+
     public ValueTask<SessionCompactionResultDto> CompactSessionAsync(
         SessionCompactionRequest request,
         CancellationToken cancellationToken = default)

@@ -111,6 +111,8 @@ namespace Madorin.AI.Runtime.Contracts.Serialization;
 [JsonSerializable(typeof(SessionHistoryMessage[]))]
 [JsonSerializable(typeof(SessionHistoryReadParameters))]
 [JsonSerializable(typeof(SessionHistoryReadResult))]
+[JsonSerializable(typeof(SessionHistoryRoundsReadParameters))]
+[JsonSerializable(typeof(SessionHistoryRoundsReadResult))]
 [JsonSerializable(typeof(SessionMessagesListParameters))]
 [JsonSerializable(typeof(SessionMessagesListResult))]
 [JsonSerializable(typeof(SessionRehydrateParameters))]
