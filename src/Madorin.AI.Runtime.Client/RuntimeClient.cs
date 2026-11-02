@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
@@ -376,6 +377,8 @@ public sealed class RuntimeClient : IRuntimeClient
         startInfo.ArgumentList.Add(options.RuntimeInstanceId!);
         startInfo.ArgumentList.Add("--pipe-prefix");
         startInfo.ArgumentList.Add(options.PipePrefix);
+        startInfo.Environment["MADORIN_HOST_PID"] =
+            Environment.ProcessId.ToString(CultureInfo.InvariantCulture);
         return startInfo;
     }
 
@@ -983,6 +986,21 @@ public sealed class RuntimeClient : IRuntimeClient
         ThrowIfError(response);
         UpdateConfirmedGsn(lastConfirmedGsn);
         _confirmedRuntimeInstanceId = _runtimeInstanceId;
+    }
+
+    public async ValueTask ShutdownAsync(CancellationToken cancellationToken = default)
+    {
+        ThrowIfTerminalFailure();
+        if (State != RuntimeClientState.Connected || _controlChannel is null)
+        {
+            throw new InvalidOperationException("The Runtime client is not connected.");
+        }
+
+        var response = await _controlChannel.SendRequestAsync(
+            MessageTypes.RuntimeShutdown,
+            parameters: null,
+            cancellationToken).ConfigureAwait(false);
+        ThrowIfError(response);
     }
 
     public async ValueTask<bool> CancelRunAsync(

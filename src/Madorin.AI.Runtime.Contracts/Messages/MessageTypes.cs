@@ -8,6 +8,7 @@ public static class MessageTypes
     public const string RunList = "run.list";
     public const string RunQuery = "run.query";
     public const string RuntimeStatus = "runtime.status";
+    public const string RuntimeShutdown = "runtime.shutdown";
     public const string SessionGet = "session.get";
     public const string SessionList = "session.list";
     public const string SessionResume = "session.resume";

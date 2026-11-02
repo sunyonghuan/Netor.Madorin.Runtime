@@ -96,6 +96,7 @@ internal static class ServiceCommands
                     context.Cancel = true;
                     CancelNoThrow(shutdown);
                 });
+            using var parentExitRegistration = ParentProcessExitRegistration.Track(shutdown);
 
             string handshakeSecret;
             try

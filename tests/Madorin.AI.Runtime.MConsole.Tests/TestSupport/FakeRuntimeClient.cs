@@ -111,6 +111,8 @@ internal sealed class FakeRuntimeClient : IRuntimeClient
         CancellationToken cancellationToken = default) =>
         ValueTask.FromResult(QueryResult);
 
+    public ValueTask ShutdownAsync(CancellationToken cancellationToken = default) => ValueTask.CompletedTask;
+
     public ValueTask<RuntimeStatusResult> GetRuntimeStatusAsync(
         CancellationToken cancellationToken = default) =>
         ValueTask.FromResult(new RuntimeStatusResult(

@@ -1312,6 +1312,13 @@ public sealed class RuntimeServer : IAsyncDisposable
             return new JsonRpcResponse("2.0", request.Id, result);
         }
 
+        if (string.Equals(request.Method, MessageTypes.RuntimeShutdown, StringComparison.Ordinal))
+        {
+            var accepted = JsonSerializer.SerializeToElement(true, RuntimeJsonContext.Default.Boolean);
+            _ = Task.Run(RequestHostShutdownAsync, CancellationToken.None);
+            return new JsonRpcResponse("2.0", request.Id, accepted);
+        }
+
         if (string.Equals(request.Method, MessageTypes.RunCancel, StringComparison.Ordinal))
         {
             var parameters = request.Params is { } cancelParameters
@@ -3618,6 +3625,26 @@ public sealed class RuntimeServer : IAsyncDisposable
     private async Task ObserveConnectionTasksAsync()
     {
         await ObserveTasksAsync(_connections.Values.ToArray()).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 宿主关闭命令：取消服务运行令牌，使 <see cref="RunAsync"/> 返回后由调用方释放服务。
+    /// 释放路径会取消活跃 Run，并向 Provider 写入 shutdown 帧。
+    /// </summary>
+    private async Task RequestHostShutdownAsync()
+    {
+        try
+        {
+            await _diagnosticLog.TryWriteAsync(
+                    RuntimeDiagnosticLogLevel.Information,
+                    "RuntimeShutdownRequested",
+                    alwaysWrite: true)
+                .ConfigureAwait(false);
+            await _shutdown.CancelAsync().ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+        }
     }
 
     private void TriggerRuntimeFatal(Exception failure)

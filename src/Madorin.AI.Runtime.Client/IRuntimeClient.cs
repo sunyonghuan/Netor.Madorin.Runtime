@@ -62,6 +62,11 @@ public interface IRuntimeClient : IAsyncDisposable
     public ValueTask<RuntimeStatusResult> GetRuntimeStatusAsync(
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// 请求当前 Runtime 退出。服务端先取消活跃 Run、向 Provider 发送 shutdown，再结束进程。
+    /// </summary>
+    public ValueTask ShutdownAsync(CancellationToken cancellationToken = default);
+
     public ValueTask<SkillCatalogSummary> GetSkillCatalogAsync(
         CancellationToken cancellationToken = default);
 
