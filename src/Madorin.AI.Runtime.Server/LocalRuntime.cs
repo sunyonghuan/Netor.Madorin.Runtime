@@ -81,7 +81,8 @@ public sealed class LocalRuntime : IAsyncDisposable
             agentContextComposer,
             memoryFiles,
             options.RuntimeLimits,
-            _blobStore);
+            _blobStore,
+            options.WorkspaceInstructionsState);
         RuntimeInstanceId = options.RuntimeInstanceId;
         WorkspaceRoot = options.WorkspaceRoot;
     }

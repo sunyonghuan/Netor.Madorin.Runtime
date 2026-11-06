@@ -15,6 +15,7 @@ using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Services;
 using Madorin.AI.Runtime.Services.AgentJobs;
 using Madorin.AI.Runtime.Services.Memory;
+using Madorin.AI.Runtime.Services.Prompt;
 using Madorin.AI.Runtime.Services.Skills;
 using Madorin.AI.Runtime.Services.Tools;
 using Madorin.AI.Runtime.Tools.Abstractions;
@@ -34,7 +35,8 @@ internal sealed class RuntimeExecutionCore(
     AgentContextComposer agentContextComposer,
     MemoryFileService memoryFiles,
     RuntimeLimits runtimeLimits,
-    IToolResultBlobStore resultBlobStore)
+    IToolResultBlobStore resultBlobStore,
+    WorkspaceInstructionsState? workspaceInstructionsState = null)
 {
     private readonly AgentContextComposer _agentContextComposer = agentContextComposer
         ?? throw new ArgumentNullException(nameof(agentContextComposer));
@@ -49,6 +51,7 @@ internal sealed class RuntimeExecutionCore(
         ?? throw new ArgumentNullException(nameof(resultBlobStore));
     private readonly string _runtimeInstanceId = runtimeInstanceId;
     private readonly string _workspaceRoot = Path.GetFullPath(workspaceRoot);
+    private readonly WorkspaceInstructionsState? _workspaceInstructionsState = workspaceInstructionsState;
 
     public async IAsyncEnumerable<RuntimeEventEnvelope> RunAsync(
         string runId,
@@ -263,7 +266,8 @@ internal sealed class RuntimeExecutionCore(
                 isHostModeSkills: isHostModeSkills,
                 skillActivationStore: skillActivationStore,
                 agentJobCoordinator: agentJobCoordinator,
-                providerResolver: expertProviderResolver),
+                providerResolver: expertProviderResolver,
+                workspaceInstructionsState: _workspaceInstructionsState),
 
             _ => throw new NotSupportedException(
                 $"Runtime mode '{request.Mode}' is not supported.")

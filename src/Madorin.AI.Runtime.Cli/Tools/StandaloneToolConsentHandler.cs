@@ -6,24 +6,50 @@ namespace Madorin.AI.Runtime.Cli.Tools;
 
 internal sealed class StandaloneToolConsentHandler(
     ICliTerminal terminal,
-    StandaloneToolGrantFactory grantFactory) : IToolConsentHandler, IDisposable
+    StandaloneToolGrantFactory grantFactory,
+    StandaloneToolPermissionMode initialPermissionMode =
+        StandaloneToolPermissionMode.AskAll) : IToolConsentHandler, IDisposable
 {
     private const int MaxInputAttempts = 3;
 
     private readonly StandaloneToolGrantFactory _grantFactory = grantFactory
         ?? throw new ArgumentNullException(nameof(grantFactory));
+    private int _permissionMode = (int)initialPermissionMode;
     private readonly SemaphoreSlim _promptGate = new(1, 1);
     private readonly ICliTerminal _terminal = terminal
         ?? throw new ArgumentNullException(nameof(terminal));
+
+    public StandaloneToolPermissionMode PermissionMode =>
+        (StandaloneToolPermissionMode)Volatile.Read(ref _permissionMode);
+
+    public void SetPermissionMode(StandaloneToolPermissionMode mode)
+    {
+        if (!Enum.IsDefined(mode))
+        {
+            throw new ArgumentOutOfRangeException(nameof(mode));
+        }
+
+        Volatile.Write(ref _permissionMode, (int)mode);
+    }
 
     public async Task<ToolPermissionResponse> RequestPermissionAsync(
         ToolPermissionConsentContext context,
         CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(context);
+        ct.ThrowIfCancellationRequested();
         if (!context.ScopeResolution.IsSuccess)
         {
             return DeniedPermission(context, "The requested scope could not be safely normalized.");
+        }
+
+        if (PermissionMode is StandaloneToolPermissionMode.AutoTools
+            or StandaloneToolPermissionMode.AutoAll)
+        {
+            return GrantedPermission(
+                context,
+                StandaloneToolGrantLifetime.Once,
+                "Allowed once by the current permission mode.");
         }
 
         await _promptGate.WaitAsync(ct).ConfigureAwait(false);
@@ -50,12 +76,9 @@ internal sealed class StandaloneToolConsentHandler(
                 return DeniedPermission(context, "The user denied the tool permission.");
             }
 
-            var grant = _grantFactory.Create(context, choice.Value);
-            return new ToolPermissionResponse(
-                context.Request.CorrelationId ?? string.Empty,
-                context.Request.CallId,
-                ToolAuthorizationDecision.Granted,
-                grant,
+            return GrantedPermission(
+                context,
+                choice.Value,
                 choice is StandaloneToolGrantLifetime.Once
                     ? "Allowed once by the interactive user."
                     : "Allowed for this Run by the interactive user.");
@@ -71,15 +94,27 @@ internal sealed class StandaloneToolConsentHandler(
         CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(context);
+        ct.ThrowIfCancellationRequested();
         if (context.Invocation is not null && !context.ScopeResolution.IsSuccess)
         {
             return DeniedApproval(context, "The requested scope could not be safely normalized.");
         }
 
+        var isToolApproval = context.Invocation is not null
+            && context.Descriptor is not null;
+        var permissionMode = PermissionMode;
+        if (permissionMode is StandaloneToolPermissionMode.AutoAll
+            || (permissionMode is StandaloneToolPermissionMode.AutoTools && isToolApproval))
+        {
+            return GrantedApproval(
+                context,
+                "Approved automatically by the current permission mode.");
+        }
+
         await _promptGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (context.Invocation is not null && context.Descriptor is not null)
+            if (isToolApproval)
             {
                 WriteToolSummary("Tool approval", context);
             }
@@ -97,14 +132,8 @@ internal sealed class StandaloneToolConsentHandler(
                 return DeniedApproval(context, "The user denied the approval request.");
             }
 
-            var grant = context.Invocation is null
-                ? null
-                : _grantFactory.CreateOnce(context);
-            return new ApprovalResponse(
-                context.Request.CorrelationId,
-                context.Request.ApprovalRequestId,
-                ToolAuthorizationDecision.Granted,
-                grant,
+            return GrantedApproval(
+                context,
                 "Approved by the interactive user.");
         }
         finally
@@ -114,6 +143,29 @@ internal sealed class StandaloneToolConsentHandler(
     }
 
     public void Dispose() => _promptGate.Dispose();
+
+    private ToolPermissionResponse GrantedPermission(
+        ToolPermissionConsentContext context,
+        StandaloneToolGrantLifetime lifetime,
+        string reason) =>
+        new(
+            context.Request.CorrelationId ?? string.Empty,
+            context.Request.CallId,
+            ToolAuthorizationDecision.Granted,
+            _grantFactory.Create(context, lifetime),
+            reason);
+
+    private ApprovalResponse GrantedApproval(
+        ToolApprovalConsentContext context,
+        string reason) =>
+        new(
+            context.Request.CorrelationId,
+            context.Request.ApprovalRequestId,
+            ToolAuthorizationDecision.Granted,
+            context.Invocation is not null && context.Descriptor is not null
+                ? _grantFactory.CreateOnce(context)
+                : null,
+            reason);
 
     private async Task<StandaloneToolGrantLifetime?> ReadPermissionChoiceAsync(
         bool canGrantForRun,

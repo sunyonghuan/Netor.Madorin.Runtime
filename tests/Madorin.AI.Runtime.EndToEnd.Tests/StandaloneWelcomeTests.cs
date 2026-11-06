@@ -2,6 +2,7 @@ using System.Runtime.CompilerServices;
 using Madorin.AI.Runtime.Cli;
 using Madorin.AI.Runtime.Cli.Commands;
 using Madorin.AI.Runtime.Cli.Config;
+using Madorin.AI.Runtime.Cli.Tools;
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Entities;
 using Madorin.AI.Runtime.Providers.Abstractions;
@@ -126,6 +127,8 @@ public sealed class StandaloneWelcomeTests
             "/memory [global | project | effective]",
             "/remember <global | project>",
             "/tools",
+            "/permission",
+            "/instructions",
             "/skill <list | show 名称 | refresh>"
         ];
         foreach (var command in commands)
@@ -135,6 +138,64 @@ public sealed class StandaloneWelcomeTests
 
         Assert.DoesNotContain("/pause", output, StringComparison.Ordinal);
         Assert.DoesNotContain("/interrupt", output, StringComparison.Ordinal);
+    }
+
+    [TestMethod]
+    public async Task PermissionModePrompt_UsesNumberedEnglishMenu()
+    {
+        var terminal = new RecordingTerminal("2");
+
+        var selected = await ServiceCommands.PromptForPermissionModeAsync(
+            terminal,
+            StandaloneToolPermissionMode.AskAll,
+            _testContext.CancellationToken);
+
+        Assert.AreEqual(StandaloneToolPermissionMode.AutoTools, selected);
+        var output = terminal.Output.ToString();
+        Assert.Contains("Permission mode:", output, StringComparison.Ordinal);
+        Assert.Contains("1. Ask every time (current)", output, StringComparison.Ordinal);
+        Assert.Contains(
+            "2. Auto-approve tools (workflow approvals still ask)",
+            output,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "3. Auto-approve everything (no confirmations)",
+            output,
+            StringComparison.Ordinal);
+        Assert.Contains("4. Cancel", output, StringComparison.Ordinal);
+        Assert.Contains("Select [1/2/3/4]:", output, StringComparison.Ordinal);
+    }
+
+    [TestMethod]
+    public async Task WorkspaceInstructionsPrompt_UsesNumberedEnglishMenu()
+    {
+        var terminal = new RecordingTerminal("2");
+
+        var selected = await ServiceCommands.PromptForWorkspaceInstructionsAsync(
+            terminal,
+            isEnabled: false,
+            _testContext.CancellationToken);
+
+        Assert.IsTrue(selected);
+        var output = terminal.Output.ToString();
+        Assert.Contains("Workspace instructions:", output, StringComparison.Ordinal);
+        Assert.Contains("1. Disabled (current)", output, StringComparison.Ordinal);
+        Assert.Contains("2. Load AGENTS.md automatically", output, StringComparison.Ordinal);
+        Assert.Contains("3. Cancel", output, StringComparison.Ordinal);
+        Assert.Contains("Select [1/2/3]:", output, StringComparison.Ordinal);
+    }
+
+    [TestMethod]
+    public async Task WorkspaceInstructionsPrompt_Cancel_ReturnsNull()
+    {
+        var terminal = new RecordingTerminal("3");
+
+        var selected = await ServiceCommands.PromptForWorkspaceInstructionsAsync(
+            terminal,
+            isEnabled: true,
+            _testContext.CancellationToken);
+
+        Assert.IsNull(selected);
     }
 
     [TestMethod]
@@ -356,6 +417,157 @@ public sealed class StandaloneWelcomeTests
         }
     }
 
+    [TestMethod]
+    [Timeout(20_000, CooperativeCancellation = true)]
+    public async Task RunForTests_InstructionsModeAuto_AppendsWorkspaceInstructions()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var configDirectory = Path.Combine(root, "config");
+            var workspace = Path.Combine(root, "workspace");
+            await WriteConfigurationAsync(configDirectory);
+            Directory.CreateDirectory(workspace);
+            await File.WriteAllTextAsync(
+                Path.Combine(workspace, "agents.md"),
+                "# Workspace rule",
+                _testContext.CancellationToken);
+            var provider = new CapturingProvider();
+            var output = new StringWriter();
+
+            var exitCode = CliApplication.RunForTests(
+                [
+                    "run",
+                    "--workspace", workspace,
+                    "--input", "hello",
+                    "--instructions-mode", "auto"
+                ],
+                output,
+                new StringReader(string.Empty),
+                configDirectory,
+                _ => _ => provider);
+
+            Assert.AreEqual(ExitCodes.Success, exitCode, output.ToString());
+            var instructions = GetSystemInstructions(Assert.ContainsSingle(provider.Requests));
+            Assert.Contains("## Workspace Instructions", instructions, StringComparison.Ordinal);
+            Assert.Contains("# Workspace rule", instructions, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [TestMethod]
+    [Timeout(20_000, CooperativeCancellation = true)]
+    public async Task RunForTests_InstructionsModeDefault_DoesNotAppendWorkspaceInstructions()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var configDirectory = Path.Combine(root, "config");
+            var workspace = Path.Combine(root, "workspace");
+            await WriteConfigurationAsync(configDirectory);
+            Directory.CreateDirectory(workspace);
+            await File.WriteAllTextAsync(
+                Path.Combine(workspace, "AGENTS.md"),
+                "# Workspace rule",
+                _testContext.CancellationToken);
+            var provider = new CapturingProvider();
+            var output = new StringWriter();
+
+            var exitCode = CliApplication.RunForTests(
+                ["run", "--workspace", workspace, "--input", "hello"],
+                output,
+                new StringReader(string.Empty),
+                configDirectory,
+                _ => _ => provider);
+
+            Assert.AreEqual(ExitCodes.Success, exitCode, output.ToString());
+            var instructions = GetSystemInstructions(Assert.ContainsSingle(provider.Requests));
+            Assert.DoesNotContain("## Workspace Instructions", instructions, StringComparison.Ordinal);
+            Assert.DoesNotContain("# Workspace rule", instructions, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [TestMethod]
+    [Timeout(20_000, CooperativeCancellation = true)]
+    public async Task RunForTests_ReplInstructionsCommand_EnablesLoadingForLaterTurns()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var configDirectory = Path.Combine(root, "config");
+            var workspace = Path.Combine(root, "workspace");
+            await WriteConfigurationAsync(configDirectory);
+            Directory.CreateDirectory(workspace);
+            await File.WriteAllTextAsync(
+                Path.Combine(workspace, "Agents.Md"),
+                "# Repl rule",
+                _testContext.CancellationToken);
+            var provider = new CapturingProvider();
+            var output = new StringWriter();
+            var input = new StringReader(
+                $"/instructions{Environment.NewLine}2{Environment.NewLine}hello{Environment.NewLine}/exit{Environment.NewLine}");
+
+            var exitCode = CliApplication.RunForTests(
+                ["run", "--workspace", workspace],
+                output,
+                input,
+                configDirectory,
+                _ => _ => provider);
+
+            Assert.AreEqual(ExitCodes.Success, exitCode, output.ToString());
+            Assert.Contains("Workspace instructions: enabled", output.ToString(), StringComparison.Ordinal);
+            var instructions = GetSystemInstructions(Assert.ContainsSingle(provider.Requests));
+            Assert.Contains("# Repl rule", instructions, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [TestMethod]
+    public async Task RunForTests_InvalidInstructionsMode_IsRejected()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var configDirectory = Path.Combine(root, "config");
+            var workspace = Path.Combine(root, "workspace");
+            await WriteConfigurationAsync(configDirectory);
+            Directory.CreateDirectory(workspace);
+            var output = new StringWriter();
+
+            var exitCode = CliApplication.RunForTests(
+                [
+                    "run",
+                    "--workspace", workspace,
+                    "--input", "hello",
+                    "--instructions-mode", "yes"
+                ],
+                output,
+                new StringReader(string.Empty),
+                configDirectory,
+                _ => _ => new StubProvider());
+
+            Assert.AreEqual(ExitCodes.InvalidArguments, exitCode);
+            Assert.Contains(
+                "--instructions-mode must be off or auto.",
+                output.ToString(),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
     private static int RunWithWorkingDirectory(
         string workspace,
         string[] args,
@@ -463,6 +675,14 @@ public sealed class StandaloneWelcomeTests
         }
     }
 
+    private static string GetSystemInstructions(RuntimeProviderRequest request) => string.Join(
+        '\n',
+        request.Messages
+            .Where(static message => message.Role == RuntimeProviderRoles.System)
+            .SelectMany(static message => message.Content)
+            .OfType<TextContentBlock>()
+            .Select(static block => block.Text));
+
     private sealed class StubProvider : IRuntimeProviderAdapter
     {
         public string ProviderId => "fake";
@@ -491,8 +711,49 @@ public sealed class StandaloneWelcomeTests
         }
     }
 
+    private sealed class CapturingProvider : IRuntimeProviderAdapter
+    {
+        public string ProviderId => "fake";
+
+        public ProviderCapabilities Capabilities { get; } = new(Streaming: true);
+
+        public IReadOnlyList<ProviderModel> Models { get; } =
+            [new("fake-model", "Fake model", ContextWindow: 8192)];
+
+        public List<RuntimeProviderRequest> Requests { get; } = [];
+
+        public async IAsyncEnumerable<RuntimeProviderEvent> CompleteStreamingAsync(
+            RuntimeProviderRequest request,
+            [EnumeratorCancellation] CancellationToken ct = default)
+        {
+            Requests.Add(request);
+            await Task.Yield();
+            ct.ThrowIfCancellationRequested();
+            yield return new TextDeltaProviderEvent(request.InvocationId, "reply");
+            yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
+        }
+
+        public Task ValidateCapabilitiesAsync(
+            ContentBlock[] input,
+            CancellationToken ct = default)
+        {
+            ct.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
+        }
+    }
+
     private sealed class RecordingTerminal : ICliTerminal
     {
+        private readonly Queue<string?> _reads = new();
+
+        public RecordingTerminal(params string?[] reads)
+        {
+            foreach (var read in reads)
+            {
+                _reads.Enqueue(read);
+            }
+        }
+
         public StringWriter Output { get; } = new();
 
         public List<(string Value, CliTextStyle Style)> Writes { get; } = [];
@@ -520,7 +781,8 @@ public sealed class StandaloneWelcomeTests
         public ValueTask<string?> ReadLineAsync(CancellationToken ct = default)
         {
             ct.ThrowIfCancellationRequested();
-            return ValueTask.FromResult<string?>(null);
+            return ValueTask.FromResult(
+                _reads.TryDequeue(out var value) ? value : null);
         }
 
         public ValueTask<string> ReadSecretAsync(

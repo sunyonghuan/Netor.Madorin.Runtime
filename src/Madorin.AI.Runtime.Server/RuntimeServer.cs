@@ -14,6 +14,7 @@ using Madorin.AI.Runtime.Server.Auth;
 using Madorin.AI.Runtime.Server.Http;
 using Madorin.AI.Runtime.Services;
 using Madorin.AI.Runtime.Services.Memory;
+using Madorin.AI.Runtime.Services.Prompt;
 using Madorin.AI.Runtime.Services.Skills;
 using Madorin.AI.Runtime.Services.Tools;
 using Madorin.AI.Runtime.Tools.Abstractions;
@@ -130,7 +131,8 @@ public sealed class RuntimeServer : IAsyncDisposable
             agentContextComposer,
             memoryFiles,
             CreateNegotiatedLimits(supportsStage5: true),
-            _blobStore);
+            _blobStore,
+            options.WorkspaceInstructionsState ?? new WorkspaceInstructionsState(enabled: true));
         _runRegistry = new RunRegistry(
             options.MaxConcurrentRuns,
             options.MaxConcurrentRunsPerProvider,

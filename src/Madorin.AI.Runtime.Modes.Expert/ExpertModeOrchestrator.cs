@@ -51,7 +51,8 @@ public sealed class ExpertModeOrchestrator(
     bool isHostModeSkills = false,
     SkillActivationStore? skillActivationStore = null,
     IAgentJobCoordinator? agentJobCoordinator = null,
-    Func<string, IRuntimeProviderAdapter>? providerResolver = null) : IModeOrchestrator
+    Func<string, IRuntimeProviderAdapter>? providerResolver = null,
+    WorkspaceInstructionsState? workspaceInstructionsState = null) : IModeOrchestrator
 {
     private const string ProjectionVersion = "expert-full-tail-v1";
     /// <summary>与 BuiltinToolRegistry.DelegateToAgentToolId 保持一致，避免 Modes.Expert 反向依赖 Tools.Builtin。</summary>
@@ -99,6 +100,7 @@ public sealed class ExpertModeOrchestrator(
         _scriptInvoker = scriptInvoker;
     private readonly Func<ToolCatalogSnapshot>? _liveCatalogProvider = liveCatalogProvider;
     private readonly bool _isHostModeSkills = isHostModeSkills;
+    private readonly WorkspaceInstructionsState? _workspaceInstructionsState = workspaceInstructionsState;
     private readonly SkillActivationStore? _skillActivationStore = skillActivationStore;
     private readonly IAgentJobCoordinator? _agentJobCoordinator = agentJobCoordinator;
     private readonly Func<string, IRuntimeProviderAdapter> _providerResolver = providerResolver ?? (requestedProviderId =>
@@ -169,8 +171,12 @@ public sealed class ExpertModeOrchestrator(
         var restoredPlan = await _planManager.RestoreActivePlanAsync(sessionId, ct)
             .ConfigureAwait(false);
 
+        var workspaceInstructions = await LoadWorkspaceInstructionsAsync(ct).ConfigureAwait(false);
+
         // Inject available sub-agents list and plan progress into system prompt
-        var baseSystemPrompt = expert.Agent.SystemPrompt;
+        var baseSystemPrompt = WorkspaceInstructionsPrompt.Append(
+            expert.Agent.SystemPrompt,
+            workspaceInstructions);
         var withSubAgents = AppendAvailableSubAgentsList(
             baseSystemPrompt,
             expert.Agent,
@@ -202,7 +208,7 @@ public sealed class ExpertModeOrchestrator(
             expert.Agent.AgentId,
             providerId,
             modelId,
-            CompactionCacheKeyFactory.ComputeAgentPromptHash(expert.Agent.SystemPrompt),
+            ComputePromptHash(baseSystemPrompt),
             agentContext.GlobalMemoryHash,
             agentContext.ProjectMemoryHash,
             catalogVersion,
@@ -391,7 +397,7 @@ public sealed class ExpertModeOrchestrator(
             return estimate.InputTokens is null ? ProviderTokenEstimator.Estimate(estimateRequest) : estimate;
         }
         var contextPolicyHash = CompactionCacheKeyFactory.ComputeContextPolicyHash(contextPolicy);
-        var agentPromptHash = CompactionCacheKeyFactory.ComputeAgentPromptHash(expert.Agent.SystemPrompt);
+        var agentPromptHash = ComputePromptHash(baseSystemPrompt);
         var cachedProjection = SummaryProjectionResolver.Resolve(source,
             await _store.ReadCompactCacheAsync(sessionId, ct).ConfigureAwait(false),
             agentPromptHash, request.Selection.ToolCatalogVersion);
@@ -3132,6 +3138,15 @@ public sealed class ExpertModeOrchestrator(
         return AppendPlanProgressReminder(baseSystemPrompt, _planManager.ActivePlan);
     }
 
+    private async Task<WorkspaceInstructions?> LoadWorkspaceInstructionsAsync(
+        CancellationToken ct) =>
+        _workspaceInstructionsState?.Enabled is true
+            ? await WorkspaceInstructionsLoader.LoadAsync(_workspaceRoot, ct).ConfigureAwait(false)
+            : null;
+
+    private static string ComputePromptHash(string prompt) =>
+        CompactionCacheKeyFactory.ComputeAgentPromptHash(prompt);
+
     /// <summary>
     /// Appends plan progress section to system prompt.
     /// </summary>
@@ -3265,10 +3280,15 @@ public sealed class ExpertModeOrchestrator(
         var subAgentModelId = subAgent.ModelId
             ?? (subAgentProvider.Models.Count > 0 ? subAgentProvider.Models[0].Id : "default");
 
+        var workspaceInstructions = await LoadWorkspaceInstructionsAsync(ct).ConfigureAwait(false);
+
         // Compose sub-agent's system prompt with memory if available
+        var subAgentSystemPrompt = WorkspaceInstructionsPrompt.Append(
+            subAgent.SystemPrompt,
+            workspaceInstructions);
         var subAgentContext = _agentContextComposer is null
-            ? AgentContextComposer.WithoutMemory(subAgent.SystemPrompt)
-            : await _agentContextComposer.ComposeAsync(subAgent.SystemPrompt, ct).ConfigureAwait(false);
+            ? AgentContextComposer.WithoutMemory(subAgentSystemPrompt)
+            : await _agentContextComposer.ComposeAsync(subAgentSystemPrompt, ct).ConfigureAwait(false);
         var subAgentInstructions = ConversationEnvironmentPrompt.Append(
             subAgentContext.Instructions,
             _workspaceRoot,
