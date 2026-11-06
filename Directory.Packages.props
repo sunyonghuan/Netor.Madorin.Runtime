@@ -1,7 +1,7 @@
 <Project>
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
-    <MadorinRuntimeContractsVersion>0.1.91</MadorinRuntimeContractsVersion>
+    <MadorinRuntimeContractsVersion>0.1.96</MadorinRuntimeContractsVersion>
   </PropertyGroup>
 
   <ItemGroup>

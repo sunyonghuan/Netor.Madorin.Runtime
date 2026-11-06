@@ -13,12 +13,14 @@ RID=""
 REBUILD=0
 NO_BUMP=0
 BUMP=patch
+VERSION=""
 SKIP_PROVIDERS=0
 POSITIONAL=()
 
 usage() {
-  echo "Usage: $0 [linux|win|mac|list] [--rid linux-x64] [--rebuild] [--no-bump] [--bump patch|minor|major] [--skip-providers]" >&2
+  echo "Usage: $0 [linux|win|mac|list] [--rid linux-x64] [--version x.y.z] [--rebuild] [--no-bump] [--bump patch|minor|major] [--skip-providers]" >&2
   echo "No platform argument publishes linux-x64. Pass win, linux, or mac to select platforms when pwsh is available." >&2
+  echo "Example: $0 --version 1.2.3" >&2
 }
 
 while [[ $# -gt 0 ]]; do
@@ -42,6 +44,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --bump)
       BUMP="${2:-}"
+      shift 2
+      ;;
+    --version)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        echo "--version requires a value such as 1.2.3." >&2
+        exit 1
+      fi
+      VERSION="$2"
       shift 2
       ;;
     --skip-providers)
@@ -69,6 +79,11 @@ if [[ "$BUMP" != "patch" && "$BUMP" != "minor" && "$BUMP" != "major" ]]; then
   exit 1
 fi
 
+if [[ -n "$VERSION" && ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+  echo "Invalid version '$VERSION'. Expected Major.Minor.Patch such as 1.2.3." >&2
+  exit 1
+fi
+
 if [[ ! -f "$PS1" ]]; then
   echo "Publish script was not found: $PS1" >&2
   exit 1
@@ -79,6 +94,9 @@ if command -v pwsh >/dev/null 2>&1; then
     POSITIONAL=("linux")
   fi
   pwsh_args=(-NoProfile -File "$PS1" -Bump "$BUMP")
+  if [[ -n "$VERSION" ]]; then
+    pwsh_args+=(-Version "$VERSION")
+  fi
   if [[ -n "$RID" ]]; then
     pwsh_args+=(-Rid "$RID")
   fi
@@ -172,7 +190,11 @@ worker_file_name() {
   fi
 }
 
-if [[ "$NO_BUMP" -eq 1 ]]; then
+if [[ -n "$VERSION" ]]; then
+  NEW_VERSION="$VERSION"
+  set_xml_value "$DIRECTORY_BUILD_PROPS" MadorinCliVersion "$NEW_VERSION"
+  echo "Version fixed at $NEW_VERSION"
+elif [[ "$NO_BUMP" -eq 1 ]]; then
   NEW_VERSION=$(read_cli_version)
 else
   NEW_VERSION=$(bump_version)

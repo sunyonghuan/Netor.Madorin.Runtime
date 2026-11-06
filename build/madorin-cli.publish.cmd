@@ -1,6 +1,7 @@
 @echo off
 setlocal
 
+rem Fixed version example: madorin-cli.publish.cmd win -Version 1.2.3
 set "PUBLISH_SCRIPT=%~dp0madorin-cli.publish.ps1"
 if not exist "%PUBLISH_SCRIPT%" (
     echo [ERROR] Publish script was not found: "%PUBLISH_SCRIPT%"
