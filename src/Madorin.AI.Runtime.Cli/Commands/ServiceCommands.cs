@@ -883,10 +883,9 @@ internal static class ServiceCommands
                 terminal.Write("madorin", CliTextStyle.Prompt);
                 terminal.Write(" [", CliTextStyle.Muted);
                 terminal.Write($"{selection.Provider.Name}/{selection.Model}", CliTextStyle.Selected);
-                terminal.Write("] ", CliTextStyle.Muted);
-                terminal.Write("> ", CliTextStyle.Prompt);
+                terminal.WriteLine("]", CliTextStyle.Muted);
 
-                var userInput = await terminal.ReadLineAsync(exitCts.Token).ConfigureAwait(false);
+                var userInput = await terminal.ReadBlockAsync(exitCts.Token).ConfigureAwait(false);
                 if (userInput is null)
                 {
                     return Complete(ExitCodes.Success);
@@ -897,7 +896,9 @@ internal static class ServiceCommands
                     continue;
                 }
 
-                var commandResult = await TryHandleCoreReplCommandAsync(
+                var isSingleLine = !userInput.Contains('\n');
+                var commandResult = isSingleLine
+                    ? await TryHandleCoreReplCommandAsync(
                         userInput,
                         terminal,
                         output,
@@ -913,7 +914,8 @@ internal static class ServiceCommands
                         config,
                         helpLanguage,
                         exitCts.Token)
-                    .ConfigureAwait(false);
+                        .ConfigureAwait(false)
+                    : null;
                 if (commandResult is not null)
                 {
                     helpLanguage = commandResult.HelpLanguage;
@@ -936,7 +938,8 @@ internal static class ServiceCommands
                     continue;
                 }
 
-                if (await TryHandleMemoryReplCommandAsync(
+                if (isSingleLine
+                    && await TryHandleMemoryReplCommandAsync(
                         userInput,
                         terminal,
                         output,
@@ -981,8 +984,17 @@ internal static class ServiceCommands
                             agents,
                             selectionVersion),
                         runCts.Token);
+                var replyOutput = terminal.IsInteractive
+                    ? new TerminalStyleTextWriter(
+                        terminal,
+                        CliTextStyle.Assistant,
+                        output,
+                        () => terminal.WriteLine(
+                            DateTime.Now.ToString("HH:mm:ss"),
+                            CliTextStyle.Muted))
+                    : output;
                 var runOutputWriter = new RunOutputWriter(
-                    output,
+                    replyOutput,
                     error,
                     RunOutputFormat.Text,
                     noStream: false,

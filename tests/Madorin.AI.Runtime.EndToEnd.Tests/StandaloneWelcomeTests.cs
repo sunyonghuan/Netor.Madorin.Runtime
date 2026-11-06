@@ -66,7 +66,10 @@ public sealed class StandaloneWelcomeTests
 
         Assert.IsTrue(wroteHelp);
         Assert.IsTrue(terminal.Writes.Any(write =>
-            write.Value == "Madorin AI Runtime 0.1.0"
+            write.Value == ReplWelcomeWriter.Banner
+            && write.Style == CliTextStyle.Title));
+        Assert.IsTrue(terminal.Writes.Any(write =>
+            write.Value == "0.1.0"
             && write.Style == CliTextStyle.Title));
         Assert.IsTrue(terminal.Writes.Any(write =>
             write.Value == "/help"
@@ -86,6 +89,16 @@ public sealed class StandaloneWelcomeTests
         Assert.IsTrue(terminal.Writes.Any(write =>
             write.Value == "provider-one"
             && write.Style == CliTextStyle.Selected));
+        Assert.IsTrue(terminal.Writes.Any(write =>
+            write.Value.EndsWith("|____|", StringComparison.Ordinal)
+            && write.Style == CliTextStyle.Muted));
+        Assert.IsTrue(terminal.Writes.Any(write =>
+            write.Value.Contains("有史以来", StringComparison.Ordinal)
+            && write.Style == CliTextStyle.Muted));
+        Assert.IsTrue(terminal.Writes.Any(write =>
+            write.Value.Contains("service@madorins.com", StringComparison.Ordinal)
+            && write.Style == CliTextStyle.Muted));
+        Assert.DoesNotContain("Mode       ", terminal.Output.ToString(), StringComparison.Ordinal);
     }
 
     [TestMethod]
@@ -208,6 +221,10 @@ public sealed class StandaloneWelcomeTests
     [DataRow(CliTextStyle.Warning, ConsoleColor.DarkYellow)]
     [DataRow(CliTextStyle.Error, ConsoleColor.DarkRed)]
     [DataRow(CliTextStyle.Muted, ConsoleColor.DarkGray)]
+    [DataRow(CliTextStyle.Horse, ConsoleColor.White)]
+    [DataRow(CliTextStyle.Accent, ConsoleColor.Yellow)]
+    [DataRow(CliTextStyle.User, ConsoleColor.Cyan)]
+    [DataRow(CliTextStyle.Assistant, ConsoleColor.DarkGray)]
     public void CliTerminal_ResolveColor_UsesRestrainedPalette(
         CliTextStyle style,
         ConsoleColor expected)
@@ -266,9 +283,17 @@ public sealed class StandaloneWelcomeTests
                 workspace,
                 configDirectory: configDirectory);
 
-            Assert.Contains($"Madorin AI Runtime {expectedVersion}", text, StringComparison.Ordinal);
-            Assert.Contains("Local runtime ready", text, StringComparison.Ordinal);
-            Assert.Contains($"Mode       Expert{Environment.NewLine}", text, StringComparison.Ordinal);
+            Assert.Contains(ReplWelcomeWriter.Banner, text, StringComparison.Ordinal);
+            Assert.Contains(expectedVersion, text, StringComparison.Ordinal);
+            Assert.Contains("ready", text, StringComparison.Ordinal);
+            Assert.Contains("|____|", text, StringComparison.Ordinal);
+            Assert.Contains("有史以来", text, StringComparison.Ordinal);
+            Assert.Contains("功能最强大 · 性能最快 · 效率最高", text, StringComparison.Ordinal);
+            Assert.Contains("集成最简单 · token 最省", text, StringComparison.Ordinal);
+            Assert.Contains("的 CLI", text, StringComparison.Ordinal);
+            Assert.Contains("@madorins.com", text, StringComparison.Ordinal);
+            Assert.Contains("service@madorins.com", text, StringComparison.Ordinal);
+            Assert.DoesNotContain($"Mode       Expert{Environment.NewLine}", text, StringComparison.Ordinal);
             Assert.Contains($"Agent      Friendly Agent{Environment.NewLine}", text, StringComparison.Ordinal);
             Assert.Contains($"Provider   fake{Environment.NewLine}", text, StringComparison.Ordinal);
             Assert.Contains($"Model      fake-model{Environment.NewLine}", text, StringComparison.Ordinal);
@@ -278,10 +303,10 @@ public sealed class StandaloneWelcomeTests
                 "Type /help to view commands, or /exit to quit.",
                 text,
                 StringComparison.Ordinal);
-            Assert.AreEqual(1, CountOccurrences(text, "Madorin AI Runtime"));
+            Assert.AreEqual(1, CountOccurrences(text, ReplWelcomeWriter.Banner));
 
-            var welcomeIndex = text.IndexOf("Madorin AI Runtime", StringComparison.Ordinal);
-            var promptIndex = text.IndexOf("madorin [fake/fake-model] > ", StringComparison.Ordinal);
+            var welcomeIndex = text.IndexOf(ReplWelcomeWriter.Banner, StringComparison.Ordinal);
+            var promptIndex = text.IndexOf($"madorin [fake/fake-model]{Environment.NewLine}", StringComparison.Ordinal);
             Assert.IsGreaterThanOrEqualTo(0, welcomeIndex);
             Assert.IsGreaterThan(welcomeIndex, promptIndex);
 
@@ -335,12 +360,12 @@ public sealed class StandaloneWelcomeTests
             var wizardIndex = text.IndexOf(
                 "Madorin standalone configuration",
                 StringComparison.Ordinal);
-            var welcomeIndex = text.IndexOf("Madorin AI Runtime", StringComparison.Ordinal);
-            var promptIndex = text.IndexOf("madorin [fake/fake-model] > ", StringComparison.Ordinal);
+            var welcomeIndex = text.IndexOf(ReplWelcomeWriter.Banner, StringComparison.Ordinal);
+            var promptIndex = text.IndexOf($"madorin [fake/fake-model]{Environment.NewLine}", StringComparison.Ordinal);
             Assert.IsGreaterThanOrEqualTo(0, wizardIndex);
             Assert.IsGreaterThan(wizardIndex, welcomeIndex);
             Assert.IsGreaterThan(welcomeIndex, promptIndex);
-            Assert.AreEqual(1, CountOccurrences(text, "Madorin AI Runtime"));
+            Assert.AreEqual(1, CountOccurrences(text, ReplWelcomeWriter.Banner));
         }
         finally
         {
@@ -368,9 +393,9 @@ public sealed class StandaloneWelcomeTests
                 _ => _ => new StubProvider());
 
             Assert.AreEqual(ExitCodes.Success, exitCode, output.ToString());
-            Assert.Contains("madorin [fake/fake-model] > ", output.ToString(), StringComparison.Ordinal);
-            Assert.DoesNotContain("Madorin AI Runtime", output.ToString(), StringComparison.Ordinal);
-            Assert.DoesNotContain("Local runtime ready", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains($"madorin [fake/fake-model]{Environment.NewLine}", output.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain(ReplWelcomeWriter.Banner, output.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("有史以来", output.ToString(), StringComparison.Ordinal);
         }
         finally
         {
@@ -408,8 +433,8 @@ public sealed class StandaloneWelcomeTests
                 StringSplitOptions.RemoveEmptyEntries);
             Assert.IsNotEmpty(lines);
             Assert.IsTrue(lines.All(static line => line.StartsWith('{')));
-            Assert.DoesNotContain("Madorin AI Runtime", output.ToString(), StringComparison.Ordinal);
-            Assert.DoesNotContain("Local runtime ready", output.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain(ReplWelcomeWriter.Banner, output.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("service@madorins.com", output.ToString(), StringComparison.Ordinal);
         }
         finally
         {
