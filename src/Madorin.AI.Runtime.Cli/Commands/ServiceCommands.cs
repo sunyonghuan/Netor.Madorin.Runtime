@@ -1528,9 +1528,11 @@ internal static class ServiceCommands
 
                     if (sessionId is null)
                     {
-                        await output.WriteLineAsync("CanonicalHistory: 0 messages | about 0 tokens")
+                        await output.WriteLineAsync(
+                                $"CanonicalHistory: 0 messages | about {TokenCountFormat.Format(0)} tokens")
                             .ConfigureAwait(false);
-                        await output.WriteLineAsync("ContextProjection: 0 messages | about 0 tokens (full)")
+                        await output.WriteLineAsync(
+                                $"ContextProjection: 0 messages | about {TokenCountFormat.Format(0)} tokens (full)")
                             .ConfigureAwait(false);
                         return Current();
                     }
@@ -1546,11 +1548,11 @@ internal static class ServiceCommands
 
                     await output.WriteLineAsync(
                             $"CanonicalHistory: {contextStatus.CanonicalMessageCount} messages | " +
-                            $"about {contextStatus.CanonicalEstimatedTokens} tokens")
+                            $"about {TokenCountFormat.Format(contextStatus.CanonicalEstimatedTokens)} tokens")
                         .ConfigureAwait(false);
                     await output.WriteLineAsync(
                             $"ContextProjection: {contextStatus.ProjectionMessageCount} messages | " +
-                            $"about {contextStatus.ProjectionEstimatedTokens} tokens " +
+                            $"about {TokenCountFormat.Format(contextStatus.ProjectionEstimatedTokens)} tokens " +
                             $"({contextStatus.ProjectionStrategy})")
                         .ConfigureAwait(false);
                     return Current();

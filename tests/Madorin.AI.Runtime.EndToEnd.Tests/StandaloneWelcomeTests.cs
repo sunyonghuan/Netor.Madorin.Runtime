@@ -223,7 +223,7 @@ public sealed class StandaloneWelcomeTests
     [DataRow(CliTextStyle.Muted, ConsoleColor.DarkGray)]
     [DataRow(CliTextStyle.Horse, ConsoleColor.White)]
     [DataRow(CliTextStyle.Accent, ConsoleColor.Yellow)]
-    [DataRow(CliTextStyle.User, ConsoleColor.Cyan)]
+    [DataRow(CliTextStyle.User, ConsoleColor.Magenta)]
     [DataRow(CliTextStyle.Assistant, ConsoleColor.DarkGray)]
     public void CliTerminal_ResolveColor_UsesRestrainedPalette(
         CliTextStyle style,
