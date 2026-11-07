@@ -7,35 +7,33 @@ namespace Madorin.AI.Runtime.EndToEnd.Tests;
 public sealed class ReplThinkingStatusTests
 {
     [TestMethod]
-    public void Show_WritesElapsedStatusWithoutReasoningText()
+    public void Start_ShowsWorkingThenSwitchesToThinking()
     {
         var terminal = new ProbeTerminal();
         var now = 1_000L;
         var status = new ReplThinkingStatus(terminal, () => now);
 
-        status.Show();
+        status.Start();
         now = 4_000;
-        status.Show();
-        status.Show();
+        status.BeginThinking();
 
         Assert.HasCount(2, terminal.Writes);
-        Assert.AreEqual("\rthinking 0s", terminal.Writes[0].Text);
+        Assert.AreEqual("\rworking 0s", terminal.Writes[0].Text);
         Assert.AreEqual("\rthinking 3s", terminal.Writes[1].Text);
         Assert.AreEqual(CliTextStyle.Muted, terminal.Writes[1].Style);
-        Assert.IsFalse(terminal.Writes.Any(write => write.Text.Contains("secret thought", StringComparison.Ordinal)));
     }
 
     [TestMethod]
-    public void Clear_ErasesTheStatusLineOnce()
+    public void Finish_EndsTheLineWithoutErasingIt()
     {
         var terminal = new ProbeTerminal();
         var status = new ReplThinkingStatus(terminal, () => 0);
 
-        status.Show();
-        status.Clear();
-        status.Clear();
+        status.Start();
+        status.Finish();
+        status.Finish();
 
-        Assert.AreEqual("\r" + new string(' ', "thinking 0s".Length) + "\r", terminal.Writes[1].Text);
+        Assert.AreEqual(Environment.NewLine, terminal.Writes[1].Text);
         Assert.HasCount(2, terminal.Writes);
     }
 

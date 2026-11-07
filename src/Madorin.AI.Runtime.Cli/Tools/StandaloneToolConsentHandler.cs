@@ -22,6 +22,8 @@ internal sealed class StandaloneToolConsentHandler(
     public StandaloneToolPermissionMode PermissionMode =>
         (StandaloneToolPermissionMode)Volatile.Read(ref _permissionMode);
 
+    internal IConsoleActivity? Activity { get; set; }
+
     public void SetPermissionMode(StandaloneToolPermissionMode mode)
     {
         if (!Enum.IsDefined(mode))
@@ -55,6 +57,7 @@ internal sealed class StandaloneToolConsentHandler(
         await _promptGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            Activity?.Finish();
             WriteToolSummary("Tool permission", context);
             var canGrantForRun = StandaloneToolConsentPolicy.CanGrantForRun(context);
             _terminal.WriteLine("1  Allow once", CliTextStyle.Parameter);
@@ -85,6 +88,7 @@ internal sealed class StandaloneToolConsentHandler(
         }
         finally
         {
+            Activity?.Start();
             _promptGate.Release();
         }
     }
@@ -114,6 +118,7 @@ internal sealed class StandaloneToolConsentHandler(
         await _promptGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            Activity?.Finish();
             if (isToolApproval)
             {
                 WriteToolSummary("Tool approval", context);
@@ -138,6 +143,7 @@ internal sealed class StandaloneToolConsentHandler(
         }
         finally
         {
+            Activity?.Start();
             _promptGate.Release();
         }
     }

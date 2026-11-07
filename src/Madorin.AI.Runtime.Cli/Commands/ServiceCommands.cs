@@ -993,6 +993,15 @@ internal static class ServiceCommands
                             DateTime.Now.ToString("HH:mm:ss"),
                             CliTextStyle.Muted))
                     : output;
+                using var activity = terminal.IsInteractive
+                    ? new ReplThinkingStatus(terminal)
+                    : null;
+                if (interactiveConsent is not null)
+                {
+                    interactiveConsent.Activity = activity;
+                }
+
+                activity?.Start();
                 var runOutputWriter = new RunOutputWriter(
                     replyOutput,
                     error,
@@ -1000,12 +1009,23 @@ internal static class ServiceCommands
                     noStream: false,
                     machineOutputRedirected: false,
                     message => RedactSecrets(message, config),
-                    terminal.IsInteractive ? new ReplThinkingStatus(terminal) : null);
-                var result = await ExecuteOneRunAsync(
-                        events,
-                        runOutputWriter,
-                        exitCts.Token)
-                    .ConfigureAwait(false);
+                    activity);
+                RunOutputResult result;
+                try
+                {
+                    result = await ExecuteOneRunAsync(
+                            events,
+                            runOutputWriter,
+                            exitCts.Token)
+                        .ConfigureAwait(false);
+                }
+                finally
+                {
+                    if (interactiveConsent is not null)
+                    {
+                        interactiveConsent.Activity = null;
+                    }
+                }
 
                 bool continueAfterCancellation;
                 var wasPausing = false;
