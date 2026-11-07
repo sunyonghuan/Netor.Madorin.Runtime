@@ -11,7 +11,8 @@ internal sealed class RunOutputWriter(
     RunOutputFormat format,
     bool noStream,
     bool machineOutputRedirected,
-    Func<string, string> redact)
+    Func<string, string> redact,
+    ReplThinkingStatus? thinking = null)
 {
     private readonly StringBuilder _text = new();
     private string? _runId;
@@ -29,10 +30,31 @@ internal sealed class RunOutputWriter(
                 _runId = accepted?.RunId ?? envelope.RunId;
                 break;
 
+            case MessageTypes.ReasoningDelta:
+                if (format is RunOutputFormat.Text)
+                {
+                    thinking?.Show();
+                }
+
+                break;
+
+            case MessageTypes.ReasoningCompleted:
+                if (format is RunOutputFormat.Text)
+                {
+                    thinking?.Clear();
+                }
+
+                break;
+
             case MessageTypes.TextDelta:
                 var delta = envelope.Payload.Deserialize(RuntimeJsonContext.Default.TextDeltaEvent);
                 if (delta is not null)
                 {
+                    if (format is RunOutputFormat.Text)
+                    {
+                        thinking?.Clear();
+                    }
+
                     _text.Append(delta.Delta);
                     if (format is RunOutputFormat.Text && !noStream)
                     {
@@ -47,6 +69,7 @@ internal sealed class RunOutputWriter(
                 var completed = envelope.Payload.Deserialize(RuntimeJsonContext.Default.RunCompletedEvent);
                 _sessionId = completed?.SessionId ?? _sessionId;
                 _runId = completed?.RunId ?? envelope.RunId;
+                thinking?.Clear();
                 await WriteSuccessAsync(envelope, ct).ConfigureAwait(false);
                 return new RunOutputResult(ExitCodes.Success, _sessionId, _runId);
 
@@ -54,6 +77,7 @@ internal sealed class RunOutputWriter(
                 var failed = envelope.Payload.Deserialize(RuntimeJsonContext.Default.RunFailedEvent);
                 _sessionId = failed?.SessionId ?? _sessionId;
                 _runId = failed?.RunId ?? envelope.RunId;
+                thinking?.Clear();
                 var runtimeError = failed?.Error;
                 await WriteFailureAsync(
                         envelope,
@@ -69,6 +93,7 @@ internal sealed class RunOutputWriter(
                 var cancelled = envelope.Payload.Deserialize(RuntimeJsonContext.Default.RunCancelledEvent);
                 _sessionId = cancelled?.SessionId ?? _sessionId;
                 _runId = cancelled?.RunId ?? envelope.RunId;
+                thinking?.Clear();
                 await WriteFailureAsync(
                         envelope,
                         "RunCancelled",

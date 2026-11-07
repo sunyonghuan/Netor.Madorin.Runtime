@@ -999,7 +999,8 @@ internal static class ServiceCommands
                     RunOutputFormat.Text,
                     noStream: false,
                     machineOutputRedirected: false,
-                    message => RedactSecrets(message, config));
+                    message => RedactSecrets(message, config),
+                    terminal.IsInteractive ? new ReplThinkingStatus(terminal) : null);
                 var result = await ExecuteOneRunAsync(
                         events,
                         runOutputWriter,
