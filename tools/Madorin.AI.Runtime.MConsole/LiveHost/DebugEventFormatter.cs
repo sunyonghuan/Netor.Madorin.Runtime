@@ -50,6 +50,7 @@ public static class DebugEventFormatter
         MessageTypes.ReasoningDelta => (DebugOutputChannel.Reasoning, ReadString(payload, "delta")),
         MessageTypes.RunFailed => (DebugOutputChannel.Notice, "Run failed: " + ReadError(payload)),
         MessageTypes.RunCancelled => (DebugOutputChannel.Notice, "Run cancelled."),
+        MessageTypes.ExpertPlanRestored => (DebugOutputChannel.Notice, DescribeRestoredPlan(payload)),
         MessageTypes.RunCompleted => (DebugOutputChannel.Notice, "[完成]"),
         _ => (DebugOutputChannel.None, null),
     };
@@ -91,6 +92,16 @@ public static class DebugEventFormatter
         }
     }
 
+    private static string DescribeRestoredPlan(JsonElement payload)
+    {
+        var goal = ReadString(payload, "goal");
+        var stepCount = ReadInt(payload, "stepCount");
+        var steps = stepCount is null ? string.Empty : $"（{stepCount} 步）";
+        return string.IsNullOrWhiteSpace(goal)
+            ? $"[已恢复未完成计划]{steps}"
+            : $"[已恢复未完成计划]{steps} {goal}";
+    }
+
     private static string ReadError(JsonElement payload)
     {
         if (payload.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object)
@@ -110,6 +121,14 @@ public static class DebugEventFormatter
         && payload.TryGetProperty(name, out var value)
         && value.ValueKind == JsonValueKind.String
             ? value.GetString()
+            : null;
+
+    private static int? ReadInt(JsonElement payload, string name) =>
+        payload.ValueKind == JsonValueKind.Object
+        && payload.TryGetProperty(name, out var value)
+        && value.ValueKind == JsonValueKind.Number
+        && value.TryGetInt32(out var number)
+            ? number
             : null;
 
     private static string Snippet(string text)
