@@ -37,6 +37,22 @@ public sealed class ReplThinkingStatusTests
         Assert.HasCount(2, terminal.Writes);
     }
 
+    [TestMethod]
+    public void BeginThinking_AfterReply_StartsOnANewLine()
+    {
+        var terminal = new ProbeTerminal();
+        var status = new ReplThinkingStatus(terminal, () => 0);
+
+        status.Start();
+        status.Finish();
+        status.BeginThinking();
+
+        Assert.AreEqual("\rworking 0s", terminal.Writes[0].Text);
+        Assert.AreEqual(Environment.NewLine, terminal.Writes[1].Text);
+        Assert.AreEqual(Environment.NewLine, terminal.Writes[2].Text);
+        Assert.AreEqual("\rthinking 0s", terminal.Writes[3].Text);
+    }
+
     private sealed class ProbeTerminal : ICliTerminal
     {
         public List<(string Text, CliTextStyle Style)> Writes { get; } = [];

@@ -13,6 +13,7 @@ internal sealed class ReplThinkingStatus(ICliTerminal terminal, Func<long>? cloc
     private int _width;
     private bool _active;
     private bool _thinking;
+    private bool _restartOnNewLine;
 
     public void Start()
     {
@@ -23,6 +24,7 @@ internal sealed class ReplThinkingStatus(ICliTerminal terminal, Func<long>? cloc
                 return;
             }
 
+            OpenNewLineIfNeeded();
             _active = true;
             _thinking = false;
             _startedAt = Now();
@@ -42,10 +44,15 @@ internal sealed class ReplThinkingStatus(ICliTerminal terminal, Func<long>? cloc
         {
             if (!_active)
             {
+                OpenNewLineIfNeeded();
                 _active = true;
                 _startedAt = Now();
                 _renderedSeconds = -1;
                 _width = 0;
+                if (clock is null && _timer is null)
+                {
+                    _timer = new Timer(_ => Pulse(), null, 200, 200);
+                }
             }
 
             if (!_thinking)
@@ -71,6 +78,7 @@ internal sealed class ReplThinkingStatus(ICliTerminal terminal, Func<long>? cloc
             _timer?.Dispose();
             _timer = null;
             terminal.WriteLine();
+            _restartOnNewLine = true;
         }
     }
 
@@ -101,6 +109,17 @@ internal sealed class ReplThinkingStatus(ICliTerminal terminal, Func<long>? cloc
         terminal.Write("\r" + text.PadRight(_width), CliTextStyle.Muted);
         _width = Math.Max(_width, text.Length);
         _renderedSeconds = seconds;
+    }
+
+    private void OpenNewLineIfNeeded()
+    {
+        if (!_restartOnNewLine)
+        {
+            return;
+        }
+
+        terminal.WriteLine();
+        _restartOnNewLine = false;
     }
 
     private long Now() => clock?.Invoke() ?? Environment.TickCount64;
