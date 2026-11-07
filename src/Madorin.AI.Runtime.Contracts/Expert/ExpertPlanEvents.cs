@@ -7,6 +7,12 @@ public sealed record ExpertPlanCreatedEvent(
     string Goal,
     int StepCount);
 
+/// <summary>计划已从持久化恢复事件</summary>
+public sealed record ExpertPlanRestoredEvent(
+    string PlanId,
+    string Goal,
+    int StepCount);
+
 /// <summary>步骤状态更新事件</summary>
 public sealed record ExpertStepStatusChangedEvent(
     string PlanId,

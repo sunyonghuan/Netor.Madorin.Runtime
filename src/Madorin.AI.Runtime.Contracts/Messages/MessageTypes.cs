@@ -65,4 +65,5 @@ public static class MessageTypes
     public const string ExpertPlanCreated = "expert.plan.created";
     public const string ExpertStepStatusChanged = "expert.step.status.changed";
     public const string ExpertPlanStatusChanged = "expert.plan.status.changed";
+    public const string ExpertPlanRestored = "plan.restored";
 }

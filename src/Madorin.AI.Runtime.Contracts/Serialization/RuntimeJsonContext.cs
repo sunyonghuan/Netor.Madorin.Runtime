@@ -44,6 +44,7 @@ namespace Madorin.AI.Runtime.Contracts.Serialization;
 [JsonSerializable(typeof(ExpertPlanCreatedEvent))]
 [JsonSerializable(typeof(ExpertStepStatusChangedEvent))]
 [JsonSerializable(typeof(ExpertPlanStatusChangedEvent))]
+[JsonSerializable(typeof(ExpertPlanRestoredEvent))]
 [JsonSerializable(typeof(HostProviderConfig))]
 [JsonSerializable(typeof(HostProviderConfig[]))]
 [JsonSerializable(typeof(HostProviderModelConfig))]

@@ -616,13 +616,16 @@ public sealed class ExpertModeOrchestrator(
         if (restoredPlan is not null)
         {
             var planRestoredPayload = JsonSerializer.SerializeToElement(
-                new { PlanId = restoredPlan.PlanId, Goal = restoredPlan.Goal, StepCount = restoredPlan.Steps.Length },
-                RuntimeJsonContext.Default.JsonElement);
+                new ExpertPlanRestoredEvent(
+                    restoredPlan.PlanId,
+                    restoredPlan.Goal,
+                    restoredPlan.Steps.Length),
+                RuntimeJsonContext.Default.ExpertPlanRestoredEvent);
             yield return await CreateEnvelopeAsync(
                 runtimeInstanceId,
                 runId,
                 runSequence++,
-                "plan.restored",
+                MessageTypes.ExpertPlanRestored,
                 planRestoredPayload,
                 ct).ConfigureAwait(false);
         }
