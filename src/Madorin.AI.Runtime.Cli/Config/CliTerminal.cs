@@ -199,7 +199,7 @@ public sealed class CliTerminal : ICliTerminal
         CliTextStyle.Horse => ConsoleColor.White,
         CliTextStyle.Accent => ConsoleColor.Yellow,
         CliTextStyle.User => ConsoleColor.Magenta,
-        CliTextStyle.Assistant => ConsoleColor.DarkGray,
+        CliTextStyle.Assistant => ConsoleColor.Green,
         _ => Console.ForegroundColor
     };
 
