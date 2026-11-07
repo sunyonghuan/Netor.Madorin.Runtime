@@ -224,7 +224,10 @@ public static class CliApplication
             return parseResult.Invoke(new InvocationConfiguration
             {
                 Output = output,
-                Error = error
+                Error = error,
+                // 默认 2 秒后会强制结束进程，REPL 收不到 Ctrl+C。
+                // 交给 ConsoleReplInterruptSource：有 run 就取消，空闲才退出。
+                ProcessTerminationTimeout = null
             });
         }
 
