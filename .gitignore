@@ -7,6 +7,9 @@
 
 # Build output
 [Bb]in/
+[Bb]in/**
+!skills/madorin-cli/bin/
+!skills/madorin-cli/bin/**
 [Oo]bj/
 [Dd]ebug/
 [Rr]elease/

@@ -1,0 +1,56 @@
+{
+    "version":  "0.1.46",
+    "rid":  "win-x64",
+    "workers":  [
+                    {
+                        "protocol":  "OpenAI",
+                        "slug":  "openai",
+                        "fileName":  "madorin-provider-openai.exe"
+                    },
+                    {
+                        "protocol":  "Anthropic",
+                        "slug":  "anthropic",
+                        "fileName":  "madorin-provider-anthropic.exe"
+                    },
+                    {
+                        "protocol":  "OpenAI Compatible",
+                        "slug":  "openai-compatible",
+                        "fileName":  "madorin-provider-openai-compatible.exe"
+                    },
+                    {
+                        "protocol":  "DeepSeek",
+                        "slug":  "deepseek",
+                        "fileName":  "madorin-provider-deepseek.exe"
+                    },
+                    {
+                        "protocol":  "Kimi",
+                        "slug":  "kimi",
+                        "fileName":  "madorin-provider-kimi.exe"
+                    },
+                    {
+                        "protocol":  "Aliyun",
+                        "slug":  "aliyun",
+                        "fileName":  "madorin-provider-aliyun.exe"
+                    },
+                    {
+                        "protocol":  "Azure OpenAI",
+                        "slug":  "azure-openai",
+                        "fileName":  "madorin-provider-azure-openai.exe"
+                    },
+                    {
+                        "protocol":  "Gemini",
+                        "slug":  "gemini",
+                        "fileName":  "madorin-provider-gemini.exe"
+                    },
+                    {
+                        "protocol":  "GLM",
+                        "slug":  "glm",
+                        "fileName":  "madorin-provider-glm.exe"
+                    },
+                    {
+                        "protocol":  "Ollama",
+                        "slug":  "ollama",
+                        "fileName":  "madorin-provider-ollama.exe"
+                    }
+                ]
+}

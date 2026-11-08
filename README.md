@@ -1,20 +1,10 @@
 # Madorin.AI.Runtime
 
-<div align="center">
+面向 .NET 10 的独立 AI 运行时、命令行工作台与 Client SDK。
 
-![Netor.Madorin Logo](../Netor.Madorin/Res/images/logo.png)
-
-**面向 .NET 10 的独立 AI 运行时、命令行工作台与 Client SDK**
-
-可执行、可恢复、可集成，而不只是一次模型请求。
-
-![.NET 10](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet)
-![Native AOT](https://img.shields.io/badge/Native-AOT-00C853)
-![Expert](https://img.shields.io/badge/Mode-Expert-111111)
+可执行、可恢复、可集成，而不只是一次模型请求。技术基线是 .NET 10、Native AOT 和 Expert 模式。
 
 [快速开始](#快速开始) · [使用文档](./docs/使用文档/README.md) · [命令矩阵](./docs/命令规范/09-CLI命令矩阵.md) · [方案设计](./docs/方案设计/01-实施方案-V1.md)
-
-</div>
 
 ---
 
@@ -251,12 +241,12 @@ Madorin 产品与 SDK 的授权说明以 [Netor.Madorin README](../Netor.Madorin
 
 ## 联系方式
 
-- 官网：<https://netor.ai>
-- 文档：<https://docs.netor.ai>
-- 博客：<https://blog.netor.ai>
-- 应用商店：<https://store.netor.ai>
-- GitHub：<https://github.com/netor-ai/madorin>
-- Discord：<https://discord.gg/madorin>
+- 官网：https://netor.ai
+- 文档：https://docs.netor.ai
+- 博客：https://blog.netor.ai
+- 应用商店：https://store.netor.ai
+- GitHub：https://github.com/netor-ai/madorin
+- Discord：https://discord.gg/madorin
 - 支持邮箱：[support@netor.ai](mailto:support@netor.ai)
 - 商务邮箱：[business@netor.ai](mailto:business@netor.ai)
 - 社区微信：`madorin-ai`
@@ -280,14 +270,6 @@ Madorin 产品与 SDK 的授权说明以 [Netor.Madorin README](../Netor.Madorin
 
 发扬道家文化，弘扬华夏精神。
 
-<div align="center">
+微信二维码见 Netor.Madorin 仓库的 `Res/images/wechat.jpg`。
 
-**微信联系**
-
-<img src="../Netor.Madorin/Res/images/wechat.jpg" width="200" alt="微信二维码" />
-
-*扫码添加微信，交流技术与修行*
-
-Made with ❤️ by Netor.ai Team
-
-</div>
+Made with love by Netor.ai Team
