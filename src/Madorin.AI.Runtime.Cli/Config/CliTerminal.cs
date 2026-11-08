@@ -49,6 +49,9 @@ public sealed class CliTerminal : ICliTerminal
     private readonly TextWriter _output;
     private readonly bool _useSecureConsoleInput;
     private readonly bool _useColor;
+    private readonly List<string> _interactiveHistory = [];
+    private int _inputCursorRowOffset;
+    private int _inputBlockRows;
 
     /// <summary>Creates an injectable reader/writer terminal.</summary>
     public CliTerminal(TextReader input, TextWriter output, bool colorsEnabled = true)
@@ -205,9 +208,16 @@ public sealed class CliTerminal : ICliTerminal
 
     private async ValueTask<string?> ReadInteractiveBlockAsync(CancellationToken ct)
     {
-        var lines = new List<string> { string.Empty };
-        Write(InputMarker, CliTextStyle.Prompt);
+        _inputCursorRowOffset = 0;
+        _inputBlockRows = 0;
+        if (Console.CursorLeft != 0)
+        {
+            WriteLine();
+        }
+
+        var editor = new InteractiveLineEditor(_interactiveHistory);
         var lastKeyAt = Environment.TickCount64 - InteractiveConsoleInput.PasteBurstMilliseconds - 1;
+        RenderInteractiveInput(editor, placeAtEnd: false);
 
         while (true)
         {
@@ -215,35 +225,20 @@ public sealed class CliTerminal : ICliTerminal
             var now = Environment.TickCount64;
             var elapsed = now - lastKeyAt;
             lastKeyAt = now;
-            var moreKeysQueued = Console.KeyAvailable;
-            if (key.Key == ConsoleKey.Enter || key.KeyChar is '\r' or '\n')
+            var status = editor.Apply(key, Console.KeyAvailable, elapsed);
+            if (status == InteractiveInputStatus.Submitted)
             {
-                var shift = (key.Modifiers & ConsoleModifiers.Shift) != 0;
-                if (InteractiveConsoleInput.IsSubmitEnter(shift, moreKeysQueued, elapsed))
-                {
-                    WriteLine();
-                    return string.Join('\n', lines);
-                }
-
-                lines.Add(string.Empty);
+                RenderInteractiveInput(editor, placeAtEnd: true);
                 WriteLine();
-                Write(InputMarker, CliTextStyle.Prompt);
-                continue;
+                _inputCursorRowOffset = 0;
+                _inputBlockRows = 0;
+                return editor.Text;
             }
 
-            if (key.Key == ConsoleKey.Backspace)
+            if (status == InteractiveInputStatus.Changed)
             {
-                EraseLastCharacter(lines, InputMarker.Length, InputMarker);
-                continue;
+                RenderInteractiveInput(editor, placeAtEnd: false);
             }
-
-            if (char.IsControl(key.KeyChar))
-            {
-                continue;
-            }
-
-            lines[^1] += key.KeyChar;
-            Write(key.KeyChar.ToString(), CliTextStyle.User);
         }
     }
 
@@ -259,47 +254,98 @@ public sealed class CliTerminal : ICliTerminal
         return Console.ReadKey(intercept: true);
     }
 
-    private static void EraseLastCharacter(List<string> lines, int inputColumn, string continuation)
+    /// <summary>按编辑器状态整块重画输入区，再把光标放到字符位置。</summary>
+    private void RenderInteractiveInput(InteractiveLineEditor editor, bool placeAtEnd)
     {
-        var current = lines[^1];
-        if (current.Length > 0)
-        {
-            var removed = current[^1];
-            lines[^1] = current[..^1];
-            var width = InteractiveConsoleInput.DisplayWidth(removed);
-            Console.Write(new string('\b', width));
-            Console.Write(new string(' ', width));
-            Console.Write(new string('\b', width));
-            return;
-        }
-
-        if (lines.Count == 1)
-        {
-            return;
-        }
-
-        lines.RemoveAt(lines.Count - 1);
-        var previous = lines[^1];
-        var startColumn = lines.Count == 1 ? inputColumn : continuation.Length;
-        var column = startColumn + InteractiveConsoleInput.DisplayWidth(previous);
-        var staleTop = Console.CursorTop;
-        var targetTop = Math.Max(0, staleTop - 1);
-        var maxColumn = Math.Max(0, Console.BufferWidth - 1);
         try
         {
-            Console.SetCursorPosition(0, staleTop);
-            Console.Write('\r');
-            if (maxColumn > 0)
+            RenderInteractiveInputCore(editor, placeAtEnd);
+        }
+        catch (Exception exception) when (exception is ArgumentOutOfRangeException or InvalidOperationException or IOException)
+        {
+            // 窗口滚动或终端断开后，放弃旧锚点，下一轮从当前光标重画。
+            _inputCursorRowOffset = 0;
+            _inputBlockRows = 0;
+        }
+    }
+
+    private void RenderInteractiveInputCore(InteractiveLineEditor editor, bool placeAtEnd)
+    {
+        var bufferWidth = Math.Max(1, Console.BufferWidth);
+        var row = placeAtEnd ? editor.Lines.Count - 1 : editor.Row;
+        var column = placeAtEnd ? editor.Lines[row].Length : editor.Column;
+        var layout = InteractiveInputLayout.Build(
+            editor.Lines,
+            row,
+            column,
+            InputMarker,
+            bufferWidth);
+        _output.Flush();
+        if (Console.CursorTop < _inputCursorRowOffset)
+        {
+            _inputCursorRowOffset = 0;
+            _inputBlockRows = 0;
+        }
+
+        var startTop = Console.CursorTop - _inputCursorRowOffset;
+        Console.SetCursorPosition(0, startTop);
+        var totalRows = Math.Max(layout.Rows.Count, _inputBlockRows);
+        for (var index = 0; index < totalRows; index++)
+        {
+            if (index > 0)
             {
-                Console.Write(new string(' ', maxColumn));
-                Console.Write('\r');
+                MoveToNextVisualRow();
             }
 
-            Console.SetCursorPosition(Math.Min(column, maxColumn), targetTop);
+            if (index < layout.Rows.Count)
+            {
+                var visual = layout.Rows[index];
+                if (visual.PromptText.Length > 0)
+                {
+                    Write(visual.PromptText, CliTextStyle.Prompt);
+                }
+
+                if (visual.UserText.Length > 0)
+                {
+                    Write(visual.UserText, CliTextStyle.User);
+                }
+            }
+
+            ClearVisualTail(bufferWidth);
         }
-        catch (ArgumentOutOfRangeException)
+
+        _output.Flush();
+        var delta = totalRows - 1 - layout.CursorRow;
+        var top = Math.Max(0, Console.CursorTop - delta);
+        var cursorColumn = Math.Clamp(layout.CursorColumn, 0, bufferWidth - 1);
+        Console.SetCursorPosition(cursorColumn, top);
+        _inputCursorRowOffset = layout.CursorRow;
+        _inputBlockRows = layout.Rows.Count;
+    }
+
+    private void MoveToNextVisualRow()
+    {
+        _output.Flush();
+        var next = Console.CursorTop + 1;
+        if (next < Console.BufferHeight)
         {
-            // 窗口滚动后原行号失效，留在当前光标继续输入。
+            Console.SetCursorPosition(0, next);
+            return;
         }
+
+        _output.WriteLine();
+    }
+
+    private void ClearVisualTail(int bufferWidth)
+    {
+        _output.Flush();
+        var usable = Math.Max(1, bufferWidth - 1);
+        var column = Console.CursorLeft;
+        if (column < 0 || column >= usable)
+        {
+            return;
+        }
+
+        _output.Write(new string(' ', usable - column));
     }
 }
