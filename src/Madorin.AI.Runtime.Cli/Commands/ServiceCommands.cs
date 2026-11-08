@@ -786,10 +786,15 @@ internal static class ServiceCommands
         bool showWelcome,
         CancellationToken ct)
     {
-        ReplLoopResult Complete(int exitCode) => new(exitCode, null, selection);
-
         var selectionVersion = 1;
         var helpLanguage = ReplHelpLanguage.Chinese;
+        ReplLoopResult Complete(int exitCode) => new(exitCode, null, selection);
+        ReplLoopResult Leave(int exitCode)
+        {
+            ReplSessionResumeHint.Write(terminal, sessionId);
+            return Complete(exitCode);
+        }
+
         if (sessionId is not null)
         {
             var snapshot = await runtime.GetSessionSnapshotAsync(sessionId, ct).ConfigureAwait(false);
@@ -874,7 +879,7 @@ internal static class ServiceCommands
                 {
                     if (interruptState == ReplInterruptState.Exiting)
                     {
-                        return Complete(ExitCodes.UserInterrupted);
+                        return Leave(ExitCodes.UserInterrupted);
                     }
 
                     interruptState = ReplInterruptState.Idle;
@@ -888,7 +893,7 @@ internal static class ServiceCommands
                 var userInput = await terminal.ReadBlockAsync(exitCts.Token).ConfigureAwait(false);
                 if (userInput is null)
                 {
-                    return Complete(ExitCodes.Success);
+                    return Leave(ExitCodes.Success);
                 }
 
                 if (string.IsNullOrWhiteSpace(userInput))
@@ -932,7 +937,7 @@ internal static class ServiceCommands
 
                     if (commandResult.ExitCode is { } commandExitCode)
                     {
-                        return Complete(commandExitCode);
+                        return Leave(commandExitCode);
                     }
 
                     continue;
@@ -956,7 +961,7 @@ internal static class ServiceCommands
                 {
                     if (interruptState == ReplInterruptState.Exiting)
                     {
-                        return Complete(ExitCodes.UserInterrupted);
+                        return Leave(ExitCodes.UserInterrupted);
                     }
 
                     activeRunCts = runCts;
@@ -1043,14 +1048,22 @@ internal static class ServiceCommands
 
                 sessionId = result.SessionId ?? sessionId;
                 activeMeetingSessionId = sessionId;
+                await WriteTurnContextSizeAsync(
+                        terminal,
+                        runtime,
+                        sessionId,
+                        runOutputWriter.HasText && !runOutputWriter.EndsWithNewLine,
+                        exitCts.Token)
+                    .ConfigureAwait(false);
                 if (exitCts.IsCancellationRequested)
                 {
-                    return Complete(ExitCodes.UserInterrupted);
+                    return Leave(ExitCodes.UserInterrupted);
                 }
 
                 if (result.ExitCode == ExitCodes.UserInterrupted
                     && (continueAfterCancellation || wasPausing))
                 {
+                    ReplSessionResumeHint.Write(terminal, sessionId);
                     continue;
                 }
 
@@ -1061,13 +1074,13 @@ internal static class ServiceCommands
 
                 if (result.ExitCode != ExitCodes.Success)
                 {
-                    return Complete(result.ExitCode);
+                    return Leave(result.ExitCode);
                 }
             }
         }
         catch (OperationCanceledException) when (exitCts.IsCancellationRequested)
         {
-            return Complete(ExitCodes.UserInterrupted);
+            return Leave(ExitCodes.UserInterrupted);
         }
     }
 
@@ -1077,6 +1090,49 @@ internal static class ServiceCommands
         {
             CancelNoThrow(cancellationTokenSource);
         }
+    }
+
+    private static async Task WriteTurnContextSizeAsync(
+        ICliTerminal terminal,
+        LocalRuntime runtime,
+        string? sessionId,
+        bool breakBeforeLine,
+        CancellationToken ct)
+    {
+        if (!terminal.IsInteractive || string.IsNullOrWhiteSpace(sessionId))
+        {
+            return;
+        }
+
+        SessionContextStatus? status;
+        try
+        {
+            status = await runtime.GetSessionContextStatusAsync(sessionId, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception exception) when (exception is IOException
+            or InvalidDataException
+            or InvalidOperationException)
+        {
+            return;
+        }
+
+        if (status is null)
+        {
+            return;
+        }
+
+        if (breakBeforeLine)
+        {
+            terminal.WriteLine();
+        }
+
+        terminal.WriteLine(
+            TokenCountFormat.FormatKilo(status.ProjectionEstimatedTokens),
+            CliTextStyle.Muted);
     }
 
     private static async Task<ReplCommandResult?> TryHandleCoreReplCommandAsync(
@@ -1419,9 +1475,15 @@ internal static class ServiceCommands
                         return Current();
                     }
 
+                    ReplSessionResumeHint.Write(terminal, sessionId);
                     await output.WriteLineAsync("A new Session will be created on the next turn.")
                         .ConfigureAwait(false);
-                    return new ReplCommandResult(null, selection, 1, ExitCode: null);
+                    return new ReplCommandResult(
+                        null,
+                        selection,
+                        1,
+                        ExitCode: null,
+                        HelpLanguage: helpLanguage);
 
                 case "/PAUSE":
                 {
@@ -1772,8 +1834,8 @@ internal static class ServiceCommands
                     {
                         await error.WriteLineAsync(
                                 nextLanguage == ReplHelpLanguage.English
-                                    ? $"Unknown command '{argument}'. Use /help to list commands."
-                                    : $"没有这个命令：{argument}。用 /help 查看命令。")
+                                    ? $"Unknown command '{argument}'. Use /help to list commands, /help <command> for one command, or /help zh for Chinese."
+                                    : $"没有这个命令：{argument}。用 /help 查看全部，/help 命令名 查看用法，/help en 切换英文。")
                             .ConfigureAwait(false);
                         return Current();
                     }
@@ -1787,8 +1849,8 @@ internal static class ServiceCommands
                 default:
                     await error.WriteLineAsync(
                             helpLanguage == ReplHelpLanguage.English
-                                ? $"Unknown command '{commandName}'. Use /help to list commands."
-                                : $"没有这个命令：{commandName}。用 /help 查看命令。")
+                                ? $"Unknown command '{commandName}'. Use /help to list commands, /help <command> for one command, or /help zh for Chinese."
+                                : $"没有这个命令：{commandName}。用 /help 查看全部，/help 命令名 查看用法，/help en 切换英文。")
                         .ConfigureAwait(false);
                     return Current();
             }

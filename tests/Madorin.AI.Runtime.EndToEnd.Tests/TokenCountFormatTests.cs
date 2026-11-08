@@ -17,4 +17,15 @@ public sealed class TokenCountFormatTests
     {
         Assert.AreEqual(expected, TokenCountFormat.Format(count));
     }
+
+    [TestMethod]
+    [DataRow(0, "0.00k")]
+    [DataRow(50, "0.05k")]
+    [DataRow(1_234, "1.23k")]
+    [DataRow(1_995, "2.00k")]
+    [DataRow(1_500_000, "1500.00k")]
+    public void FormatKilo_UsesTwoDecimalThousands(int count, string expected)
+    {
+        Assert.AreEqual(expected, TokenCountFormat.FormatKilo(count));
+    }
 }

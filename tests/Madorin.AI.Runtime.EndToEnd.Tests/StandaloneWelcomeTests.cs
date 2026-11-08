@@ -117,6 +117,10 @@ public sealed class StandaloneWelcomeTests
         var output = terminal.Output.ToString();
         Assert.Contains("交互命令", output, StringComparison.Ordinal);
         Assert.Contains("[] 可以不写，<> 必须写。", output, StringComparison.Ordinal);
+        Assert.Contains("怎么查命令", output, StringComparison.Ordinal);
+        Assert.Contains("/help <command>", output, StringComparison.Ordinal);
+        Assert.Contains("/help 历史", output, StringComparison.Ordinal);
+        Assert.Contains("/help zh", output, StringComparison.Ordinal);
         string[] commands =
         [
             "/help [命令]",
@@ -151,6 +155,47 @@ public sealed class StandaloneWelcomeTests
 
         Assert.DoesNotContain("/pause", output, StringComparison.Ordinal);
         Assert.DoesNotContain("/interrupt", output, StringComparison.Ordinal);
+    }
+
+    [TestMethod]
+    public void ReplHelpWriter_ChineseNameFindsConversationHistory()
+    {
+        var terminal = new RecordingTerminal();
+
+        var wroteHelp = ReplHelpWriter.Write(
+            terminal,
+            "历史对话",
+            ReplHelpLanguage.Chinese,
+            out var language);
+
+        Assert.IsTrue(wroteHelp);
+        Assert.AreEqual(ReplHelpLanguage.Chinese, language);
+        var output = terminal.Output.ToString();
+        Assert.Contains("/history", output, StringComparison.Ordinal);
+        Assert.Contains("/history all", output, StringComparison.Ordinal);
+        Assert.Contains("/resume", output, StringComparison.Ordinal);
+    }
+
+    [TestMethod]
+    public void ReplHelpWriter_EnglishOverviewShowsLanguageSwitch()
+    {
+        var terminal = new RecordingTerminal();
+
+        var wroteHelp = ReplHelpWriter.Write(
+            terminal,
+            null,
+            ReplHelpLanguage.English,
+            out var language);
+
+        Assert.IsTrue(wroteHelp);
+        Assert.AreEqual(ReplHelpLanguage.English, language);
+        var output = terminal.Output.ToString();
+        Assert.Contains("How to look up a command", output, StringComparison.Ordinal);
+        Assert.Contains("/help en", output, StringComparison.Ordinal);
+        Assert.Contains("/help zh", output, StringComparison.Ordinal);
+        Assert.Contains("/history", output, StringComparison.Ordinal);
+        Assert.Contains("/resume", output, StringComparison.Ordinal);
+        Assert.Contains("/quit", output, StringComparison.Ordinal);
     }
 
     [TestMethod]

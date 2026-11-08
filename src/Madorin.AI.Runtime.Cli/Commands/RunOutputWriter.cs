@@ -18,6 +18,10 @@ internal sealed class RunOutputWriter(
     private string? _runId;
     private string? _sessionId;
 
+    internal bool HasText => _text.Length > 0;
+
+    internal bool EndsWithNewLine => _text.Length > 0 && _text[^1] is '\n' or '\r';
+
     public async ValueTask<RunOutputResult?> WriteEventAsync(
         RuntimeEventEnvelope envelope,
         CancellationToken ct)

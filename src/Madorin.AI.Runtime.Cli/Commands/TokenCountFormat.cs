@@ -26,4 +26,10 @@ internal static class TokenCountFormat
         var text = scaled.ToString("0.#", CultureInfo.InvariantCulture);
         return count < 0 ? "-" + text + suffix : text + suffix;
     }
+
+    public static string FormatKilo(long count)
+    {
+        var scaled = Math.Round(count / 1000d, 2, MidpointRounding.AwayFromZero);
+        return scaled.ToString("0.00", CultureInfo.InvariantCulture) + "k";
+    }
 }
