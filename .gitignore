@@ -12,6 +12,8 @@
 !skills/madorin-cli/bin/**
 skills/madorin-cli/bin/*.exe
 skills/madorin-cli/bin/*.dll
+!skills/madorin-cli/mcp/bin/
+!skills/madorin-cli/mcp/bin/**
 [Oo]bj/
 [Dd]ebug/
 [Rr]elease/

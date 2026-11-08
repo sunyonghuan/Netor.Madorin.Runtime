@@ -1,6 +1,6 @@
 ---
 name: madorin-cli
-description: Use when operating, automating, diagnosing, or integrating the Madorin.AI.Runtime CLI and Runtime Client SDK, including standalone run, serve, REPL, configuration, Agents, Sessions, Skills, maintenance, live control, permission modes, model tools, and host callbacks.
+description: Use when operating, automating, diagnosing, or integrating the Madorin.AI.Runtime CLI and Runtime Client SDK, including standalone run, serve, REPL, configuration, Agents, Sessions, Skills, the MCP bridge, maintenance, live control, permission modes, model tools, and host callbacks.
 ---
 
 # Madorin CLI
@@ -51,6 +51,34 @@ Running the executable with no arguments, or `run` without input, opens the REPL
 5. Close with `ShutdownAsync` when the host owns the Runtime, then `DisposeAsync`. `ShutdownAsync` cancels active Runs, closes Provider workers, and stops the process through `runtime.shutdown`. `OwnedProcessClosePolicy` only governs the process this Client started.
 
 Read [Host Integration](references/host-integration.md) for APIs, C# setup, callbacks, round-based history, shutdown, recovery, and release flow.
+
+## MCP Bridge
+
+The MCP bridge is a command-line client, not a native Runtime tool. It needs `node` on `PATH` and uses only Node built-ins. The engine is `<skill-root>/mcp/bin/mcp-bridge.mjs`. Call a platform entry below; do not invoke the `.mjs` file directly.
+
+| Platform | Entry | Quoting |
+| --- | --- | --- |
+| Windows PowerShell | `<skill-root>/bin/mcp.ps1` | Preserves JSON quotes. Prefer this in PowerShell. |
+| Windows cmd.exe | `<skill-root>/bin/mcp.cmd` | Inner quotes are lost. Use `--arg key=value` or `--args-file`. |
+| Linux | `<skill-root>/bin/mcp.sh` | `"$@"` preserves arguments. |
+| macOS | `<skill-root>/bin/mcp.zsh` | `"$@"` preserves arguments. |
+
+All four entries run `node` on the same bridge and return its exit code. If `mcp-bridge.mjs` is missing, they write `Error: bridge not found` to stderr and exit `2`.
+
+Server definitions live in `<skill-root>/mcp/servers.json`. Secrets belong in `${env:NAME}`, never in the file or in global memory. Full command and server notes are in [mcp/README.md](mcp/README.md).
+
+```text
+mcp list
+mcp tools <server>
+mcp schema <server> [tool]
+mcp call <server> <tool> --args '<json>'
+mcp call <server> <tool> --arg key=value
+mcp index
+mcp doctor [server]
+mcp show <server>
+```
+
+After a new MCP server or tool is obtained, append its name and the exact call pattern to the user global memory `~/.madorin/memory.md` (Windows: `%USERPROFILE%\.madorin\memory.md`). Later Agent sessions load that file automatically. Do not store tokens, passwords, or other secrets there. Non-obvious rules, such as required ids or bootstrap order, belong in that same memory section; do not leave them only in the current conversation.
 
 ## Resources, Scripts, And Executables
 
