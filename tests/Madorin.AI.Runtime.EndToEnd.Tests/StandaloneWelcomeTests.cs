@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Globalization;
 using Madorin.AI.Runtime.Cli;
 using Madorin.AI.Runtime.Cli.Commands;
 using Madorin.AI.Runtime.Cli.Config;
@@ -102,6 +103,18 @@ public sealed class StandaloneWelcomeTests
     }
 
     [TestMethod]
+    public void FormatSessionTime_UsesLocalTimeToTheSecond()
+    {
+        var updatedAt = new DateTimeOffset(2026, 1, 2, 3, 4, 5, 678, TimeSpan.Zero);
+        var formatted = ServiceCommands.FormatSessionTime(updatedAt);
+
+        Assert.AreEqual(
+            updatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+            formatted);
+        Assert.HasCount(19, formatted);
+    }
+
+    [TestMethod]
     public void ReplHelpWriter_ListsEveryCommandWithChineseDescriptions()
     {
         var terminal = new RecordingTerminal();
@@ -121,6 +134,7 @@ public sealed class StandaloneWelcomeTests
         Assert.Contains("/help <command>", output, StringComparison.Ordinal);
         Assert.Contains("/help 历史", output, StringComparison.Ordinal);
         Assert.Contains("/help zh", output, StringComparison.Ordinal);
+        Assert.Contains("/resume 10", output, StringComparison.Ordinal);
         string[] commands =
         [
             "/help [命令]",
@@ -132,7 +146,7 @@ public sealed class StandaloneWelcomeTests
             "/agent [智能体编号]",
             "/session",
             "/new",
-            "/resume [会话编号]",
+            "/resume [条数 | 会话编号]",
             "/history [条数 | all]",
             "/export [文件路径]",
             "/compact",

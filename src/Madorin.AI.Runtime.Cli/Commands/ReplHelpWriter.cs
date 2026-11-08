@@ -121,7 +121,7 @@ internal static class ReplHelpWriter
         WriteUsage(
             terminal,
             "/help 历史",
-            Text(language, "也可以用中文查。历史对话是 /history，以前的会话是 /resume。", "Chinese names work too. Conversation history is /history. Past sessions are /resume."));
+            Text(language, "也可以用中文查。历史消息用 /history。以前的会话用 /resume 列出最近 10 条，/resume 10 指定条数。", "Chinese names work too. Messages use /history. Past sessions: /resume lists the latest 10, and /resume 10 sets the count."));
         WriteUsage(
             terminal,
             "/help en",
@@ -315,13 +315,13 @@ internal static class ReplHelpWriter
                 Entry(
                     ["resume", "恢复", "以前的会话"],
                     "/resume",
-                    "[会话编号]",
-                    "[session-id]",
-                    "查询并继续以前的会话。",
-                    "List past sessions, or continue one.",
-                    "不写编号时列出最近 10 个同模式会话。编号是列表第一列。",
-                    "Omit the id to list the 10 most recent sessions in this mode. The id is the first column.",
-                    ["/resume", "/resume 0123abcd"]),
+                    "[条数 | 会话编号]",
+                    "[count | session-id]",
+                    "列出最近的会话编号，或按编号继续。默认 10 条。",
+                    "List recent session ids, or continue one. The default count is 10.",
+                    "不写参数时，按更新时间从新到旧列出最近 10 个会话编号，时间是本地时间并精确到秒。/resume 10 指定条数，范围 1 到 100。/resume <会话编号> 继续该对话。",
+                    "Omit the argument to list the 10 most recently updated session ids. Times are local and precise to the second. /resume 10 sets the count from 1 to 100. /resume <session-id> continues that session.",
+                    ["/resume", "/resume 10", "/resume 0123abcd"]),
                 Entry(
                     ["history", "历史", "历史对话", "历史消息"],
                     "/history",

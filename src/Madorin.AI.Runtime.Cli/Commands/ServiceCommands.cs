@@ -1,5 +1,6 @@
 using System.CommandLine;
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -23,6 +24,8 @@ internal static class ServiceCommands
     private static readonly UTF8Encoding StrictUtf8 = new(
         encoderShouldEmitUTF8Identifier: false,
         throwOnInvalidBytes: true);
+    private const int DefaultResumeListCount = 10;
+    private const int MaxResumeListCount = 100;
 
     public static Command CreateServe(
         Option<bool> jsonOption,
@@ -1092,6 +1095,33 @@ internal static class ServiceCommands
         }
     }
 
+    internal static string FormatSessionTime(DateTimeOffset updatedAt) =>
+        updatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+
+    private static bool TryReadResumeListCount(
+        string argument,
+        ReplHelpLanguage language,
+        out int count,
+        out string? error)
+    {
+        count = 0;
+        error = null;
+        if (argument.Length > 3
+            || !int.TryParse(argument, NumberStyles.None, CultureInfo.InvariantCulture, out count))
+        {
+            return false;
+        }
+
+        if (count is < 1 or > MaxResumeListCount)
+        {
+            error = language == ReplHelpLanguage.English
+                ? $"Session list count must be from 1 to {MaxResumeListCount}."
+                : $"条数必须是 1 到 {MaxResumeListCount}。";
+        }
+
+        return true;
+    }
+
     private static async Task WriteTurnContextSizeAsync(
         ICliTerminal terminal,
         LocalRuntime runtime,
@@ -1500,10 +1530,25 @@ internal static class ServiceCommands
                 }
 
                 case "/RESUME":
-                    if (argument is null)
+                    var listCount = DefaultResumeListCount;
+                    string? listCountError = null;
+                    var resumeById = argument is not null
+                        && !TryReadResumeListCount(
+                            argument,
+                            helpLanguage,
+                            out listCount,
+                            out listCountError);
+                    if (!resumeById)
                     {
+                        if (listCountError is not null)
+                        {
+                            await error.WriteLineAsync(listCountError).ConfigureAwait(false);
+                            return Current();
+                        }
+
+                        var count = argument is null ? DefaultResumeListCount : listCount;
                         var sessions = await runtime.ListSessionsAsync(
-                                new SessionListParameters(Mode: mode, Limit: 10),
+                                new SessionListParameters(Mode: mode, Limit: count),
                                 ct)
                             .ConfigureAwait(false);
                         if (sessions.Sessions.Length == 0)
@@ -1516,18 +1561,24 @@ internal static class ServiceCommands
                         foreach (var item in sessions.Sessions)
                         {
                             await output.WriteLineAsync(
-                                    $"{item.SessionId}  {item.Mode}  {item.Status}  {item.UpdatedAt:O}")
+                                    $"{item.SessionId}  {item.Mode}  {item.Status}  {FormatSessionTime(item.UpdatedAt)}")
                                 .ConfigureAwait(false);
                         }
 
+                        await output.WriteLineAsync(
+                                helpLanguage == ReplHelpLanguage.English
+                                    ? "Continue one with /resume <session-id>."
+                                    : "用 /resume <会话编号> 继续对应对话。")
+                            .ConfigureAwait(false);
                         return Current();
                     }
 
-                    var resumeSnapshot = await runtime.GetSessionSnapshotAsync(argument, ct)
+                    var sessionToResume = argument ?? string.Empty;
+                    var resumeSnapshot = await runtime.GetSessionSnapshotAsync(sessionToResume, ct)
                         .ConfigureAwait(false);
                     if (resumeSnapshot is null)
                     {
-                        await error.WriteLineAsync($"Session '{argument}' was not found.")
+                        await error.WriteLineAsync($"Session '{sessionToResume}' was not found.")
                             .ConfigureAwait(false);
                         return Current();
                     }
@@ -1535,12 +1586,12 @@ internal static class ServiceCommands
                     if (resumeSnapshot.Mode != mode)
                     {
                         await error.WriteLineAsync(
-                                $"Session '{argument}' uses {resumeSnapshot.Mode} mode; the current REPL uses {mode} mode.")
+                                $"Session '{sessionToResume}' uses {resumeSnapshot.Mode} mode; the current REPL uses {mode} mode.")
                             .ConfigureAwait(false);
                         return Current();
                     }
 
-                    var savedSelection = await runtime.GetSessionSelectionAsync(argument, ct)
+                    var savedSelection = await runtime.GetSessionSelectionAsync(sessionToResume, ct)
                         .ConfigureAwait(false);
                     if (savedSelection is null
                         || !StandaloneConfigurationResolver.TryResolveGlobalSelection(
@@ -1552,15 +1603,15 @@ internal static class ServiceCommands
                             out var resumedSelection))
                     {
                         await error.WriteLineAsync(
-                                $"Session '{argument}' references an Agent, Provider, or model that is not available locally.")
+                                $"Session '{sessionToResume}' references an Agent, Provider, or model that is not available locally.")
                             .ConfigureAwait(false);
                         return Current();
                     }
 
-                    await output.WriteLineAsync($"Resumed Session: {argument}")
+                    await output.WriteLineAsync($"Resumed Session: {sessionToResume}")
                         .ConfigureAwait(false);
                     return new ReplCommandResult(
-                        argument,
+                        sessionToResume,
                         resumedSelection,
                         resumeSnapshot.SelectionVersion ?? savedSelection.SelectionVersion,
                         ExitCode: null);
