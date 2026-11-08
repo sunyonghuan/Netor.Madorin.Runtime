@@ -1,0 +1,5 @@
+{
+  "$schema": "https://madorin.local/schemas/mcp-servers.schema.json",
+  "mcpServers": {
+  }
+}

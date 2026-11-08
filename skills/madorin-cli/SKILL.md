@@ -65,7 +65,7 @@ The MCP bridge is a command-line client, not a native Runtime tool. It needs `no
 
 All four entries run `node` on the same bridge and return its exit code. If `mcp-bridge.mjs` is missing, they write `Error: bridge not found` to stderr and exit `2`.
 
-Server definitions live in `<skill-root>/mcp/servers.json`, which is machine-local and gitignored along with `mcp/catalog/` and `mcp/logs/`; a fresh clone must create its own from the example. Secrets belong in `${env:NAME}`, never in the file or in global memory. Full command and server notes are in [mcp/README.md](mcp/README.md).
+Server definitions live in `<skill-root>/mcp/servers.json`. That file and `mcp/catalog/` are tracked. `mcp/logs/` stays untracked. Secrets belong in `${env:NAME}`, never in `servers.json`, the catalog, or global memory. Full command and server notes are in [mcp/README.md](mcp/README.md).
 
 ```text
 mcp list

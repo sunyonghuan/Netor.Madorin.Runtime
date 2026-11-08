@@ -7,7 +7,7 @@ Uses only Node built-ins (`child_process`, `fs`, `path`, `url`); no npm packages
 
 | Path | Purpose | Typical size |
 | --- | --- | --- |
-| `servers.json` | Single source of truth for server definitions. Supports `${env:NAME}`. Machine-local and gitignored: create it yourself, never commit secrets. | < 2 KB |
+| `servers.json` | Single source of truth for server definitions. Supports `${env:NAME}`. Tracked; never commit tokens, passwords, or other secrets. | < 2 KB |
 | `bin/mcp-bridge.mjs` | Core JSON-RPC engine: stdio (newline-delimited) and streamable HTTP (JSON or SSE). | ~29 KB |
 | `catalog/index.json` | **Compact index**: per server status, protocol, tool count, shard pointer. No tool schemas. | ~1 KB |
 | `catalog/index.md` | Human-readable index listing tool names per server. | few KB |
@@ -108,7 +108,7 @@ Notes:
 
 Self-hosted knowledge base. Connapse 1.0.0, protocol 2025-06-18, 11 tools.
 
-- Endpoint: `http://10.10.10.120:5002/mcp` (nginx gateway on 5002 converts the auth header).
+- The endpoint belongs in `servers.json`, not in this document.
 - Auth: `Authorization: Bearer ${env:CONNAPSE_MCP_TOKEN}`. The gateway also accepts `X-API-Key`; `Api-Key`, `X-Auth-Token`, and bare-token `Authorization` are rejected with 401.
 - Responses use SSE framing; the bridge parses `data:` frames.
 
