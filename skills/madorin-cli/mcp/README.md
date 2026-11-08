@@ -7,7 +7,7 @@ Uses only Node built-ins (`child_process`, `fs`, `path`, `url`); no npm packages
 
 | Path | Purpose | Typical size |
 | --- | --- | --- |
-| `servers.json` | Single source of truth for server definitions. Supports `${env:NAME}`. Never commit secrets. | < 2 KB |
+| `servers.json` | Single source of truth for server definitions. Supports `${env:NAME}`. Machine-local and gitignored: create it yourself, never commit secrets. | < 2 KB |
 | `bin/mcp-bridge.mjs` | Core JSON-RPC engine: stdio (newline-delimited) and streamable HTTP (JSON or SSE). | ~29 KB |
 | `catalog/index.json` | **Compact index**: per server status, protocol, tool count, shard pointer. No tool schemas. | ~1 KB |
 | `catalog/index.md` | Human-readable index listing tool names per server. | few KB |
@@ -22,6 +22,8 @@ Uses only Node built-ins (`child_process`, `fs`, `path`, `url`); no npm packages
 A single catalog file scales badly: one server with 29 tools is 45 KB, so several servers with 100 tools each would be megabytes, and reading one tool signature would mean loading all of it. Sharding keeps the always-read index at ~1 KB, while a shard is only parsed when you ask for a schema. Verified: an 800-tool shard (394 KB) resolves a single tool in ~50 ms.
 
 `mcp index` writes one shard per server and rewrites `index.json` / `index.md`. It never merges shards, so adding a server costs one new file.
+
+`servers.json`, `catalog/`, and `logs/` are machine-local and listed in the repository `.gitignore`; only the bridge, entries, and this README are tracked. On a fresh clone, create `servers.json` from the example below and run `mcp index`.
 
 ## Usage
 
