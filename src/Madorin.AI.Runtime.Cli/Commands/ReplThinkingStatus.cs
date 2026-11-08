@@ -3,7 +3,7 @@ using Madorin.AI.Runtime.Cli.Tools;
 
 namespace Madorin.AI.Runtime.Cli.Commands;
 
-/// <summary>消息发出后先占一行显示等待；模型思考时改成 thinking，正式输出前换行。</summary>
+/// <summary>消息发出后先占一行显示等待；模型思考时改成 thinking，工具调用时改成 tool:工具名，正式输出前换行。</summary>
 internal sealed class ReplThinkingStatus(ICliTerminal terminal, Func<long>? clock = null) : IConsoleActivity, IDisposable
 {
     private readonly object _gate = new();
@@ -13,6 +13,7 @@ internal sealed class ReplThinkingStatus(ICliTerminal terminal, Func<long>? cloc
     private int _width;
     private bool _active;
     private bool _thinking;
+    private string? _toolName;
     private bool _restartOnNewLine;
 
     public void Start()
@@ -24,17 +25,10 @@ internal sealed class ReplThinkingStatus(ICliTerminal terminal, Func<long>? cloc
                 return;
             }
 
-            OpenNewLineIfNeeded();
-            _active = true;
+            EnsureActive();
             _thinking = false;
-            _startedAt = Now();
-            _renderedSeconds = -1;
-            _width = 0;
+            _toolName = null;
             Render();
-            if (clock is null)
-            {
-                _timer = new Timer(_ => Pulse(), null, 200, 200);
-            }
         }
     }
 
@@ -42,22 +36,33 @@ internal sealed class ReplThinkingStatus(ICliTerminal terminal, Func<long>? cloc
     {
         lock (_gate)
         {
-            if (!_active)
-            {
-                OpenNewLineIfNeeded();
-                _active = true;
-                _startedAt = Now();
-                _renderedSeconds = -1;
-                _width = 0;
-                if (clock is null && _timer is null)
-                {
-                    _timer = new Timer(_ => Pulse(), null, 200, 200);
-                }
-            }
-
-            if (!_thinking)
+            EnsureActive();
+            if (_toolName is not null || !_thinking)
             {
                 _thinking = true;
+                _toolName = null;
+                _renderedSeconds = -1;
+            }
+
+            Render();
+        }
+    }
+
+    public void BeginTool(string toolName)
+    {
+        var normalized = NormalizeToolName(toolName);
+        if (normalized is null)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            EnsureActive();
+            if (!string.Equals(_toolName, normalized, StringComparison.Ordinal))
+            {
+                _toolName = normalized;
+                _thinking = false;
                 _renderedSeconds = -1;
             }
 
@@ -105,10 +110,52 @@ internal sealed class ReplThinkingStatus(ICliTerminal terminal, Func<long>? cloc
             return;
         }
 
-        var text = $"{(_thinking ? "thinking" : "working")} {seconds}s";
+        var label = _toolName is not null
+            ? $"tool:{_toolName}"
+            : _thinking
+                ? "thinking"
+                : "working";
+        var text = $"{label} {seconds}s";
         terminal.Write("\r" + text.PadRight(_width), CliTextStyle.Muted);
         _width = Math.Max(_width, text.Length);
         _renderedSeconds = seconds;
+    }
+
+    private void EnsureActive()
+    {
+        if (_active)
+        {
+            return;
+        }
+
+        OpenNewLineIfNeeded();
+        _active = true;
+        _startedAt = Now();
+        _renderedSeconds = -1;
+        _width = 0;
+        if (clock is null && _timer is null)
+        {
+            _timer = new Timer(_ => Pulse(), null, 200, 200);
+        }
+    }
+
+    private static string? NormalizeToolName(string? toolName)
+    {
+        if (string.IsNullOrWhiteSpace(toolName))
+        {
+            return null;
+        }
+
+        var trimmed = toolName.Trim();
+        foreach (var character in trimmed)
+        {
+            if (char.IsControl(character))
+            {
+                return null;
+            }
+        }
+
+        return trimmed;
     }
 
     private void OpenNewLineIfNeeded()

@@ -38,6 +38,19 @@ internal sealed class RunOutputWriter(
 
                 break;
 
+            case MessageTypes.ToolCallDelta:
+            case MessageTypes.ToolCallCompleted:
+                if (format is RunOutputFormat.Text)
+                {
+                    var toolName = TryReadToolName(envelope.Payload);
+                    if (toolName is not null)
+                    {
+                        thinking?.BeginTool(toolName);
+                    }
+                }
+
+                break;
+
             case MessageTypes.TextDelta:
                 var delta = envelope.Payload.Deserialize(RuntimeJsonContext.Default.TextDeltaEvent);
                 if (delta is not null)
@@ -356,4 +369,16 @@ internal sealed class RunOutputWriter(
     }
 
     private static string CreateDiagnosticId() => $"diag_{Guid.NewGuid():N}";
+
+    private static string? TryReadToolName(JsonElement payload)
+    {
+        if (payload.ValueKind is not JsonValueKind.Object
+            || !payload.TryGetProperty("name", out var name)
+            || name.ValueKind is not JsonValueKind.String)
+        {
+            return null;
+        }
+
+        return name.GetString();
+    }
 }
