@@ -20,7 +20,7 @@ For `AttachExisting`, start Runtime operationally:
 madorin serve --workspace <workspace> --instance <runtimeInstanceId>
 ```
 
-For `StartIfMissing` and `AlwaysStart`, configure the executable path and let the SDK start it. Never start `serve` manually for the same workspace at the same time. The SDK sends the handshake secret through redirected stdin; never put it in an argument, environment variable, log, or exception message.
+For `StartIfMissing` and `AlwaysStart`, configure the executable path and let the SDK start it. Never start `serve` manually for the same workspace at the same time. The SDK sends the handshake secret through redirected stdin and sets `MADORIN_HOST_PID` for the child, so Runtime also stops when the host process disappears; never put the secret in an argument, environment variable, log, or exception message.
 
 ## Create A Client
 
@@ -72,6 +72,8 @@ Apply and durably store the event before acknowledgement. On reconnect:
 
 Do not report `Failed` merely because a local timeout occurred. A `RuntimeProcessExitedException` describes an owned Runtime process, not a Run business outcome.
 
+Expert plan state also survives a restart. Runtime emits `plan.restored` (`ExpertPlanRestoredEvent` with plan id, goal, and step count) when it recovers a persisted plan, so a host can redraw the plan surface before the next step event arrives.
+
 ## Callbacks And Tools
 
 Configure host callbacks in `RuntimeClientOptions.HostCallbacks`:
@@ -91,19 +93,29 @@ var callbacks = new RuntimeHostCallbacks
 
 Publish catalog changes with `ReplaceToolCatalogAsync` or `PatchToolCatalogAsync`. Persist side-effecting tool results by stable `callId`. When a callback times out or transport reconnects, implement `ToolResultQueriedAsync` and return the persisted result; do not run the operation again. Preserve Runtime, Run, Agent, Grant, and delegation ownership in every authorization and approval response.
 
+When `mcli_command` is authorized, the Grant carries `CommandWorkingDirectory`. Runtime normalizes the requested `workingDirectory` and rejects the call when it does not match, so a Grant is bound to one directory rather than to script content. Hosts that expose their own command tool must apply an equivalent rule.
+
 ## Session, Selection, And Credentials
 
 Use these high-level APIs instead of protocol calls or file access:
 
 - `ListSessionsAsync`, `GetSessionAsync`, `ListSessionMessagesAsync`
+- `ReadSessionHistoryAsync`, `ReadSessionHistoryRoundsAsync`
+- `GetSessionContextStatusAsync`, `CompactSessionAsync`
 - `UpdateSessionSelectionAsync`, `ResumeSessionAsync`, `RehydrateSessionAsync`
 - `QueryRunAsync`, `ListRunsAsync`, `CancelRunAsync`
 - `ReplaceToolCatalogAsync`, `PatchToolCatalogAsync`, `RevokeGrantAsync`
-- `UpdateCredentialsAsync`
+- `UpdateCredentialsAsync`, `ShutdownAsync`
+
+`ReadSessionHistoryRoundsAsync` returns display pages grouped by user-anchored rounds. Pass `SessionHistoryRoundsReadParameters` (`RoundCount` default 30, `BeforeSequence` for older pages, `IncludeReasoning`, `IncludeToolCalls`, and `BlobMode` default `metadata`) and page backwards while the result reports `HasOlder`, using `OldestUserSequence` as the next `BeforeSequence`. Old Runtime builds throw `NotSupportedException`; fall back to `ReadSessionHistoryAsync` in that case.
+
+`GetSessionContextStatusAsync` reports the canonical history size, the effective projection size and strategy, the context window, the estimate source, whether the projection is stale, and any reason code, so a host can render a context indicator without recomputing tokens.
 
 Selection changes affect the next turn without changing the `sessionId` or clearing history. Resume a Session with `ExistingSessionRunRequest`. Update live credentials through the API or through `madorin ctl credential update`; never add credentials to prompt text or source code.
 
 ## Lifecycle And Upgrade
+
+`ShutdownAsync` sends `runtime.shutdown`: Runtime cancels active Runs, tells its Provider workers to stop, and exits. Call it before `DisposeAsync` when the host owns the Runtime and wants a graceful stop.
 
 `DisposeAsync` releases only the current Client's background loops and connections. The closure policy applies only to a Runtime process owned by the Client:
 
