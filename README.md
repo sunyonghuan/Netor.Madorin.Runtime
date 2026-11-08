@@ -2,13 +2,13 @@
 
 面向 .NET 10 的独立 AI 运行时、命令行工作台与 Client SDK。
 
-可执行、可恢复、可集成，而不只是一次模型请求。技术基线是 .NET 10、Native AOT 和 Expert 模式。
+可执行、可恢复、可集成，而不只是一次模型请求。技术基线是 .NET 10、Native AOT、Expert 模式，以及 Windows、Linux、macOS 三平台发布。
 
 [快速开始](#快速开始) · [使用文档](./docs/使用文档/README.md) · [命令矩阵](./docs/命令规范/09-CLI命令矩阵.md) · [方案设计](./docs/方案设计/01-实施方案-V1.md)
 
 ---
 
-Madorin.AI.Runtime 是 Madorin（马得令）的 AI 执行底座。发布物是 `madorin-cli`（Windows 上为 `madorin-cli.exe`），安装后以命令名 `madorin` 调用。它同时是：
+Madorin.AI.Runtime 是 Madorin（马得令）的 AI 执行底座。三个平台使用同一个命令名 `madorin`；Windows 发布文件是 `madorin-cli.exe`，Linux 和 macOS 是 `madorin-cli`。它同时是：
 
 - 可直接使用的交互式 CLI 与单次任务入口。
 - 通过 Named Pipe 对外提供协议的常驻 Runtime Server。
@@ -16,6 +16,26 @@ Madorin.AI.Runtime 是 Madorin（马得令）的 AI 执行底座。发布物是 
 - 按协议隔离的 Provider Worker，以及本地可治理的会话与状态存储。
 
 Runtime 负责模型访问、Expert 执行、工具调用、流式事件，以及对话历史和恢复状态的权威持久化。CLI 只是入口之一；宿主程序通过 Client SDK 走同一套协议。
+
+## 多平台
+
+多平台是当前交付的重点。Windows、Linux 和 macOS 不是三套产品，而是同一套 CLI、Runtime Server、Client SDK 和 Provider Worker 的三个发布目标。命令、配置、Session、Skills 和 `.madorin` 数据布局保持一致；已发布的 Native AOT 二进制运行时不需要安装 .NET SDK。
+
+| 平台 | RID | 发布文件 |
+| --- | --- | --- |
+| Windows x64 | `win-x64` | `madorin-cli.exe` 与同目录 Provider Worker |
+| Linux x64 | `linux-x64` | `madorin-cli`，要求 glibc 2.35 |
+| macOS Apple Silicon | `osx-arm64` | `madorin-cli` |
+
+默认执行 `build/madorin-cli.publish.ps1` 会同时发布这三个平台，产物分别位于：
+
+```text
+releases/Madorin-Cli/win-x64/madorin-cli/bin/
+releases/Madorin-Cli/linux-x64/madorin-cli/bin/
+releases/Madorin-Cli/osx-arm64/madorin-cli/bin/
+```
+
+每个 `bin` 目录都包含该平台的 CLI、对应的 Provider Worker 和 `providers.manifest.json`。需要单平台时再指定 `win`、`linux` 或 `mac`。当前发布矩阵不包含 Intel 版 macOS，也不把 Linux ARM64 列为正式目标。
 
 ## 当前能力
 
@@ -43,7 +63,7 @@ Runtime 负责模型访问、Expert 执行、工具调用、流式事件，以�
 
 - .NET 10 SDK，以仓库 `global.json` 为准（当前为 10.0.301，允许同主版本向前滚动）。
 - 构建需要 SDK；已发布的 Native AOT 二进制运行时不需要安装 SDK。
-- Windows 是当前主要验证平台，发布脚本同时提供 Linux 与 macOS。
+- 发布目标是 `win-x64`、`linux-x64` 和 `osx-arm64`，详见[多平台](#多平台)。
 - 至少准备一个模型服务的 API Key；Ollama 可走本地地址。
 
 ### 构建并检查
@@ -218,13 +238,13 @@ dotnet build .\Madorin.AI.Runtime.slnx -c Debug
 dotnet test .\Madorin.AI.Runtime.slnx -c Debug --no-build
 dotnet run --project .\src\Madorin.AI.Runtime.Cli --no-build -- --help
 
-# CLI 与 Provider Worker 一起发布到同一 bin
-.\build\madorin-cli.publish.cmd -Rid win-x64
+.\build\madorin-cli.publish.ps1
 ```
 
-Linux 与 macOS 在对应系统执行：
+上面的默认命令同时发布 Windows、Linux 和 macOS。只发一个平台时：
 
 ```bash
+./build/madorin-cli.publish.ps1 win
 ./build/madorin-cli.publish.linux.sh --rid linux-x64
 ./build/madorin-cli.publish.macos.sh --rid osx-arm64
 ```
@@ -237,22 +257,15 @@ Madorin 产品与 SDK 的授权说明以 [Netor.Madorin README](../Netor.Madorin
 
 本运行时由藏将科技出品，产品标识为 Madorin & Streamx。
 
-© 2026 Netor.ai. All rights reserved.
+© 2026 madorins.com. All rights reserved.
 
 ## 联系方式
 
-- 官网：https://netor.ai
-- 文档：https://docs.netor.ai
-- 博客：https://blog.netor.ai
-- 应用商店：https://store.netor.ai
-- GitHub：https://github.com/netor-ai/madorin
-- Discord：https://discord.gg/madorin
-- 支持邮箱：[support@netor.ai](mailto:support@netor.ai)
-- 商务邮箱：[business@netor.ai](mailto:business@netor.ai)
-- 社区微信：`madorin-ai`
-- 商务微信：`madorin-business`
+- 网站：https://madorins.com
+- 邮箱：[service@madorins.com](mailto:service@madorins.com)
+- 微信：
 
-企业合作包括私有化部署、定制开发、技术支持与培训。
+![微信](../Netor.Madorin/Res/images/wechat.jpg)
 
 ## 关于作者
 
@@ -269,7 +282,3 @@ Madorin 产品与 SDK 的授权说明以 [Netor.Madorin README](../Netor.Madorin
 科技进步、社会发展是大势所趋。社会变革对有准备的人是机遇，对故步自封者是淘汰。唯有不断学习、积极进取，才能在时代浪潮中立足。
 
 发扬道家文化，弘扬华夏精神。
-
-微信二维码见 Netor.Madorin 仓库的 `Res/images/wechat.jpg`。
-
-Made with love by Netor.ai Team
