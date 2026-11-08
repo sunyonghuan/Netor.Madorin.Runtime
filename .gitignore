@@ -10,6 +10,8 @@
 [Bb]in/**
 !skills/madorin-cli/bin/
 !skills/madorin-cli/bin/**
+skills/madorin-cli/bin/*.exe
+skills/madorin-cli/bin/*.dll
 [Oo]bj/
 [Dd]ebug/
 [Rr]elease/
