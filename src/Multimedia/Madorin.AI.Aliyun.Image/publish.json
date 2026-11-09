@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "skill_name": "skill-aliyun-image",
+  "project": "Madorin.AI.Aliyun.Image.csproj",
+  "executable": "skill-aliyun-image",
+  "platforms": ["win-x64", "win-arm64", "linux-x64", "linux-arm64", "osx-x64", "osx-arm64"]
+}
+
