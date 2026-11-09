@@ -735,15 +735,17 @@ Assert.IsType<HelloOkFrame>(response);
 使用真实 Runtime：
 
 ```bash
-# 启动 Runtime
-madorin serve --instance test
+# 启动 Runtime（工作区必填，握手密钥通过 stdin 提供）
+echo "change-this-secret" | madorin serve --workspace /path/to/project --instance test
 
-# 发起调用（会启动 Worker）
-madorin run --instance test --input "测试"
+# 独立 CLI 直接发起调用（会在该工作区启动 Provider Worker）
+madorin run --workspace /path/to/project --input "测试"
 
 # 检查日志
 cat .madorin/logs/runtime-*.log
 ```
+
+Provider Worker 由 `madorin run` 在该工作区按需启动。独立 `run` 命令直接连接 Provider Worker；它不通过 `madorin serve` 的实例名路由请求。
 
 ## 下一步
 

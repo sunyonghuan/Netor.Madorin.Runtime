@@ -117,7 +117,7 @@
 
 Runtime 实例，管理一个 Workspace 的所有会话和执行。
 
-- 由 `madorin serve --instance <name>` 启动
+- 由 `madorin serve --workspace <path> --instance <name>` 启动；握手密钥通过受控 stdin 输入
 - 通过 Named Pipe 暴露服务：`\\.\pipe\madorin-<instance>-<hash>`（Windows）
 - 维护全局状态：活动 Session、Run、Provider Workers
 
@@ -361,13 +361,13 @@ Host                Runtime                Provider Worker         AI Service
 查看 Runtime 日志：
 
 ```bash
-madorin serve --log-level Debug
+echo "change-this-secret" | madorin serve --workspace . --log-level Debug
 ```
 
 查看事件流：
 
 ```bash
-madorin run --input "测试" --format jsonl
+madorin run --input "测试" --output-format jsonl
 ```
 
 ### 诊断命令

@@ -39,11 +39,12 @@ dotnet add package Madorin.AI.Runtime.Contracts
 
 ### 2. 启动 Runtime Server
 
-在你的应用启动前或同时启动 Runtime Server：
+在你的应用启动前或同时启动 Runtime Server。`serve` 必须指定 `--workspace`，并从受控标准输入读取非空握手密钥；客户端连接时使用同一密钥作为 `AuthenticationToken`：
 
 ```bash
-# 命令行启动
-madorin serve --instance main
+# 命令行启动：workspace 必填，握手密钥通过 stdin 安全输入（以下为 Bash 示例）
+read -s -p "Runtime handshake secret: " MADORIN_HANDSHAKE_SECRET; echo
+printf '%s\n' "$MADORIN_HANDSHAKE_SECRET" | madorin serve --workspace /path/to/project --instance main
 
 # 或在代码中启动（见下文）
 ```
@@ -54,11 +55,14 @@ madorin serve --instance main
 using Madorin.AI.Runtime.Client;
 using Madorin.AI.Runtime.Contracts;
 
-// 创建客户端选项
+var handshakeSecret = Environment.GetEnvironmentVariable("MADORIN_HANDSHAKE_SECRET")
+    ?? throw new InvalidOperationException("MADORIN_HANDSHAKE_SECRET is not configured.");
+
+// 将同一个安全保存的握手密钥提供给客户端；不要使用示例占位值作为生产密钥
 var options = new RuntimeClientOptions
 {
     InstanceName = "main",
-    AuthenticationToken = "your-secret-token"
+    AuthenticationToken = handshakeSecret
 };
 
 // 连接到 Runtime
@@ -109,24 +113,39 @@ await client.DisposeAsync();
 
 ```csharp
 using System.Diagnostics;
+using System.Security.Cryptography;
 
 public class RuntimeServerManager : IAsyncDisposable
 {
     private Process? _serverProcess;
 
-    public async Task StartAsync(string instanceName, string dataDir)
+    public async Task StartAsync(
+        string instanceName,
+        string workspace,
+        string dataDir,
+        string handshakeSecret)
     {
         var startInfo = new ProcessStartInfo
         {
             FileName = "madorin",
-            Arguments = $"serve --instance {instanceName} --data-dir {dataDir}",
             UseShellExecute = false,
+            RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             CreateNoWindow = true
         };
+        startInfo.ArgumentList.Add("serve");
+        startInfo.ArgumentList.Add("--workspace");
+        startInfo.ArgumentList.Add(workspace);
+        startInfo.ArgumentList.Add("--instance");
+        startInfo.ArgumentList.Add(instanceName);
+        startInfo.ArgumentList.Add("--data-dir");
+        startInfo.ArgumentList.Add(dataDir);
 
-        _serverProcess = Process.Start(startInfo);
+        _serverProcess = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Unable to start madorin serve.");
+        await _serverProcess.StandardInput.WriteLineAsync(handshakeSecret);
+        _serverProcess.StandardInput.Close();
         
         // 等待 Runtime 就绪
         await Task.Delay(1000);
@@ -144,7 +163,8 @@ public class RuntimeServerManager : IAsyncDisposable
 
 // 使用
 var manager = new RuntimeServerManager();
-await manager.StartAsync("main", "./data");
+var handshakeSecret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+await manager.StartAsync("main", "./workspace", "./data", handshakeSecret);
 ```
 
 ### 方式二：嵌入式（高级）
@@ -299,7 +319,7 @@ var continuationRunId = await client.StartExistingSessionRunAsync(new ExistingSe
 ```csharp
 var options = new RuntimeClientOptions
 {
-    // 实例名称（与 madorin serve --instance 对应）
+    // 实例名称（与 madorin serve --instance 对应；serve 还需指定 --workspace）
     InstanceName = "main",
     
     // 认证令牌（与 Runtime 启动时的 HandshakeSecret 对应）
