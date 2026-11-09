@@ -2,7 +2,7 @@
 
 ## 批次状态
 
-- 状态：源码初版处理中，未运行构建、测试、发布或真实 API。
+- 状态：源码初版处理中，已完成官方文档静态核对和协议差异修订；未运行构建、测试、发布或真实 API。
 - 记录日期：2026-11-09。
 - 实现范围：仅同步 HTTP 文生图，目标模型默认 `wan2.6-t2i`。
 - 不在本批：Wan 2.5 及以下旧版异步协议、Wan 2.6 异步恢复、图像编辑、图文混排、流式输出、多图附件、Runtime 集成。
@@ -16,13 +16,23 @@
 
 核对日期：2026-11-09。
 
+补充官方核对（2026-11-09）：
+
+- 文生图 V2 文档将 `wan2.6-t2i` 的同步接口定义为 `/api/v1/services/aigc/multimodal-generation/generation`，默认北京公共根地址仍可用，但建议迁移 Workspace 专属域名；地域 API Key 与请求地址不可混用。
+- `prompt` 上限为 2100 字符，`negative_prompt` 上限为 500 字符，服务端会截断；本地实现目前原样传递，不在 try-run 中模拟截断。
+- `size` 不是固定枚举：总像素约束为 [1280*1280, 1440*1440]，宽高比 [1:4, 4:1]；推荐值包括 `1280*1280`、`1104*1472`、`1472*1104`、`960*1696`、`1696*960`，`768*2700` 也符合规则。实现已由推荐值门禁改为本地总像素/宽高比校验。
+- `n` 取值 1-4，官方默认值为 4；实现默认已同步为 4。
+- 官方成功响应说明结果为 PNG，临时 URL 有效期 24 小时；官方示例主机为 `dashscope-result-bj.oss-cn-beijing.aliyuncs.com`，未发现完整固定主机白名单。
+- 官方 API 参考未定义通用 `/models` 目录接口；当前 `list-models` 是技能层目录抽象，尚无官方端点依据，不能视作已完成官方模型发现。
+
+
 官方当前信息与历史调研存在差异：
 
 - 当前文生图推荐模型为 `wan2.6-t2i`，不是历史资料中的 `wanx-v1`。
 - Wan 2.6 同步请求使用 `POST /api/v1/services/aigc/multimodal-generation/generation`。
-- 默认北京地域域名仍可使用 `https://dashscope.aliyuncs.com`；官方同时建议使用带 Workspace ID 的地域业务域名。`--api-url` 保留为调用方地址，不在 CLI 内猜测 Workspace ID。
+- 默认北京地域域名仍可使用 `https://dashscope.aliyuncs.com`，官方建议使用 Workspace 专属域名；北京、新加坡、美东 API Key 与请求地址必须地域匹配。CLI 允许调用方通过 `--api-url` 提供对应地址，不自动生成 Workspace ID。
 - 请求使用 `model`、`input.messages`、`parameters`；提示词位于单轮 user 消息的单个 text content。
-- 同步成功响应的图片位于 `output.choices[].message.content[]` 的 `type=image` 项，值为临时 PNG URL；URL 有效期约 24 小时，CLI 必须下载后验证并只列出本地产物。
+- 同步成功响应的图片位于 `output.choices[].message.content[]` 的 `type=image` 项，值为临时 PNG URL；URL 有效期 24 小时，CLI 下载后验证并只列出本地产物。
 - Wan 2.6 的 HTTP 异步协议使用另一端点和 `X-DashScope-Async: enable`，本批不声明公开异步能力。
 
 ## 本批请求映射
@@ -32,14 +42,15 @@
 | `model` | 根 `model` | argv → 请求文件 → 默认 `wan2.6-t2i`；ID 非空且无控制字符即原样提交，不设静态白名单 |
 | `prompt` | `input.messages[0].content[0].text` | 单轮 user 消息；保持原文，不翻译、不截断 |
 | `negative_prompt` | `parameters.negative_prompt` | 原生支持；缺省不发送 |
-| `size` | `parameters.size` | `宽*高` 字符串；当前只做结构校验和原样映射，模型限制交由服务确认 |
-| `num_images` | `parameters.n` | 范围 1-4；本批支持直接映射 |
-| `prompt_extend` | `parameters.prompt_extend` | 布尔值，原生映射 |
-| `watermark` | `parameters.watermark` | 布尔值，原生映射 |
+| `size` | `parameters.size` | `宽*高` 字符串；默认 `1280*1280`；本地按官方总像素 [1280², 1440²] 和宽高比 [1:4, 4:1] 校验 |
+| `num_images` | `parameters.n` | 范围 1-4；官方默认 4，实现默认 4 |
+| `prompt_extend` | `parameters.prompt_extend` | 布尔值，官方默认 true，文生图参数 |
+| `watermark` | `parameters.watermark` | 布尔值，官方默认 false |
 | `seed` | `parameters.seed` | 非负整数，原生映射 |
+
 | API Key | `Authorization: Bearer <key>` | 只从 argv 读取，不写请求文件、不进入日志和预览值 |
 
-当前不将公共 `aspect_ratio` 猜测转换为 `size`；只有显式 `size` 才进入 Provider 请求。宽高与 size 的可靠等价转换待后续协议映射统一确认。
+当前不将公共 `aspect_ratio` 猜测转换为 `size`；仅接受宽高字符串并按官方像素/比例规则校验，不以推荐尺寸列表限制输入。
 
 ## 响应与产物
 
@@ -51,7 +62,7 @@
 
 ## 模型目录
 
-`list-models` 访问调用方提供的 DashScope 模型目录地址；本批不写死 Wan 模型清单，不因目录不可用而静态回退。服务若只返回模型 ID，任务能力保持未知；本地 metadata 只声明已实现的 `text-to-image`。
+`list-models` 当前访问调用方提供地址下的 `/models`，但官方 Wan 文生图 API 参考未定义该目录接口；本批不写死模型清单，故该命令属于技能层抽象，尚未完成官方协议核实。服务若只返回模型 ID，任务能力保持未知；本地 metadata 只声明已实现的 `text-to-image`。
 
 ## 实际源码路径
 
@@ -69,10 +80,11 @@
 
 ## 待确认协议点
 
-- `list-models` 的 DashScope 官方模型目录入口尚未核实，当前实现沿用技能接口需要的目录抽象；统一测试前必须用官方可用入口或明确记录不适用。
-- 结果 URL 的官方允许主机尚未核实；当前源码已实现 HTTPS、禁止用户信息、最多 3 次重定向、50 MiB 流式大小上限和 PNG/JPEG Content-Type 检查，但仍需统一运行验证。
-- `provider_parameters.aliyun` 已按公共契约合并到有效 `parameters`；与同名通用参数重复或包含其他 Provider 命名空间时返回 `invalid_parameter`，不再静默丢弃。
-- `wan2.6-t2i` 的 size 可选范围按官方文档记录为模型/地域相关，当前初版只保留常见推荐尺寸，未宣称完整模型矩阵。
+- `list-models` 的 DashScope 官方模型目录入口未找到；当前实现的 `/models` 是未核实的技能层抽象，不能作为“官方模型发现已完成”。
+- 官方示例确认临时结果 URL 为 PNG、有效期 24 小时；当前源码允许 PNG/JPEG，且只校验 HTTPS，没有官方完整主机白名单，属于实现边界待收敛项。
+- `provider_parameters.aliyun` 已按公共契约合并到有效 `parameters`；与同名通用参数重复或包含其他 Provider 命名空间时返回 `invalid_parameter`。
+- `prompt`/`negative_prompt` 的官方长度限制目前未在本地校验，依赖服务端截断；应在统一测试前决定是否纳入公共长度校验。
+- HTTP 2xx 的根对象或 `output` 对象若带有业务错误码和错误标识，也归一为 `provider_error`；错误体内容不回显。
 - HTTP 2xx 的根对象或 `output` 对象若带有业务错误码和错误标识，也归一为 `provider_error`；错误体内容不回显。
 
 ## 未测试清单

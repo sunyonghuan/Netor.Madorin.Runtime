@@ -10,7 +10,16 @@ internal static class AliyunImageMetadata
     public const string SkillId = "skill-aliyun-image";
     public const string DefaultModel = "wan2.6-t2i";
     public const string DefaultApiUrl = "https://dashscope.aliyuncs.com/api/v1";
-    public static readonly string[] SupportedSizes = ["1280*1280", "1696*960", "960*1696", "1472*1104", "1104*1472", "768*2700"];
+    public static readonly string[] RecommendedSizes = ["1280*1280", "1104*1472", "1472*1104", "960*1696", "1696*960", "768*2700"];
+
+    public static bool IsSupportedSize(string value)
+    {
+        var parts = value.Split('*');
+        if (parts.Length != 2 || !int.TryParse(parts[0], out var width) || !int.TryParse(parts[1], out var height) || width <= 0 || height <= 0) return false;
+        var pixels = (long)width * height;
+        var ratio = (double)Math.Max(width, height) / Math.Min(width, height);
+        return pixels is >= 1_638_400 and <= 2_073_600 && ratio <= 4;
+    }
     private static string Version => typeof(AliyunImageMetadata).Assembly.GetName().Version?.ToString(3) ?? "0.1.0";
 
     public static JsonObject BuildVersion(string? id) => Obj(("schema_version", S(ContractVersion)), ("response_id", S(id)), ("skill_id", S(SkillId)), ("version", S(Version)), ("provider", S("aliyun")), ("capabilities", Strings("image")), ("runtime", S("native-aot")));
@@ -30,8 +39,8 @@ internal static class AliyunImageMetadata
     }
 
     private static JsonArray Parameters() => new(
-        (JsonNode)Parameter("size", "--size", "string", "输出尺寸，使用宽*高格式。", "1280*1280", SupportedSizes),
-        (JsonNode)Parameter("num_images", "--num-images", "integer", "生成数量，范围 1 至 4。", 1, null, 1, 4),
+        (JsonNode)Parameter("size", "--size", "string", "输出尺寸，宽*高；总像素和宽高比按 Wan 2.6 官方规则校验。", "1280*1280"),
+        (JsonNode)Parameter("num_images", "--num-images", "integer", "生成数量，范围 1 至 4；官方默认 4。", 4, null, 1, 4),
         (JsonNode)Parameter("negative_prompt", "--negative-prompt", "string", "反向提示词。", null),
         (JsonNode)Parameter("prompt_extend", "--provider-aliyun-prompt-extend", "boolean", "是否开启提示词智能改写。", true),
         (JsonNode)Parameter("watermark", "--provider-aliyun-watermark", "boolean", "是否添加水印。", false),

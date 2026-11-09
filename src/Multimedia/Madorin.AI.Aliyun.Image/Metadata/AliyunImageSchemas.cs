@@ -7,7 +7,7 @@ internal static class AliyunImageSchemas
 {
     public static JsonObject Effective()
     {
-        var parameterProperties = Obj(("size", Enum(AliyunImageMetadata.SupportedSizes)),
+        var parameterProperties = Obj(("size", Obj(("type", S("string")), ("pattern", S("^[0-9]+\\*[0-9]+$")))),
             ("num_images", Obj(("type", S("integer")), ("minimum", N(1)), ("maximum", N(4)))),
             ("negative_prompt", Obj(("type", S("string")))), ("prompt_extend", Obj(("type", S("boolean")))),
             ("watermark", Obj(("type", S("boolean")))),

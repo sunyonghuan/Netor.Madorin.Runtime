@@ -33,15 +33,15 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "size": { "type": "string", "enum": ["1280*1280", "1696*960", "960*1696", "1472*1104", "1104*1472", "768*2700"], "default": "1280*1280" },
-        "num_images": { "type": "integer", "minimum": 1, "maximum": 4, "default": 1 },
+        "size": { "type": "string", "pattern": "^[0-9]+\\*[0-9]+$", "default": "1280*1280", "description": "Wan 2.6 文生图尺寸；总像素 [1280^2,1440^2]，宽高比 [1:4,4:1]。" },
+        "num_images": { "type": "integer", "minimum": 1, "maximum": 4, "default": 4 },
         "negative_prompt": { "type": "string" },
         "prompt_extend": { "type": "boolean", "default": true },
         "watermark": { "type": "boolean", "default": false },
         "seed": { "type": "integer", "minimum": 0, "maximum": 2147483647 }
       }
     },
-    "provider_parameters": { "type": "object", "additionalProperties": false, "properties": { "aliyun": { "type": "object", "additionalProperties": false, "properties": { "size": { "type": "string", "enum": ["1280*1280", "1696*960", "960*1696", "1472*1104", "1104*1472", "768*2700"] }, "num_images": { "type": "integer", "minimum": 1, "maximum": 4 }, "negative_prompt": { "type": "string" }, "prompt_extend": { "type": "boolean" }, "watermark": { "type": "boolean" }, "seed": { "type": "integer", "minimum": 0, "maximum": 2147483647 } } } } },
+    "provider_parameters": { "type": "object", "additionalProperties": false, "properties": { "aliyun": { "type": "object", "additionalProperties": false, "properties": { "size": { "type": "string", "pattern": "^[0-9]+\\*[0-9]+$" }, "num_images": { "type": "integer", "minimum": 1, "maximum": 4 }, "negative_prompt": { "type": "string" }, "prompt_extend": { "type": "boolean" }, "watermark": { "type": "boolean" }, "seed": { "type": "integer", "minimum": 0, "maximum": 2147483647 } } } } },
     "execution": {
       "type": "object",
       "additionalProperties": false,

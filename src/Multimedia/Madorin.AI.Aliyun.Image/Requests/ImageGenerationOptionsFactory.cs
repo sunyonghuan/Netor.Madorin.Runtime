@@ -33,7 +33,7 @@ internal sealed class ImageGenerationOptionsFactory(WorkspacePaths paths)
         if (ImageParameterValues.Boolean(execution, "no_wait")) throw new SkillException("invalid_parameter", "当前同步 Wan 2.6 文生图不支持 no_wait=true。");
         if (ImageParameterValues.Text(execution, "output_format", "json") != "json") throw new SkillException("invalid_parameter", "标准输出格式仅支持 json。");
         var task = ImageParameterValues.Text(input, "task", "text-to-image")!; var model = ImageParameterValues.Text(input, "model", AliyunImageMetadata.DefaultModel)!; invocation.Model = model;
-        var prompt = ImageParameterValues.Text(input, "prompt"); var size = ImageParameterValues.Text(parameters, "size", "1280*1280")!; var count = ImageParameterValues.Integer(parameters, "num_images", 1);
+        var prompt = ImageParameterValues.Text(input, "prompt"); var size = ImageParameterValues.Text(parameters, "size", "1280*1280")!; var count = ImageParameterValues.Integer(parameters, "num_images", 4);
         var negativePrompt = ImageParameterValues.Text(parameters, "negative_prompt"); var promptExtend = ImageParameterValues.Boolean(parameters, "prompt_extend", true); var watermark = ImageParameterValues.Boolean(parameters, "watermark", false);
         var seed = parameters["seed"] is null ? (int?)null : ImageParameterValues.Integer(parameters, "seed", 0); Validate(task, model, prompt, size, count, seed);
         var apiKey = direct.GetValueOrDefault("api-key"); var url = direct.GetValueOrDefault("api-url") ?? AliyunImageMetadata.DefaultApiUrl;
@@ -65,7 +65,7 @@ internal sealed class ImageGenerationOptionsFactory(WorkspacePaths paths)
 
     private static void Validate(string task, string model, string? prompt, string size, int count, int? seed)
     {
-        if (task != "text-to-image" || string.IsNullOrWhiteSpace(prompt) || !ModelIds.IsValid(model) || !AliyunImageMetadata.SupportedSizes.Contains(size, StringComparer.Ordinal) || count is < 1 or > 4 || seed is < 0) throw new SkillException("invalid_parameter", "任务、模型、提示词、size、生成数量或 seed 不合法。");
+        if (task != "text-to-image" || string.IsNullOrWhiteSpace(prompt) || !ModelIds.IsValid(model) || !AliyunImageMetadata.IsSupportedSize(size) || count is < 1 or > 4 || seed is < 0) throw new SkillException("invalid_parameter", "任务、模型、提示词、size、生成数量或 seed 不合法。");
     }
 }
 
