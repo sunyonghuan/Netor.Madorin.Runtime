@@ -49,6 +49,13 @@ public sealed record RuntimeProviderRequest(
     [JsonIgnore]
     public bool Stream => RequestControl?.Stream ?? true;
 
+    /// <summary>
+    /// 为 true 时，Provider 用一次非流式 HTTP 请求取回完整响应，再作为单条更新交给上层事件管线。
+    /// 与 <see cref="Stream"/>（Run 级提示）相互独立，只由明确需要完整响应的内部调用设置，
+    /// 目前用于上下文摘要。该值随请求序列化传给 Provider Worker 进程。
+    /// </summary>
+    public bool UseNonStreamingResponse { get; init; }
+
     public RuntimeProviderRequest CreateAttempt(int attemptNumber)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(attemptNumber);

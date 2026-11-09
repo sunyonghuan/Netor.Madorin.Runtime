@@ -9,6 +9,14 @@ namespace Madorin.AI.Runtime.Providers.Abstractions;
 /// <summary>Creates stable, redacted Runtime errors from Provider failures.</summary>
 public static class ProviderErrorFactory
 {
+    /// <summary>ProviderDetails 中异常类型链的最大层数，避免异常嵌套过深时详情无限增长。</summary>
+    private const int MaximumExceptionTypeDepth = 6;
+
+    /// <summary>
+    /// 生成脱敏后的 Provider 错误。
+    /// ProviderDetails 只写入状态码、请求标识、异常类型链和可选的失败上下文，
+    /// 不写入异常消息，因为 SDK 的异常消息可能包含响应正文或提示词。
+    /// </summary>
     public static RuntimeError Create(
         string providerName,
         Exception exception,
@@ -16,7 +24,8 @@ public static class ProviderErrorFactory
         string? retryAfter = null,
         string? requestId = null,
         bool isProtocolError = false,
-        string? providerCode = null)
+        string? providerCode = null,
+        ProviderFailureContext? failureContext = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(providerName);
         ArgumentNullException.ThrowIfNull(exception);
@@ -54,7 +63,7 @@ public static class ProviderErrorFactory
             category,
             $"{providerName} request failed with code '{GetProviderCode(statusCode, providerCode, exception)}'.",
             isRetryable,
-            CreateDetails(statusCode, retryAfter, requestId, providerCode),
+            CreateDetails(statusCode, retryAfter, requestId, providerCode, exception, failureContext),
             Guid.NewGuid().ToString("N"));
     }
 
@@ -107,20 +116,18 @@ public static class ProviderErrorFactory
         ?? statusCode?.ToString(CultureInfo.InvariantCulture)
         ?? exception.GetType().Name;
 
+    /// <summary>
+    /// 构造 ProviderDetails。
+    /// 异常类型链总会写入，使「没有 HTTP 状态码」的协议类失败也能区分具体原因。
+    /// </summary>
     private static JsonElement? CreateDetails(
         int? statusCode,
         string? retryAfter,
         string? requestId,
-        string? providerCode)
+        string? providerCode,
+        Exception exception,
+        ProviderFailureContext? failureContext)
     {
-        if (statusCode is null
-            && retryAfter is null
-            && requestId is null
-            && providerCode is null)
-        {
-            return null;
-        }
-
         var buffer = new ArrayBufferWriter<byte>();
         using (var writer = new Utf8JsonWriter(buffer))
         {
@@ -143,6 +150,27 @@ public static class ProviderErrorFactory
             if (providerCode is not null)
             {
                 writer.WriteString("providerCode", providerCode);
+            }
+
+            // 只记录类型名，不记录消息：类型名足以区分 JsonException、IOException、
+            // HttpRequestException 等原因，且不会带出响应正文或凭据。
+            writer.WriteStartArray("exceptionTypes");
+            var depth = 0;
+            for (var current = exception;
+                 current is not null && depth < MaximumExceptionTypeDepth;
+                 current = current.InnerException, depth++)
+            {
+                writer.WriteStringValue(current.GetType().FullName ?? current.GetType().Name);
+            }
+
+            writer.WriteEndArray();
+
+            if (failureContext is not null)
+            {
+                writer.WriteString("stage", failureContext.Stage);
+                writer.WriteString("responseMode", failureContext.NonStreaming ? "non_streaming" : "streaming");
+                writer.WriteNumber("receivedUpdates", failureContext.ReceivedUpdates);
+                writer.WriteNumber("elapsedMs", failureContext.ElapsedMilliseconds);
             }
 
             writer.WriteEndObject();

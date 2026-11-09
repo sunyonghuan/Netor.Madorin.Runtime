@@ -1,9 +1,11 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Contracts.Serialization;
+using Madorin.AI.Runtime.Modes.Expert;
 using Madorin.AI.Runtime.Persistence.Files;
 using Madorin.AI.Runtime.Persistence.Sqlite;
 using Microsoft.Data.Sqlite;
@@ -12,6 +14,12 @@ namespace Madorin.AI.Runtime.Server;
 
 internal sealed partial class SessionCompactionService
 {
+    /// <summary>
+    /// 一次压缩操作的总时限。必须大于摘要器的总时限，
+    /// 留出读取历史、估算 token 和写缓存的时间。
+    /// </summary>
+    private static readonly TimeSpan OperationTimeout = StrictConversationSummarizer.TotalTimeout + TimeSpan.FromMinutes(2);
+
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _sessionGates = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, OperationEntry> _operations = new(StringComparer.Ordinal);
     private readonly CancellationTokenSource _shutdown = new();
@@ -69,8 +77,9 @@ internal sealed partial class SessionCompactionService
     private async Task<SessionCompactionResult?> ExecuteOwnedOperationAsync(
         string sessionId, SessionCompactionOptions options, string fingerprint)
     {
+        var startedAt = Stopwatch.GetTimestamp();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token);
-        deadline.CancelAfter(TimeSpan.FromSeconds(120));
+        deadline.CancelAfter(OperationTimeout);
         var ct = deadline.Token;
         using var lease = EnterMutation(sessionId);
         var previous = await ReadOperationAsync(sessionId, options.OperationId!, ct).ConfigureAwait(false);
@@ -116,6 +125,17 @@ internal sealed partial class SessionCompactionService
                 UpdatedAt = DateTimeOffset.UtcNow
             };
             await WriteOperationAsync(state, CancellationToken.None).ConfigureAwait(false);
+            if (result is null)
+            {
+                await LogCompactionFailedAsync(sessionId, options, "session_not_found", null, startedAt)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                await LogCompactionCompletedAsync(sessionId, result, startedAt, recovered: false)
+                    .ConfigureAwait(false);
+            }
+
             return result;
         }
         catch (Exception ex)
@@ -124,7 +144,10 @@ internal sealed partial class SessionCompactionService
             var recovered = await RecoverOperationAsync(state, CancellationToken.None).ConfigureAwait(false);
             if (recovered.Result is { } committed)
             {
-                return FromDto(committed);
+                var committedResult = FromDto(committed);
+                await LogCompactionCompletedAsync(sessionId, committedResult, startedAt, recovered: true)
+                    .ConfigureAwait(false);
+                return committedResult;
             }
             state = state with
             {
@@ -133,8 +156,110 @@ internal sealed partial class SessionCompactionService
                 UpdatedAt = DateTimeOffset.UtcNow
             };
             await WriteOperationAsync(state, CancellationToken.None).ConfigureAwait(false);
+            await LogCompactionFailedAsync(sessionId, options, state.ReasonCode, ex, startedAt)
+                .ConfigureAwait(false);
             throw;
         }
+    }
+
+    /// <summary>
+    /// 记录压缩成功事件（Information）。
+    /// recovered 为 true 表示执行过程中抛出过异常，但缓存已原子提交，按成功处理。
+    /// </summary>
+    private ValueTask LogCompactionCompletedAsync(
+        string sessionId,
+        SessionCompactionResult result,
+        long startedAt,
+        bool recovered)
+    {
+        if (_diagnosticLog is null)
+        {
+            return ValueTask.CompletedTask;
+        }
+
+        var elapsedMs = (long)Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
+        return _diagnosticLog.TryWriteAsync(
+            RuntimeDiagnosticLogLevel.Information,
+            "CompactionCompleted",
+            sessionId: sessionId,
+            writeDetails: writer =>
+            {
+                writer.WriteString("operationId", result.OperationId);
+                writer.WriteString("strategy", ToWireValue(result.Strategy));
+                writer.WriteString("outcome", result.Outcome);
+                writer.WriteString("providerId", result.ProviderId);
+                writer.WriteString("modelId", result.ModelId);
+                writer.WriteNumber("sourceMessageCount", result.SourceMessageCount);
+                writer.WriteNumber("projectedMessageCount", result.ProjectedMessageCount);
+                writer.WriteNumber("beforeEstimatedTokens", result.BeforeEstimatedTokens);
+                if (result.AfterEstimatedTokens is { } afterTokens)
+                {
+                    writer.WriteNumber("afterEstimatedTokens", afterTokens);
+                }
+
+                if (result.CoveredThroughSequence is { } coveredThrough)
+                {
+                    writer.WriteNumber("coveredThroughSequence", coveredThrough);
+                }
+
+                writer.WriteBoolean("summaryGenerated", result.SummaryGenerated);
+                writer.WriteBoolean("cacheHit", result.CacheHit);
+                writer.WriteBoolean("recovered", recovered);
+                writer.WriteNumber("elapsedMs", elapsedMs);
+            });
+    }
+
+    /// <summary>
+    /// 记录压缩失败事件（Error）。
+    /// 摘要 Provider 失败时，error 使用 Provider 原始错误（含 ProviderDetails），
+    /// 并附带 summaryRequest 诊断，避免只剩一句异常类型名。
+    /// </summary>
+    private ValueTask LogCompactionFailedAsync(
+        string sessionId,
+        SessionCompactionOptions options,
+        string? reasonCode,
+        Exception? exception,
+        long startedAt)
+    {
+        if (_diagnosticLog is null)
+        {
+            return ValueTask.CompletedTask;
+        }
+
+        var elapsedMs = (long)Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
+        var summaryFailure = SummaryFailureDiagnostics.Find(exception);
+        return _diagnosticLog.TryWriteAsync(
+            exception is null ? RuntimeDiagnosticLogLevel.Warning : RuntimeDiagnosticLogLevel.Error,
+            "CompactionFailed",
+            sessionId: sessionId,
+            exception: exception,
+            error: summaryFailure?.ProviderError,
+            writeDetails: writer =>
+            {
+                writer.WriteString("operationId", options.OperationId);
+                writer.WriteString("strategy", ToWireValue(options.Strategy));
+                writer.WriteBoolean("force", options.Force);
+                if (options.ProviderId is not null)
+                {
+                    writer.WriteString("requestedProviderId", options.ProviderId);
+                }
+
+                if (options.ModelId is not null)
+                {
+                    writer.WriteString("requestedModelId", options.ModelId);
+                }
+
+                if (reasonCode is not null)
+                {
+                    writer.WriteString("reasonCode", reasonCode);
+                }
+
+                writer.WriteNumber("elapsedMs", elapsedMs);
+                if (summaryFailure is not null)
+                {
+                    SummaryFailureDiagnostics.WriteSummaryRequest(writer, summaryFailure.Request);
+                }
+            });
     }
 
     private string OperationPath(string sessionId, string operationId) => Path.Combine(

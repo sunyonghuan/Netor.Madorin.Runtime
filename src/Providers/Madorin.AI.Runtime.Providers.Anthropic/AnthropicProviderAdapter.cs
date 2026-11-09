@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -216,6 +217,9 @@ public sealed class AnthropicProviderAdapter :
             yield return adjustment;
         }
 
+        // 记录开始时间和已收到的更新条数，失败时写入 ProviderDetails，用来区分断流、解析失败和请求失败。
+        var startedAt = Stopwatch.GetTimestamp();
+        var receivedUpdates = 0;
         IAsyncEnumerator<MafProviderResponseUpdate>? enumerator = null;
         try
         {
@@ -232,7 +236,9 @@ public sealed class AnthropicProviderAdapter :
         }
         catch (Exception ex)
         {
-            failure = CreateProviderError(ex);
+            failure = CreateProviderError(
+                ex,
+                ProviderFailureContext.Since(ProviderFailureStages.RequestStart, receivedUpdates, startedAt, request.UseNonStreamingResponse));
         }
 
         if (failure is not null || enumerator is null)
@@ -265,10 +271,13 @@ public sealed class AnthropicProviderAdapter :
             }
             catch (Exception ex)
             {
-                failure = CreateProviderError(ex);
+                failure = CreateProviderError(
+                    ex,
+                    ProviderFailureContext.Since(ProviderFailureStages.StreamRead, receivedUpdates, startedAt, request.UseNonStreamingResponse));
                 break;
             }
 
+            receivedUpdates++;
             if (update.FinishReason is { } currentFinishReason)
             {
                 finishReason = currentFinishReason.ToString();
@@ -291,7 +300,12 @@ public sealed class AnthropicProviderAdapter :
             failure = ProviderErrorFactory.Create(
                 "Anthropic",
                 new InvalidDataException("Provider stream ended before a terminal update."),
-                isProtocolError: true);
+                isProtocolError: true,
+                failureContext: ProviderFailureContext.Since(
+                    ProviderFailureStages.StreamEndedWithoutFinishReason,
+                    receivedUpdates,
+                    startedAt,
+                    request.UseNonStreamingResponse));
         }
 
         if (failure is not null)
@@ -670,7 +684,10 @@ public sealed class AnthropicProviderAdapter :
         return (int)Math.Clamp(value, 0, int.MaxValue);
     }
 
-    private static RuntimeError CreateProviderError(Exception exception)
+    /// <summary>把 SDK 异常转换为脱敏的 Runtime 错误，并附带可选的失败阶段上下文。</summary>
+    private static RuntimeError CreateProviderError(
+        Exception exception,
+        ProviderFailureContext? failureContext = null)
     {
         if (exception is RuntimeProviderException runtimeException)
         {
@@ -697,7 +714,8 @@ public sealed class AnthropicProviderAdapter :
                 : null,
             isProtocolError: exception is JsonException
                 || exception is AnthropicMinimalException { StatusCode: 0 },
-            providerCode: providerCode);
+            providerCode: providerCode,
+            failureContext: failureContext);
     }
 
     public void Dispose()

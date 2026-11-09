@@ -124,6 +124,14 @@ internal sealed class RuntimeDiagnosticLog : IAsyncDisposable
                 writer.WriteBoolean("isRetryable", error.IsRetryable);
             }
 
+            // ProviderDetails 是 Provider 层生成的脱敏 JSON（状态码、请求标识、异常类型链、失败阶段等），
+            // 原样写出，便于在没有 HTTP 状态码的协议类失败中定位原因。
+            if (error?.ProviderDetails is { ValueKind: not JsonValueKind.Undefined } providerDetails)
+            {
+                writer.WritePropertyName("providerDetails");
+                providerDetails.WriteTo(writer);
+            }
+
             WriteOptionalString(writer, "exceptionType", exception?.GetType().FullName);
             WriteOptionalString(writer, "exceptionMessage", exception?.Message);
             WriteOptionalString(writer, "stackTrace", exception?.ToString());

@@ -62,7 +62,11 @@ public sealed class LocalRuntime : IAsyncDisposable
         _databaseConnectionString = databaseConnectionString;
         _conversationStore = new ConversationStore(options.DataDirectory);
         _providerResolver = options.ProviderResolver;
-        _compactionService = new SessionCompactionService(_dataDirectory, databaseConnectionString, selection => ResolveProvider(selection));
+        _compactionService = new SessionCompactionService(
+            _dataDirectory,
+            databaseConnectionString,
+            selection => ResolveProvider(selection),
+            diagnosticLog);
         _toolConsentHandler = options.ToolConsentHandler;
         _maintenanceAudit = new SessionMaintenanceAuditLog(options.DataDirectory);
         _diagnosticLog = diagnosticLog;
@@ -660,7 +664,36 @@ public sealed class LocalRuntime : IAsyncDisposable
                 detail,
                 ct)
             .ConfigureAwait(false);
-        var result = await CompactSessionCoreAsync(sessionId, options, ct).ConfigureAwait(false);
+        SessionCompactionResult? result;
+        try
+        {
+            result = await CompactSessionCoreAsync(sessionId, options, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // 失败也要闭合审计记录，否则审计里只剩 prepared，无法判断操作是失败还是仍在执行。
+            // 详细原因写在 runtime.jsonl 的 CompactionFailed 事件里，这里只记异常类型。
+            try
+            {
+                await AppendMaintenanceAuditAsync(
+                        auditId,
+                        sessionId,
+                        "compact",
+                        "failed",
+                        ex is OperationCanceledException ? "timeout" : "error",
+                        $"{detail};errorType={ex.GetType().Name}",
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception auditException) when (auditException is IOException
+                or UnauthorizedAccessException)
+            {
+                // 审计写入失败不能覆盖压缩本身的异常。
+            }
+
+            throw;
+        }
+
         var outcome = result switch
         {
             null => "not-found",
@@ -1018,12 +1051,17 @@ public sealed class LocalRuntime : IAsyncDisposable
             }
             catch (Exception exception)
             {
+                // 摘要 Provider 失败时附带原始 Provider 错误和摘要请求诊断。
+                var summaryFailure = SummaryFailureDiagnostics.Find(exception);
                 await _diagnosticLog.TryWriteAsync(
                         RuntimeDiagnosticLogLevel.Error,
                         "RunFailed",
                         prepared.RunId,
                         prepared.SessionId,
-                        exception: exception)
+                        exception: exception,
+                        writeDetails: summaryFailure is null
+                            ? null
+                            : writer => SummaryFailureDiagnostics.WriteProviderFailure(writer, summaryFailure))
                     .ConfigureAwait(false);
                 terminalEnvelope = await CompleteLocalTerminalRunAsync(
                     prepared,

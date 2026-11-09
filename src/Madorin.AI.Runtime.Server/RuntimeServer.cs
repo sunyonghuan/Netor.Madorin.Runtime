@@ -111,7 +111,8 @@ public sealed class RuntimeServer : IAsyncDisposable
         _compactionService = new SessionCompactionService(
             _dataDirectory,
             _databaseConnectionString,
-            selection => ResolveProviderAdapter(selection, selection.DefaultSelection.ProviderId));
+            selection => ResolveProviderAdapter(selection, selection.DefaultSelection.ProviderId),
+            diagnosticLog);
         var userHome = options.MemoryUserHome
             ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         ArgumentException.ThrowIfNullOrWhiteSpace(userHome);
@@ -2888,13 +2889,19 @@ public sealed class RuntimeServer : IAsyncDisposable
             errorJson,
             MeetingStatus: "Failed",
             InterruptWorkSession: false);
+        // Expert 自动压缩的摘要请求失败时，外层错误码是 RunExecutionFailed，
+        // 额外写出摘要 Provider 的原始错误和请求诊断，避免细节丢失。
+        var summaryFailure = SummaryFailureDiagnostics.Find(exception);
         await _diagnosticLog.TryWriteAsync(
                 RuntimeDiagnosticLogLevel.Error,
                 "RunFailed",
                 runId,
                 sessionId,
                 exception: exception,
-                error: error)
+                error: error,
+                writeDetails: summaryFailure is null
+                    ? null
+                    : writer => SummaryFailureDiagnostics.WriteProviderFailure(writer, summaryFailure))
             .ConfigureAwait(false);
         return await CompleteTerminalRunAsync(pending).ConfigureAwait(false);
     }
