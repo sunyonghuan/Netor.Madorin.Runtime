@@ -42,7 +42,7 @@ public sealed class ArtifactStore(WorkspacePaths paths) : IDisposable
 
                 _writtenFiles.Add(path);
                 return Obj(("index", N(index)), ("path", S(name)), ("media_type", S("image/" + format)),
-                    ("format", S(extension)), ("size_bytes", N(bytes.LongLength)), ("width", N(dimensions.Width)), ("height", N(dimensions.Height)));
+                    ("format", S(format)), ("size_bytes", N(bytes.LongLength)), ("width", N(dimensions.Width)), ("height", N(dimensions.Height)));
             }
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)

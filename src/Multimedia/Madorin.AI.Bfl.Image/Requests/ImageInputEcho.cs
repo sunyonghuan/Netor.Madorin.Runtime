@@ -1,0 +1,8 @@
+using System.Text.Json.Nodes;
+using static Madorin.AI.Multimedia.Core.Protocol.JsonProtocol;
+using static Madorin.AI.Multimedia.Core.CommandLine.CommandLineParser;
+namespace Madorin.AI.Bfl.Image.Requests;
+internal static class ImageInputEcho
+{
+ public static JsonObject Build(Dictionary<string,string?> direct,ImageRequestFile? file){var input=file?.Content.DeepClone().AsObject()??new JsonObject();var pars=input["parameters"]?.AsObject()??new JsonObject();var exec=input["execution"]?.AsObject()??new JsonObject();var providers=input["provider_parameters"]?.AsObject()??new JsonObject();foreach(var pair in direct){var n=pair.Key.Replace('-','_');switch(n){case "api_key":break;case "request_id":input[n]=S(pair.Value);break;case "request_file" or "api_url":break;case "try_run" or "verbose" or "no_wait":exec[n]=B(pair.Value=="true");break;case "timeout":exec[n]=N(ParsePositiveInt(pair.Value,300,n));break;case "width" or "height" or "seed" or "safety_tolerance":pars[n]=N(long.Parse(pair.Value!,System.Globalization.CultureInfo.InvariantCulture));break;case "image_format":pars["output_format"]=S(pair.Value);break;case "provider_bfl_disable_pup":providers["bfl"]??=new JsonObject();providers["bfl"]!["disable_pup"]=B(pair.Value=="true");break;case "output_format" or "output_dir":exec[n]=S(pair.Value);break;case "prompt" or "task" or "model":input[n]=S(pair.Value);break;default:pars[n]=S(pair.Value);break;}}if(input["parameters"] is null)input["parameters"]=pars;if(input["execution"] is null)input["execution"]=exec;if(providers.Count>0&&input["provider_parameters"] is null)input["provider_parameters"]=providers;return input;}
+}
