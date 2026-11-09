@@ -52,6 +52,12 @@ internal static class ControlCommands
             dataDirectoryOption,
             output,
             error));
+        command.Subcommands.Add(CreateShutdown(
+            jsonOption,
+            workspaceOption,
+            dataDirectoryOption,
+            output,
+            error));
         return command;
     }
 
@@ -356,6 +362,33 @@ internal static class ControlCommands
                     expiresAt);
                 return ExitCodes.Success;
             }).ConfigureAwait(false);
+    }
+
+    private static Command CreateShutdown(
+        Option<bool> jsonOption,
+        Option<string?> workspaceOption,
+        Option<string?> dataDirectoryOption,
+        TextWriter output,
+        TextWriter error)
+    {
+        var instanceOption = CreateInstanceOption();
+        var command = new Command("shutdown", "Ask the Runtime to stop and close its providers.")
+            .AddOptions(instanceOption);
+        command.SetAction(parseResult => ExecuteConnectedAsync(
+            parseResult,
+            jsonOption,
+            workspaceOption,
+            dataDirectoryOption,
+            instanceOption,
+            output,
+            error,
+            async (client, status, cancellationToken) =>
+            {
+                await client.ShutdownAsync(cancellationToken).ConfigureAwait(false);
+                ControlCommandOutput.WriteShutdown(parseResult, jsonOption, output);
+                return ExitCodes.Success;
+            }));
+        return command;
     }
 
     private static async Task<int> ExecuteConnectedAsync(

@@ -108,12 +108,28 @@ internal static class ReplHelpWriter
                 "[] 可以不写，<> 必须写。",
                 "[] is optional. <> is required."),
             CliTextStyle.Muted);
-        terminal.WriteLine(
-            Text(
-                language,
-                "当前帮助语言：中文。切换英文：/help en    切回中文：/help zh",
-                "Current help language: English. Switch to Chinese: /help zh    Switch to English: /help en"),
-            CliTextStyle.Muted);
+        terminal.WriteLine();
+        terminal.WriteLine(Text(language, "怎么查命令", "How to look up a command"), CliTextStyle.Title);
+        WriteUsage(
+            terminal,
+            "/help",
+            Text(language, "列出全部命令。", "List every command."));
+        WriteUsage(
+            terminal,
+            "/help <command>",
+            Text(language, "查看某一个命令，例如 /help history。", "Show one command, for example /help history."));
+        WriteUsage(
+            terminal,
+            "/help 历史",
+            Text(language, "也可以用中文查。历史消息用 /history。以前的会话用 /resume 列出最近 10 条，/resume 10 指定条数。", "Chinese names work too. Messages use /history. Past sessions: /resume lists the latest 10, and /resume 10 sets the count."));
+        WriteUsage(
+            terminal,
+            "/help en",
+            Text(language, "把帮助切换成英文，直到退出。", "Switch help to English until you exit."));
+        WriteUsage(
+            terminal,
+            "/help zh",
+            Text(language, "把帮助切回中文。", "Switch help back to Chinese."));
         foreach (var group in Groups)
         {
             terminal.WriteLine();
@@ -167,6 +183,14 @@ internal static class ReplHelpWriter
     private static string Text(ReplHelpLanguage language, string chinese, string english) =>
         language == ReplHelpLanguage.English ? english : chinese;
 
+    private static void WriteUsage(ICliTerminal terminal, string command, string description)
+    {
+        terminal.Write("  ");
+        terminal.Write(command, CliTextStyle.Command);
+        terminal.Write("  ");
+        terminal.WriteLine(description, CliTextStyle.Muted);
+    }
+
     private static HelpGroup[] Groups { get; } =
     [
         new(
@@ -174,17 +198,17 @@ internal static class ReplHelpWriter
             "Chat",
             [
                 Entry(
-                    ["help"],
+                    ["help", "帮助", "命令"],
                     "/help",
                     "[命令]",
                     "[command]",
                     "查看命令，或查看某一个命令怎么用。",
                     "Show the commands, or show how one command works.",
-                    "默认中文。/help en 切换英文并保持到退出。/help zh 切回中文。/help en model 用英文查看某一个命令。",
-                    "Chinese is the default. /help en switches to English until you exit. /help zh switches back. /help en model shows one command in English.",
-                    ["/help", "/help en", "/help zh", "/help model"]),
+                    "默认中文。/help en 切换英文并保持到退出。/help zh 切回中文。/help en history 用英文查看某一个命令。中文也可以查，例如 /help 历史。",
+                    "Chinese is the default. /help en switches to English until you exit. /help zh switches back. /help en history shows one command in English. Chinese names work too, for example /help 历史.",
+                    ["/help", "/help en", "/help zh", "/help history", "/help 历史"]),
                 Entry(
-                    ["exit", "quit"],
+                    ["exit", "quit", "退出", "结束"],
                     "/exit",
                     null,
                     null,
@@ -199,7 +223,7 @@ internal static class ReplHelpWriter
             "Add a provider and models",
             [
                 Entry(
-                    ["config", "provider-add", "model-add", "add"],
+                    ["config", "provider-add", "model-add", "add", "添加供应商"],
                     "madorin config edit",
                     null,
                     null,
@@ -209,7 +233,7 @@ internal static class ReplHelpWriter
                     "Leave the interactive screen with /exit first. Choose 1, then Add Provider, or type new. Enter the protocol, name, address, and API key. Separate model ids with commas, or type discover to fetch them. Choose 2 to change the default provider, model, and agent. /provider and /model only switch items that already exist.",
                     ["madorin config edit", "madorin config show"]),
                 Entry(
-                    ["config-init", "init"],
+                    ["config-init", "init", "初始化"],
                     "madorin config init",
                     null,
                     null,
@@ -219,7 +243,7 @@ internal static class ReplHelpWriter
                     "Asks for the provider, API key, and models. The file is .madorin/config.json in your user profile. If a configuration already exists, it asks before replacing it.",
                     ["madorin config init"]),
                 Entry(
-                    ["agent-create", "agent-add"],
+                    ["agent-create", "agent-add", "新建智能体"],
                     "madorin agent create",
                     "[智能体编号]",
                     "[agent-id]",
@@ -234,7 +258,7 @@ internal static class ReplHelpWriter
             "Choose the next turn",
             [
                 Entry(
-                    ["provider"],
+                    ["provider", "供应商"],
                     "/provider",
                     "[供应商名称]",
                     "[provider-name]",
@@ -244,7 +268,7 @@ internal static class ReplHelpWriter
                     "Omit the name to choose from providers that already exist. This does not add a provider. Use madorin config edit for that.",
                     ["/provider", "/provider deepseek"]),
                 Entry(
-                    ["model"],
+                    ["model", "模型"],
                     "/model",
                     "[模型编号]",
                     "[model-id]",
@@ -254,7 +278,7 @@ internal static class ReplHelpWriter
                     "Omit the id to choose from models registered for the current provider. The model must belong to that provider. Add models with madorin config edit.",
                     ["/model", "/model deepseek-v4-pro"]),
                 Entry(
-                    ["agent"],
+                    ["agent", "智能体"],
                     "/agent",
                     "[智能体编号]",
                     "[agent-id]",
@@ -269,7 +293,7 @@ internal static class ReplHelpWriter
             "Sessions",
             [
                 Entry(
-                    ["session"],
+                    ["session", "当前会话"],
                     "/session",
                     null,
                     null,
@@ -279,7 +303,7 @@ internal static class ReplHelpWriter
                     "Shows a new session before you send anything.",
                     ["/session"]),
                 Entry(
-                    ["new"],
+                    ["new", "新会话", "新对话"],
                     "/new",
                     null,
                     null,
@@ -289,27 +313,27 @@ internal static class ReplHelpWriter
                     "The current session is kept.",
                     ["/new"]),
                 Entry(
-                    ["resume"],
+                    ["resume", "恢复", "以前的会话"],
                     "/resume",
-                    "[会话编号]",
-                    "[session-id]",
-                    "列出可继续的会话，或切换到指定会话。",
-                    "List sessions you can continue, or switch to one.",
-                    "不写编号时列出最近 10 个同模式会话。编号是列表第一列。",
-                    "Omit the id to list the 10 most recent sessions in this mode. The id is the first column.",
-                    ["/resume", "/resume 0123abcd"]),
+                    "[条数 | 会话编号]",
+                    "[count | session-id]",
+                    "列出最近的会话编号，或按编号继续。默认 10 条。",
+                    "List recent session ids, or continue one. The default count is 10.",
+                    "不写参数时，按更新时间从新到旧列出最近 10 个会话编号，时间是本地时间并精确到秒。/resume 10 指定条数，范围 1 到 100。/resume <会话编号> 继续该对话。",
+                    "Omit the argument to list the 10 most recently updated session ids. Times are local and precise to the second. /resume 10 sets the count from 1 to 100. /resume <session-id> continues that session.",
+                    ["/resume", "/resume 10", "/resume 0123abcd"]),
                 Entry(
-                    ["history"],
+                    ["history", "历史", "历史对话", "历史消息"],
                     "/history",
                     "[条数 | all]",
                     "[count | all]",
-                    "查看当前会话最近的消息。",
-                    "Show recent messages in the current session.",
-                    "不写参数显示最近 5 条。all 显示全部。条数必须是正整数。",
-                    "The default is the last 5 messages. all shows every message. count must be a positive integer.",
+                    "查询当前会话的历史对话。",
+                    "Show this session's conversation history.",
+                    "不写参数显示最近 5 条。/history 20 指定条数，/history all 显示全部。要回到以前的会话，用 /resume。",
+                    "The default is the last 5 messages. /history 20 sets the count, and /history all shows every message. Use /resume to return to a past session.",
                     ["/history", "/history 20", "/history all"]),
                 Entry(
-                    ["export"],
+                    ["export", "导出"],
                     "/export",
                     "[文件路径]",
                     "[file]",
@@ -319,7 +343,7 @@ internal static class ReplHelpWriter
                     "Omit the path to print it on screen.",
                     ["/export", "/export session.md"]),
                 Entry(
-                    ["compact"],
+                    ["compact", "压缩"],
                     "/compact",
                     null,
                     null,
@@ -329,7 +353,7 @@ internal static class ReplHelpWriter
                     "Send at least one message first. History is kept, and later requests use the summary.",
                     ["/compact"]),
                 Entry(
-                    ["context"],
+                    ["context", "上下文"],
                     "/context",
                     null,
                     null,
@@ -344,7 +368,7 @@ internal static class ReplHelpWriter
             "Workspace",
             [
                 Entry(
-                    ["cd"],
+                    ["cd", "工作区", "切换目录"],
                     "/cd",
                     "[目录]",
                     "[directory]",
@@ -354,7 +378,7 @@ internal static class ReplHelpWriter
                     "Omit the directory to show the current path. Relative paths work, and ~ is your user profile. The directory must exist.",
                     ["/cd", "/cd ../other-project"]),
                 Entry(
-                    ["status"],
+                    ["status", "状态"],
                     "/status",
                     null,
                     null,
@@ -364,7 +388,7 @@ internal static class ReplHelpWriter
                     null,
                     ["/status"]),
                 Entry(
-                    ["mode"],
+                    ["mode", "模式"],
                     "/mode",
                     null,
                     null,
@@ -374,7 +398,7 @@ internal static class ReplHelpWriter
                     "The mode cannot be changed here. Choose it with madorin run --mode expert.",
                     ["/mode"]),
                 Entry(
-                    ["clear"],
+                    ["clear", "清屏"],
                     "/clear",
                     null,
                     null,
@@ -389,7 +413,7 @@ internal static class ReplHelpWriter
             "Memory, tools, and skills",
             [
                 Entry(
-                    ["memory"],
+                    ["memory", "记忆"],
                     "/memory",
                     "[global | project | effective]",
                     "[global | project | effective]",
@@ -399,7 +423,7 @@ internal static class ReplHelpWriter
                     "global is user memory, project is this workspace, and effective is the merged result.",
                     ["/memory", "/memory project"]),
                 Entry(
-                    ["remember"],
+                    ["remember", "记住"],
                     "/remember",
                     "<global | project>",
                     "<global | project>",
@@ -409,7 +433,7 @@ internal static class ReplHelpWriter
                     "global or project is required.",
                     ["/remember project"]),
                 Entry(
-                    ["tools"],
+                    ["tools", "工具"],
                     "/tools",
                     null,
                     null,
@@ -419,7 +443,27 @@ internal static class ReplHelpWriter
                     null,
                     ["/tools"]),
                 Entry(
-                    ["skill"],
+                    ["permission", "权限"],
+                    "/permission",
+                    null,
+                    null,
+                    "查看或切换本次 CLI 会话的权限模式。",
+                    "Show or change the permission mode for this CLI session.",
+                    "可切换 ask-all、auto-tools、auto-all。模式仅在当前 CLI 进程内有效，退出后恢复 ask-all。",
+                    "Switch between ask-all, auto-tools, and auto-all. The mode is local to this CLI process and resets to ask-all when it exits.",
+                    ["/permission"]),
+                Entry(
+                    ["instructions", "说明"],
+                    "/instructions",
+                    null,
+                    null,
+                    "查看或切换工作区 AGENTS.md 的自动加载。",
+                    "Show or change automatic loading of the workspace AGENTS.md.",
+                    "开启后，每次运行都会读取工作区根目录的 AGENTS.md 并追加到系统提示词。该开关只在当前 CLI 进程内有效。",
+                    "When enabled, each run reads AGENTS.md from the workspace root and appends it to the system prompt. The switch is local to this CLI process.",
+                    ["/instructions"]),
+                Entry(
+                    ["skill", "技能"],
                     "/skill",
                     "<list | show 名称 | refresh>",
                     "<list | show name | refresh>",

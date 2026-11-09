@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
@@ -376,6 +377,8 @@ public sealed class RuntimeClient : IRuntimeClient
         startInfo.ArgumentList.Add(options.RuntimeInstanceId!);
         startInfo.ArgumentList.Add("--pipe-prefix");
         startInfo.ArgumentList.Add(options.PipePrefix);
+        startInfo.Environment["MADORIN_HOST_PID"] =
+            Environment.ProcessId.ToString(CultureInfo.InvariantCulture);
         return startInfo;
     }
 
@@ -985,6 +988,21 @@ public sealed class RuntimeClient : IRuntimeClient
         _confirmedRuntimeInstanceId = _runtimeInstanceId;
     }
 
+    public async ValueTask ShutdownAsync(CancellationToken cancellationToken = default)
+    {
+        ThrowIfTerminalFailure();
+        if (State != RuntimeClientState.Connected || _controlChannel is null)
+        {
+            throw new InvalidOperationException("The Runtime client is not connected.");
+        }
+
+        var response = await _controlChannel.SendRequestAsync(
+            MessageTypes.RuntimeShutdown,
+            parameters: null,
+            cancellationToken).ConfigureAwait(false);
+        ThrowIfError(response);
+    }
+
     public async ValueTask<bool> CancelRunAsync(
         string runId,
         CancellationToken cancellationToken = default) =>
@@ -1145,6 +1163,27 @@ public sealed class RuntimeClient : IRuntimeClient
             parameters,
             RuntimeJsonContext.Default.SessionHistoryReadResult,
             cancellationToken).ConfigureAwait(false);
+    }
+
+    public async ValueTask<SessionHistoryRoundsReadResult> ReadSessionHistoryRoundsAsync(
+        SessionHistoryRoundsReadParameters parameters,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(parameters);
+        try
+        {
+            return await SendControlRequestAsync(
+                MessageTypes.SessionHistoryRoundsRead,
+                parameters,
+                RuntimeJsonContext.Default.SessionHistoryRoundsReadResult,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (InvalidOperationException ex)
+            when (ex.Message.Contains("Runtime RPC failed (-32601)", StringComparison.Ordinal))
+        {
+            throw new NotSupportedException(
+                "This Runtime does not support round-based history pages.", ex);
+        }
     }
 
     public ValueTask<SessionCompactionResultDto> CompactSessionAsync(

@@ -172,6 +172,27 @@ internal static class ControlCommandOutput
         });
     }
 
+    public static void WriteShutdown(
+        ParseResult parseResult,
+        Option<bool> jsonOption,
+        TextWriter output)
+    {
+        if (!CliOutput.IsJson(parseResult, jsonOption))
+        {
+            output.WriteLine("关闭请求已接受。Runtime 正在停止 Provider 并退出。");
+            return;
+        }
+
+        CliOutput.WriteJson(output, writer =>
+        {
+            writer.WriteStartObject();
+            writer.WriteBoolean("success", true);
+            writer.WriteString("command", "ctl shutdown");
+            writer.WriteBoolean("shutdownAccepted", true);
+            writer.WriteEndObject();
+        });
+    }
+
     public static void WriteCredentialUpdate(
         ParseResult parseResult,
         Option<bool> jsonOption,

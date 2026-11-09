@@ -8,11 +8,13 @@ public static class MessageTypes
     public const string RunList = "run.list";
     public const string RunQuery = "run.query";
     public const string RuntimeStatus = "runtime.status";
+    public const string RuntimeShutdown = "runtime.shutdown";
     public const string SessionGet = "session.get";
     public const string SessionList = "session.list";
     public const string SessionResume = "session.resume";
     public const string SessionMessagesList = "session.messages.list";
     public const string SessionHistoryRead = "session.history.read";
+    public const string SessionHistoryRoundsRead = "session.history.rounds.read";
     public const string SessionSelectionUpdate = "session.selection.update";
     public const string SessionCompaction = "session.compact";
     public const string SessionContextStatus = "session.context.status";
@@ -63,4 +65,5 @@ public static class MessageTypes
     public const string ExpertPlanCreated = "expert.plan.created";
     public const string ExpertStepStatusChanged = "expert.step.status.changed";
     public const string ExpertPlanStatusChanged = "expert.plan.status.changed";
+    public const string ExpertPlanRestored = "plan.restored";
 }

@@ -548,7 +548,7 @@ public sealed class ToolAuthorizationTests
             RuntimeToolPolicy.CreateRestricted(_workspace));
         var invocation = new ToolInvocation(
             "call-process",
-            "mcli_process",
+            "mcli_command",
             "agent-root",
             ParentAgentId: null,
             "{}",
@@ -589,7 +589,8 @@ public sealed class ToolAuthorizationTests
                 DelegatedAgentIds: [],
                 AllowedToolIds: [invocation.ToolId],
                 MaximumRisk: ToolRiskLevel.Process,
-                AgentId: invocation.AgentId),
+                AgentId: invocation.AgentId,
+                CommandWorkingDirectory: _workspace),
             ct: TestContext.CancellationToken);
 
         var granted = await service.AuthorizeAsync(

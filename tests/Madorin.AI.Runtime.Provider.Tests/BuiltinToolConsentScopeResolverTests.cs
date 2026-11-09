@@ -30,6 +30,18 @@ public sealed class BuiltinToolConsentScopeResolverTests
     }
 
     [TestMethod]
+    public void Resolve_AttachmentUsesExistingReadGrantScope()
+    {
+        File.WriteAllText(Path.Join(_workspace, "data.bin"), "content");
+        var resolution = Resolve(BuiltinToolRegistry.FileAttachToolId, """{"path":"data.bin"}""");
+        Assert.IsTrue(resolution.IsSuccess, resolution.Error);
+        Assert.IsNotNull(resolution.Scope);
+        CollectionAssert.AreEqual(new[] { Path.Join(_workspace, "data.bin") }, resolution.Scope.AllowedReadRoots);
+        Assert.IsEmpty(resolution.Scope.AllowedWriteRoots);
+        Assert.IsTrue(resolution.Scope.CanGrantForRun);
+    }
+
+    [TestMethod]
     public void Resolve_FileReadWithChineseAndSpaces_UsesExactNormalizedTarget()
     {
         var relativePath = Path.Combine("资料 目录", "说明 文件.txt");
@@ -94,7 +106,7 @@ public sealed class BuiltinToolConsentScopeResolverTests
     [DataRow(BuiltinToolRegistry.FileReadToolId, "{\"path\":\"../outside.txt\"}")]
     [DataRow(BuiltinToolRegistry.FileReadToolId, "{\"path\":\"\\\\server\\share\\file.txt\"}")]
     [DataRow(BuiltinToolRegistry.FileReadToolId, "{\"path\":\"\\\\?\\C:\\Windows\\win.ini\"}")]
-    [DataRow(BuiltinToolRegistry.ProcessRunToolId, "{\"fileName\":\"tools/dotnet\"}")]
+    [DataRow(BuiltinToolRegistry.CommandToolId, "{\"fileName\":\"tools/dotnet\"}")]
     [DataRow(BuiltinToolRegistry.HttpRequestToolId, "{\"method\":\"GET\",\"url\":\"https://user:password@example.test/data\"}")]
     public void Resolve_UnsafeOrDynamicTarget_FailsClosed(string toolId, string argumentsJson)
     {
@@ -150,54 +162,33 @@ public sealed class BuiltinToolConsentScopeResolverTests
     }
 
     [TestMethod]
-    public void Resolve_ProcessUsesSafeEnvironmentAndRestrictsCustomVariablesToOnce()
+    public void Resolve_CommandAuthorizationOnlyBindsWorkingDirectory()
     {
         var process = Resolve(
-            BuiltinToolRegistry.ProcessRunToolId,
-            """{"fileName":"dotnet","arguments":["--info","sensitive-value"],"stdin":"secret-input","environment":{"TOKEN":"secret-token"}}""");
+            BuiltinToolRegistry.CommandToolId,
+            """{"script":"dotnet --info","shell":"auto","stdin":"secret-input","environment":{"TOKEN":"secret-token"}}""");
         var safeProcess = Resolve(
-            BuiltinToolRegistry.ProcessRunToolId,
-            """{"fileName":"dotnet","arguments":["--info"]}""");
+            BuiltinToolRegistry.CommandToolId,
+            """{"script":"dotnet --info"}""");
         var http = Resolve(
             BuiltinToolRegistry.HttpRequestToolId,
             """{"method":"POST","url":"https://example.test:8443/orders","headers":{"Authorization":"Bearer secret-token"},"body":"secret-body"}""");
 
         Assert.IsTrue(process.IsSuccess, process.Error);
         Assert.IsNotNull(process.Scope);
-        Assert.HasCount(1, process.Scope.AllowedExecutables);
-        Assert.AreEqual("dotnet", process.Scope.AllowedExecutables[0]);
-        Assert.Contains(
-            "TOKEN",
-            process.Scope.AllowedEnvironmentVariables,
-            StringComparer.OrdinalIgnoreCase);
-        Assert.Contains(
-            "TEMP",
-            process.Scope.AllowedEnvironmentVariables,
-            StringComparer.OrdinalIgnoreCase);
-        Assert.Contains(
-            "TMP",
-            process.Scope.AllowedEnvironmentVariables,
-            StringComparer.OrdinalIgnoreCase);
-        Assert.Contains(
-            "USERPROFILE",
-            process.Scope.AllowedEnvironmentVariables,
-            StringComparer.OrdinalIgnoreCase);
-        Assert.DoesNotContain(
-            "OPENAI_API_KEY",
-            process.Scope.AllowedEnvironmentVariables,
-            StringComparer.OrdinalIgnoreCase);
-        Assert.AreEqual("2 arguments; stdin 12 characters", process.Scope.DetailSummary);
-        Assert.IsFalse(process.Scope.CanGrantForRun);
+        Assert.IsEmpty(process.Scope.AllowedExecutables);
+        Assert.IsEmpty(process.Scope.AllowedEnvironmentVariables);
+        Assert.IsEmpty(process.Scope.AllowedReadRoots);
+        Assert.AreEqual(CommandToolAuthorization.NormalizeDirectory(_workspace), process.Scope.CommandWorkingDirectory);
+        StringAssert.Contains(process.Scope.DetailSummary, "execute any commands with your user permissions");
+        Assert.IsTrue(process.Scope.CanGrantForRun);
         Assert.DoesNotContain("sensitive-value", process.Scope.DetailSummary, StringComparison.Ordinal);
         Assert.DoesNotContain("secret", process.Scope.DetailSummary, StringComparison.OrdinalIgnoreCase);
 
         Assert.IsTrue(safeProcess.IsSuccess, safeProcess.Error);
         Assert.IsNotNull(safeProcess.Scope);
         Assert.IsTrue(safeProcess.Scope.CanGrantForRun);
-        Assert.Contains(
-            "TEMP",
-            safeProcess.Scope.AllowedEnvironmentVariables,
-            StringComparer.OrdinalIgnoreCase);
+        Assert.AreEqual(process.Scope.CommandWorkingDirectory, safeProcess.Scope.CommandWorkingDirectory);
 
         Assert.IsTrue(http.IsSuccess, http.Error);
         Assert.IsNotNull(http.Scope);

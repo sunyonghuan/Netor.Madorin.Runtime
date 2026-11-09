@@ -145,25 +145,40 @@ internal static class BuiltinProcessRunner
 
     public static IReadOnlyDictionary<string, string> BuildEnvironment(
         System.Text.Json.JsonElement arguments,
-        IReadOnlyList<string>? allowedVariables)
+        IReadOnlyList<string>? allowedVariables,
+        bool inheritAll = false)
     {
         var comparer = OperatingSystem.IsWindows()
             ? StringComparer.OrdinalIgnoreCase
             : StringComparer.Ordinal;
         var allowed = (allowedVariables ?? []).ToHashSet(comparer);
-        if (allowed.Count > MaxEnvironmentVariables)
+        if (!inheritAll && allowed.Count > MaxEnvironmentVariables)
         {
             throw new InvalidDataException("The environment variable allowlist is too large.");
         }
 
         var result = new Dictionary<string, string>(comparer);
-        foreach (var name in allowed)
+        if (inheritAll)
         {
-            ValidateEnvironmentName(name);
-            var inherited = Environment.GetEnvironmentVariable(name);
-            if (inherited is not null)
+            foreach (System.Collections.DictionaryEntry item in Environment.GetEnvironmentVariables())
             {
-                result[name] = inherited;
+                if (item.Key is string name && item.Value is string value)
+                {
+                    ValidateEnvironmentName(name);
+                    result[name] = value;
+                }
+            }
+        }
+        else
+        {
+            foreach (var name in allowed)
+            {
+                ValidateEnvironmentName(name);
+                var inherited = Environment.GetEnvironmentVariable(name);
+                if (inherited is not null)
+                {
+                    result[name] = inherited;
+                }
             }
         }
 
@@ -180,7 +195,7 @@ internal static class BuiltinProcessRunner
         foreach (var item in property.EnumerateObject())
         {
             ValidateEnvironmentName(item.Name);
-            if (!allowed.Contains(item.Name))
+            if (!inheritAll && !allowed.Contains(item.Name))
             {
                 throw new UnauthorizedAccessException(
                     $"Environment variable '{item.Name}' is not allowed by the effective Grant.");
@@ -290,6 +305,7 @@ internal static class BuiltinProcessRunner
         string workingDirectory,
         IReadOnlyDictionary<string, string> environment,
         string? standardInput,
+        Encoding encoding,
         CancellationToken ct)
     {
         var startInfo = new ProcessStartInfo
@@ -301,9 +317,9 @@ internal static class BuiltinProcessRunner
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-            StandardInputEncoding = Utf8,
-            StandardOutputEncoding = Utf8,
-            StandardErrorEncoding = Utf8
+            StandardInputEncoding = encoding,
+            StandardOutputEncoding = encoding,
+            StandardErrorEncoding = encoding
         };
         foreach (var argument in arguments)
         {
@@ -327,7 +343,7 @@ internal static class BuiltinProcessRunner
         catch (Win32Exception ex)
         {
             throw new InvalidOperationException(
-                $"The process could not be started: {ex.Message}",
+                $"The process '{executablePath}' could not be started in '{workingDirectory}': {ex.Message}",
                 ex);
         }
 
@@ -349,8 +365,8 @@ internal static class BuiltinProcessRunner
             var stderr = await stderrTask.ConfigureAwait(false);
             return new ProcessOutput(
                 process.ExitCode,
-                Utf8.GetString(stdout.Content),
-                Utf8.GetString(stderr.Content),
+                encoding.GetString(stdout.Content),
+                encoding.GetString(stderr.Content),
                 stdout.IsTruncated,
                 stderr.IsTruncated);
         }
@@ -380,10 +396,13 @@ internal static class BuiltinProcessRunner
         var info = new FileInfo(path);
         if ((info.Attributes & FileAttributes.ReparsePoint) != 0 || info.LinkTarget is not null)
         {
-            var target = info.ResolveLinkTarget(returnFinalTarget: true)
-                ?? throw new UnauthorizedAccessException(
-                    "The executable link target could not be resolved.");
-            path = Path.GetFullPath(target.FullName);
+            // Windows app execution aliases may expose a reparse point without a
+            // filesystem target. They are valid shell launchers and must remain usable.
+            var target = info.ResolveLinkTarget(returnFinalTarget: true);
+            if (target is not null)
+            {
+                path = Path.GetFullPath(target.FullName);
+            }
         }
 
         if (!File.Exists(path) || Directory.Exists(path))
@@ -394,7 +413,7 @@ internal static class BuiltinProcessRunner
         return new PinnedExecutable(path, BuiltinFsHandle.Open(path, isDirectory: false));
     }
 
-    private static string FindOnRuntimePath(string executableName)
+    internal static string FindOnRuntimePath(string executableName)
     {
         var candidates = OperatingSystem.IsWindows()
             && string.IsNullOrEmpty(Path.GetExtension(executableName))
@@ -405,7 +424,7 @@ internal static class BuiltinProcessRunner
         {
             foreach (var candidate in candidates)
             {
-                var path = Path.Join(directory.Trim(), candidate);
+                var path = Path.Join(directory.Trim().Trim('"'), candidate);
                 if (File.Exists(path) && !Directory.Exists(path))
                 {
                     return Path.GetFullPath(path);

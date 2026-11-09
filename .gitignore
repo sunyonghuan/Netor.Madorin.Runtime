@@ -7,6 +7,16 @@
 
 # Build output
 [Bb]in/
+[Bb]in/**
+!skills/madorin-cli/bin/
+!skills/madorin-cli/bin/**
+skills/madorin-cli/bin/*.exe
+skills/madorin-cli/bin/*.dll
+!skills/madorin-cli/mcp/bin/
+!skills/madorin-cli/mcp/bin/**
+
+# MCP bridge runtime logs stay untracked. servers.json and catalog are tracked; do not put secrets in them.
+skills/madorin-cli/mcp/logs/
 [Oo]bj/
 [Dd]ebug/
 [Rr]elease/

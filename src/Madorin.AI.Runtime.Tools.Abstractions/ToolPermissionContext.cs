@@ -29,7 +29,8 @@ public sealed record ToolPermissionContext(
     string? ParentInvocationId = null,
     string? PlanVersion = null,
     string[]? AllowedSkillScriptKeys = null,
-    string? SkillCatalogVersion = null)
+    string? SkillCatalogVersion = null,
+    string? CommandWorkingDirectory = null)
 {
     public string[] AllowedExecutables { get; init; } = AllowedExecutables ?? [];
 }

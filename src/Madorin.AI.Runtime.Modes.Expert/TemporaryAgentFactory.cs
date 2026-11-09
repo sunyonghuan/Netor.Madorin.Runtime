@@ -8,6 +8,7 @@ internal static class TemporaryAgentFactory
     private static readonly string[] DefaultReadOnlyTools =
     [
         "mcli_fs_read",
+        "mcli_fs_attach",
         "mcli_fs_search",
         "mcli_fs_inspect",
         "mcli_fs_list"
@@ -17,7 +18,7 @@ internal static class TemporaryAgentFactory
 
     private static readonly HashSet<string> DangerousTools = new(StringComparer.Ordinal)
     {
-        "mcli_process",
+        "mcli_command",
         "mcli_http",
         "mcli_fs_copy",
         "mcli_fs_move",

@@ -35,14 +35,69 @@ public static class MafSkillsAgentFactory
         }
 
         var agent = chatClient.AsAIAgent(agentOptions);
+        using var outputMapper = new ProviderOutputContentMapper(request);
+        if (request.UseNonStreamingResponse)
+        {
+            // 非流式：一次 HTTP 请求拿到完整响应。所有 Provider 都经由这里调用 MAF，
+            // 因此 OpenAI 系、Anthropic、DeepSeek、Kimi 及其派生 Provider 都走同一条路径。
+            var response = await agent.RunAsync(messages, cancellationToken: ct).ConfigureAwait(false);
+            var rawContents = CollectNonStreamingContents(response);
+            var responseContents = await outputMapper.MapAsync(
+                    rawContents,
+                    terminal: true,
+                    ct)
+                .ConfigureAwait(false);
+            outputMapper.EnsureCompleted();
+            yield return new MafProviderResponseUpdate(
+                (response.FinishReason ?? InferNonStreamingFinishReason(rawContents))?.ToString(),
+                responseContents);
+            yield break;
+        }
+
         await foreach (var update in agent.RunStreamingAsync(
                            messages,
                            cancellationToken: ct).ConfigureAwait(false))
         {
+            var contents = await outputMapper.MapAsync(update.Contents.ToArray(), update.FinishReason is not null, ct)
+                .ConfigureAwait(false);
             yield return new MafProviderResponseUpdate(
                 update.FinishReason?.ToString(),
-                update.Contents.ToArray());
+                contents);
         }
+        outputMapper.EnsureCompleted();
+    }
+
+    /// <summary>
+    /// 把非流式响应展开为与流式更新相同的内容序列：先按顺序放入各条消息的内容，
+    /// 再在消息中没有用量内容时补上响应级用量，使适配器的事件映射逻辑无需区分两种模式。
+    /// </summary>
+    private static AIContent[] CollectNonStreamingContents(AgentResponse response)
+    {
+        var contents = response.Messages.SelectMany(static message => message.Contents).ToList();
+        if (response.Usage is { } usage && !contents.Any(static content => content is UsageContent))
+        {
+            contents.Add(new UsageContent(usage));
+        }
+
+        return [.. contents];
+    }
+
+    /// <summary>
+    /// 非流式响应缺少结束原因时推断结束原因。
+    /// 非流式响应是完整接收并解析过的文档；OpenAI Responses API 在 completed 状态下不提供结束原因，
+    /// 截断和内容过滤会映射为 Length / ContentFilter，不会走到这里。
+    /// 响应里带错误内容时不推断，交由适配器按协议错误处理。
+    /// </summary>
+    private static ChatFinishReason? InferNonStreamingFinishReason(AIContent[] contents)
+    {
+        if (contents.Any(static content => content is ErrorContent))
+        {
+            return null;
+        }
+
+        return contents.Any(static content => content is FunctionCallContent)
+            ? ChatFinishReason.ToolCalls
+            : ChatFinishReason.Stop;
     }
 
     /// <summary>

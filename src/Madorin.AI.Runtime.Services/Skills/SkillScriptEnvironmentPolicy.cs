@@ -26,7 +26,7 @@ public static class SkillScriptEnvironmentPolicy
             {
                 "PATH", "SystemRoot", "windir", "TEMP", "TMP", "HOME", "HOMEDRIVE", "HOMEPATH",
                 "USERPROFILE", "LOCALAPPDATA", "APPDATA", "ProgramFiles", "ProgramFiles(x86)",
-                "ProgramData", "COMSPEC", "OS", "DOTNET_ROOT", "DOTNET_ROOT_X64", "DOTNET_CLI_HOME",
+                "ProgramData", "COMSPEC", "OS", "PATHEXT", "PSModulePath", "DOTNET_ROOT", "DOTNET_ROOT_X64", "DOTNET_CLI_HOME",
                 "NUGET_PACKAGES", "PYTHONIOENCODING", "PYTHONUTF8", "DOTNET_CLI_TELEMETRY_OPTOUT",
                 "DOTNET_NOLOGO"
             }

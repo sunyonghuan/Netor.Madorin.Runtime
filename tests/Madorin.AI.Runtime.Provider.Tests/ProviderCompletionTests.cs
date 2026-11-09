@@ -238,6 +238,82 @@ public sealed class ProviderCompletionTests
     }
 
     [TestMethod]
+    [DataRow(ProviderAdapterKind.OpenAI)]
+    [DataRow(ProviderAdapterKind.Anthropic)]
+    [DataRow(ProviderAdapterKind.OpenAICompatible)]
+    public async Task CompleteStreamingAsync_BlobIsNotBlockedByDeclaredModelCapabilities(
+        ProviderAdapterKind kind)
+    {
+        var bytes = Encoding.UTF8.GetBytes("blob-payload-marker");
+        var blob = new BlobReference(
+            "blob-capability-1",
+            bytes.Length,
+            Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(),
+            "image/png",
+            "run:run-1",
+            DateTimeOffset.UtcNow.AddMinutes(5));
+        var resolver = new FakeBlobResolver(new ResolvedProviderBlob(bytes, "image/png", "image.png"));
+        await using var server = await FakeProviderServer.StartAsync(
+            _ => ProviderProtocolScripts.NormalText(kind),
+            _testContext.CancellationToken);
+        var noMediaCapabilities = ProviderAdapterTestFactory.CreateCapabilities(
+            vision: false,
+            files: false);
+        using var fixture = ProviderAdapterTestFactory.Create(
+            kind,
+            server.BaseAddress,
+            noMediaCapabilities,
+            resolver);
+        var request = ProviderAdapterTestFactory.CreateRequest() with
+        {
+            Messages =
+            [
+                new RuntimeProviderMessage(
+                    RuntimeProviderRoles.User,
+                    [new BlobRefContentBlock(blob)])
+            ]
+        };
+
+        var events = await ProviderAdapterTestFactory.CollectAsync(
+            fixture.Adapter,
+            request,
+            _testContext.CancellationToken);
+
+        Assert.IsEmpty(events.OfType<InvocationFailedProviderEvent>());
+        Assert.AreEqual(1, resolver.ResolveCount);
+        Assert.Contains(Convert.ToBase64String(bytes),
+            Assert.ContainsSingle(server.Requests).Body,
+            StringComparison.Ordinal);
+    }
+
+    [TestMethod]
+    public void ProviderToolResultMapper_PreservesTextAndRejectsBlobReferenceFallback()
+    {
+        var textResult = new ToolResultContentBlock(
+            "call-text",
+            "tool",
+            true,
+            [new TextContentBlock("plain result")]);
+        Assert.AreEqual("plain result", ProviderToolResultMapper.ToTextOrJson(textResult));
+
+        var blob = new BlobReference(
+            "blob-tool-result",
+            4,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "image/png",
+            "run:run-1",
+            DateTimeOffset.UtcNow.AddMinutes(5));
+        var blobResult = new ToolResultContentBlock(
+            "call-blob",
+            "tool",
+            true,
+            [new TextContentBlock("attached"), new BlobRefContentBlock(blob)]);
+
+        Assert.ThrowsExactly<NotSupportedException>(() =>
+            ProviderToolResultMapper.ToTextOrJson(blobResult));
+    }
+
+    [TestMethod]
     [Timeout(10_000, CooperativeCancellation = true)]
     public async Task CompleteStreamingAsync_MissingUsageProducesUnknownInsteadOfZero()
     {

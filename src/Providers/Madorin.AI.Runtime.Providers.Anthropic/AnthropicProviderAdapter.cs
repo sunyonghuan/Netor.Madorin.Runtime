@@ -1,7 +1,7 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.CompilerServices;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -28,6 +28,9 @@ public sealed class AnthropicProviderAdapter :
     private readonly IProviderBlobResolver? _blobResolver;
     private readonly ProviderAuthenticationHandler? _credentialHandler;
     private readonly AnthropicMinimalClient? _ownedClient;
+    private readonly HttpClient? _fileClient;
+    private readonly ProviderAuthenticationHandler? _fileCredentialHandler;
+    private readonly Uri? _fileBaseUri;
 
     public AnthropicProviderAdapter(
         IChatClient chatClient,
@@ -122,6 +125,11 @@ public sealed class AnthropicProviderAdapter :
             Timeout = TimeSpan.FromMinutes(10)
         };
         _ownedClient = new AnthropicMinimalClient(options);
+        // Files API 不接受响应指定的下载地址，也不跟随重定向转发凭据。
+        _fileBaseUri = new Uri(baseUrl.TrimEnd('/') + "/");
+        _fileCredentialHandler = new ProviderAuthenticationHandler("x-api-key", null, apiKey,
+            new SocketsHttpHandler { AllowAutoRedirect = false });
+        _fileClient = new HttpClient(_fileCredentialHandler) { Timeout = Timeout.InfiniteTimeSpan };
         _chatClientFactory = modelId => _ownedClient.AsIChatClient(modelId);
         ProviderId = providerId;
         Models = models ?? [];
@@ -164,6 +172,7 @@ public sealed class AnthropicProviderAdapter :
         }
 
         _credentialHandler.Update(parameters.Credential);
+        _fileCredentialHandler?.Update(parameters.Credential);
         return Task.CompletedTask;
     }
 
@@ -208,6 +217,9 @@ public sealed class AnthropicProviderAdapter :
             yield return adjustment;
         }
 
+        // 记录开始时间和已收到的更新条数，失败时写入 ProviderDetails，用来区分断流、解析失败和请求失败。
+        var startedAt = Stopwatch.GetTimestamp();
+        var receivedUpdates = 0;
         IAsyncEnumerator<MafProviderResponseUpdate>? enumerator = null;
         try
         {
@@ -224,7 +236,9 @@ public sealed class AnthropicProviderAdapter :
         }
         catch (Exception ex)
         {
-            failure = CreateProviderError(ex);
+            failure = CreateProviderError(
+                ex,
+                ProviderFailureContext.Since(ProviderFailureStages.RequestStart, receivedUpdates, startedAt, request.UseNonStreamingResponse));
         }
 
         if (failure is not null || enumerator is null)
@@ -257,10 +271,13 @@ public sealed class AnthropicProviderAdapter :
             }
             catch (Exception ex)
             {
-                failure = CreateProviderError(ex);
+                failure = CreateProviderError(
+                    ex,
+                    ProviderFailureContext.Since(ProviderFailureStages.StreamRead, receivedUpdates, startedAt, request.UseNonStreamingResponse));
                 break;
             }
 
+            receivedUpdates++;
             if (update.FinishReason is { } currentFinishReason)
             {
                 finishReason = currentFinishReason.ToString();
@@ -283,7 +300,12 @@ public sealed class AnthropicProviderAdapter :
             failure = ProviderErrorFactory.Create(
                 "Anthropic",
                 new InvalidDataException("Provider stream ended before a terminal update."),
-                isProtocolError: true);
+                isProtocolError: true,
+                failureContext: ProviderFailureContext.Since(
+                    ProviderFailureStages.StreamEndedWithoutFinishReason,
+                    receivedUpdates,
+                    startedAt,
+                    request.UseNonStreamingResponse));
         }
 
         if (failure is not null)
@@ -316,7 +338,8 @@ public sealed class AnthropicProviderAdapter :
                 ?? throw new InvalidOperationException("The Anthropic chat client factory returned null."));
         var options = CreateChatOptions(request);
         return MafSkillsAgentFactory.CreateResponseStream(
-            chatClient,
+            new Protocol.AnthropicFileOutputChatClient(chatClient, _fileClient, _fileBaseUri,
+                request.MaximumBufferedBlobBytes),
             request,
             messages,
             options,
@@ -423,7 +446,8 @@ public sealed class AnthropicProviderAdapter :
                     case ToolResultContentBlock toolResult:
                         content.Add(new FunctionResultContent(
                         toolResult.CallId,
-                        ConvertToolResult(toolResult)));
+                        await ProviderToolResultMapper.ToContentAsync(
+                            toolResult, ResolveBlobAsync, ct).ConfigureAwait(false)));
                         break;
                     case BlobRefContentBlock blobReference:
                         content.Add(await ResolveBlobAsync(blobReference.Blob, ct).ConfigureAwait(false));
@@ -440,38 +464,8 @@ public sealed class AnthropicProviderAdapter :
         return [.. messages];
     }
 
-    private async ValueTask<DataContent> ResolveBlobAsync(
-        BlobReference blob,
-        CancellationToken ct)
-    {
-        if (_blobResolver is null)
-        {
-            throw new InvalidOperationException(
-                $"Blob '{blob.BlobId}' cannot be sent because no Provider Blob resolver is configured.");
-        }
-
-        var resolved = await _blobResolver.ResolveAsync(blob, ct).ConfigureAwait(false);
-        if (resolved.Data.Length != blob.Length)
-        {
-            throw new InvalidDataException($"Blob '{blob.BlobId}' length does not match its descriptor.");
-        }
-
-        var sha256 = Convert.ToHexString(SHA256.HashData(resolved.Data.Span)).ToLowerInvariant();
-        if (!string.Equals(sha256, blob.Sha256, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidDataException($"Blob '{blob.BlobId}' SHA-256 does not match its descriptor.");
-        }
-
-        if (!string.Equals(resolved.ContentType, blob.ContentType, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidDataException($"Blob '{blob.BlobId}' content type does not match its descriptor.");
-        }
-
-        return new DataContent(resolved.Data, resolved.ContentType)
-        {
-            Name = resolved.FileName
-        };
-    }
+    private ValueTask<DataContent> ResolveBlobAsync(BlobReference blob, CancellationToken ct) =>
+        ProviderBlobContentResolver.ResolveAsync(_blobResolver, blob, ProviderAttachmentRoute.AnthropicMessages, ct);
 
     private static ChatRole ConvertRole(string role) => role switch
     {
@@ -501,18 +495,6 @@ public sealed class AnthropicProviderAdapter :
         return converted;
     }
 
-    private static object ConvertToolResult(ToolResultContentBlock toolResult)
-    {
-        if (toolResult.Content is [TextContentBlock text])
-        {
-            return text.Text;
-        }
-
-        return JsonSerializer.SerializeToElement(
-            toolResult.Content,
-            RuntimeJsonContext.Default.ContentBlockArray);
-    }
-
     private static IEnumerable<RuntimeProviderEvent> MapUpdate(
         RuntimeProviderRequest request,
         MafProviderResponseUpdate update,
@@ -534,6 +516,12 @@ public sealed class AnthropicProviderAdapter :
                 case TextContent text when !string.IsNullOrEmpty(text.Text):
                     draft.EndBlock();
                     yield return new TextDeltaProviderEvent(request.InvocationId, text.Text);
+                    break;
+
+                case ProviderOutputAttachmentContent attachment:
+                    draft.EndBlock();
+                    yield return new AttachmentCompletedProviderEvent(request.InvocationId,
+                        attachment.Blob, attachment.FileName);
                     break;
 
                 case FunctionCallContent functionCall:
@@ -696,8 +684,16 @@ public sealed class AnthropicProviderAdapter :
         return (int)Math.Clamp(value, 0, int.MaxValue);
     }
 
-    private static RuntimeError CreateProviderError(Exception exception)
+    /// <summary>把 SDK 异常转换为脱敏的 Runtime 错误，并附带可选的失败阶段上下文。</summary>
+    private static RuntimeError CreateProviderError(
+        Exception exception,
+        ProviderFailureContext? failureContext = null)
     {
+        if (exception is RuntimeProviderException runtimeException)
+        {
+            return runtimeException.Error;
+        }
+
         var statusCode = exception switch
         {
             AnthropicMinimalException anthropicException when anthropicException.StatusCode > 0 =>
@@ -718,11 +714,13 @@ public sealed class AnthropicProviderAdapter :
                 : null,
             isProtocolError: exception is JsonException
                 || exception is AnthropicMinimalException { StatusCode: 0 },
-            providerCode: providerCode);
+            providerCode: providerCode,
+            failureContext: failureContext);
     }
 
     public void Dispose()
     {
+        _fileClient?.Dispose();
         _ownedClient?.Dispose();
     }
 }

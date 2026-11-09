@@ -9,12 +9,6 @@ public sealed record ContextTokenBudget(int InputLimit, int OutputLimit, int? Co
         ProviderModel? model, int? explicitInputBudget = null, int? requestedMaxOutputTokens = null)
     {
         var window = model?.ContextWindow is > 0 ? model.ContextWindow : null;
-        if (window is null && explicitInputBudget is not > 0)
-        {
-            throw new InvalidOperationException(
-                "context_window_unknown: Configure the model context window or an explicit input token budget.");
-        }
-
         var outputLimit = requestedMaxOutputTokens is > 0
             ? requestedMaxOutputTokens.Value
             : Math.Min(model?.MaxOutputTokens is > 0 ? model.MaxOutputTokens.Value : 4096,
@@ -23,6 +17,7 @@ public sealed record ContextTokenBudget(int InputLimit, int OutputLimit, int? Co
         {
             outputLimit = Math.Min(outputLimit, model.MaxOutputTokens.Value);
         }
+        // 未声明窗口时不猜测模型限制，也不阻断调用；只应用显式预算，由 Provider 校验实际容量。
         var inputLimit = explicitInputBudget is > 0 ? explicitInputBudget.Value : int.MaxValue;
         if (window is { } contextWindow)
         {

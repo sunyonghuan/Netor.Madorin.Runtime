@@ -111,10 +111,11 @@ public static async Task<int> Main(string[] args)
 echo '{"type":"hello","ipcVersion":1,"protocol":"MyProvider","slug":"myprovider","runtimeVersion":"1.0.0"}' | \
   ./myprovider-worker --slug myprovider
 
-# 集成测试（与真实 Runtime）
-madorin serve --instance test
-madorin run --instance test --provider myprovider --input "测试"
+# 独立 CLI 集成测试：run 在该工作区按需启动 Provider Worker
+madorin run --workspace /path/to/project --provider myprovider --input "测试"
 ```
+
+若需测试 Runtime Server 与宿主 SDK 的连接，请遵循 [SDK 集成指南](../03-SDK集成指南.md) 启动 Server 并提供相同的握手密钥；`madorin run` 不使用 `serve` 的 `--instance` 参数路由请求。
 
 ## 开发流程
 
@@ -429,7 +430,7 @@ xxd output.bin
 ### 查看 Runtime 日志
 
 ```bash
-madorin serve --log-level Debug
+echo "change-this-secret" | madorin serve --workspace . --log-level Debug
 cat .madorin/logs/runtime-*.log
 ```
 

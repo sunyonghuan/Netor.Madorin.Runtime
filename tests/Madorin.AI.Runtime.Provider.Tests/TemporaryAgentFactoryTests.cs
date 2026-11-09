@@ -6,9 +6,9 @@ namespace Madorin.AI.Runtime.Provider.Tests;
 [TestClass]
 public sealed class TemporaryAgentFactoryTests
 {
-    private static readonly string[] ParentTools = ["mcli_fs_read", "mcli_fs_write", "mcli_fs_delete", "mcli_process", "mcli_fs_search"];
-    private static readonly string[] RequestedTools = ["mcli_fs_read", "mcli_fs_write", "mcli_fs_delete", "mcli_process", "mcli_fs_search"];
-    private static readonly string[] ReadOnlyTools = ["mcli_fs_read", "mcli_fs_search", "mcli_fs_inspect", "mcli_fs_list"];
+    private static readonly string[] ParentTools = ["mcli_fs_read", "mcli_fs_write", "mcli_fs_delete", "mcli_command", "mcli_fs_search"];
+    private static readonly string[] RequestedTools = ["mcli_fs_read", "mcli_fs_write", "mcli_fs_delete", "mcli_command", "mcli_fs_search"];
+    private static readonly string[] ReadOnlyTools = ["mcli_fs_read", "mcli_fs_attach", "mcli_fs_search", "mcli_fs_inspect", "mcli_fs_list"];
     private static readonly string[] ActualTools = ["mcli_fs_read", "mcli_fs_write", "mcli_fs_delete", "mcli_fs_search"];
     private static readonly string[] Capabilities = ["csharp.analysis"];
 
@@ -35,7 +35,7 @@ public sealed class TemporaryAgentFactoryTests
         CollectionAssert.AreEquivalent(ActualTools, agent.AllowedToolIds);
         Assert.IsNotNull(agent.AllowedToolIds);
         Assert.Contains("mcli_fs_write", agent.AllowedToolIds);
-        Assert.DoesNotContain("mcli_process", agent.AllowedToolIds);
+        Assert.DoesNotContain("mcli_command", agent.AllowedToolIds);
         StringAssert.Contains(agent.SystemPrompt, "File writes and deletes are allowed only");
         CollectionAssert.AreEquivalent(Capabilities, agent.Capabilities);
     }

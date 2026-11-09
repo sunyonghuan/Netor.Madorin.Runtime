@@ -1,10 +1,12 @@
 # Madorin.AI.Runtime 使用文档
 
-> **适用版本**：Madorin.AI.Runtime V1  
-> **更新日期**：2026-09-18  
+> **适用版本**：当前源码版本；具体发布版本以 `madorin version` 为准。
+> **更新日期**：2026-11-09
 > **目标读者**：第三方开发者、集成方和 Provider 提供商
 
 本目录提供 Madorin.AI.Runtime 的完整使用文档，包括独立 CLI 使用、SDK 集成、协议规范和 Provider 开发指南。
+
+独立 CLI 文档同时覆盖两类命令：`madorin run`、`madorin serve` 等程序级命令，以及进入 REPL 后使用的 `/help`、`/resume`、`/history`、`/context` 等交互命令。两者的语法不同，请按使用场景查阅对应章节。
 
 ## 文档导航
 
@@ -58,11 +60,16 @@ madorin run
 # 执行单次任务
 madorin run --provider deepseek --model deepseek-v4-pro --input "分析系统架构"
 
-# 启动常驻服务
-madorin serve --instance main
+# 生成本地示例密钥；生产环境应从密钥管理服务注入
+export MADORIN_HANDSHAKE_SECRET="$(openssl rand -base64 32)"
+
+# 启动常驻服务（当前目录为工作区，握手密钥通过 stdin 提供）
+printf '%s\n' "$MADORIN_HANDSHAKE_SECRET" | madorin serve --workspace . --instance main
 ```
 
-详见 [独立 CLI 使用指南](./02-独立CLI使用指南.md)。
+服务以前台方式运行。查询实例或连接客户端时，在另一个终端/进程中使用同一实例名和握手密钥。详见 [独立 CLI 使用指南](./02-独立CLI使用指南.md)。
+
+其中，`/resume` 不带参数时列出最近 10 个 Session；`/resume <count>` 可指定列出数量（1–100），`/resume <session-id>` 恢复指定会话。列表时间使用本地时间并精确到秒。
 
 ### 方式二：SDK 集成
 

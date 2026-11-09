@@ -794,17 +794,14 @@ public async Task CompleteStreamingAsync_ReturnsEvents()
 ### 集成测试（与真实 Runtime）
 
 ```bash
-# 启动 Runtime
-madorin serve --instance test
+# 准备 Provider 配置；交互式向导支持添加自定义兼容协议
+madorin config edit
 
-# 配置 Provider
-madorin config set providers.test.protocol MyProvider
-madorin config set providers.test.apiKey sk-test
-madorin config set providers.test.baseUrl https://api.example.com
-
-# 执行测试
-madorin run --instance test --provider test --input "Hello"
+# 直接通过 CLI 测试 Provider（run 不使用 serve 的 --instance 选项）
+madorin run --workspace /path/to/project --provider test --input "Hello"
 ```
+
+`madorin serve` 是独立常驻 Runtime Server，不是 `madorin run` 的后台模式。服务启动需要 `--workspace`，并从受控 stdin 读取握手密钥；Provider 集成协议的具体测试步骤请使用 SDK/协议测试程序连接该实例。
 
 ## 发布
 

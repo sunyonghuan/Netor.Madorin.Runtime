@@ -44,6 +44,7 @@ public sealed class KimiProviderAdapter : IRuntimeProviderAdapter
     private readonly Func<string, IChatClient> _chatClientFactory;
     private readonly ILogger<KimiProviderAdapter> _logger;
     private readonly int _maxTools;
+    private readonly IProviderBlobResolver? _blobResolver;
 
     public KimiProviderAdapter(
         string apiKey,
@@ -51,7 +52,8 @@ public sealed class KimiProviderAdapter : IRuntimeProviderAdapter
         ILoggerFactory? loggerFactory = null,
         IReadOnlyList<ProviderModel>? models = null,
         string providerId = "kimi",
-        int? maxTools = DefaultMaxTools)
+        int? maxTools = DefaultMaxTools,
+        IProviderBlobResolver? blobResolver = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(apiKey);
         ArgumentException.ThrowIfNullOrWhiteSpace(providerId);
@@ -66,6 +68,7 @@ public sealed class KimiProviderAdapter : IRuntimeProviderAdapter
             ?? Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance;
         _logger = logFactory.CreateLogger<KimiProviderAdapter>();
         _maxTools = maxTools ?? DefaultMaxTools;
+        _blobResolver = blobResolver;
         Models = models ?? KimiModelCatalog.All;
         ProviderId = providerId;
 
@@ -125,7 +128,27 @@ public sealed class KimiProviderAdapter : IRuntimeProviderAdapter
             FlattenContent(request.Messages),
             effectiveCt).ConfigureAwait(false);
         var chatClient = _chatClientFactory(request.ModelId);
-        var messages = ConvertMessages(request.Messages, request.Tools);
+        ChatMessage[]? messages = null;
+        RuntimeError? attachmentFailure = null;
+        try
+        {
+            messages = await ConvertMessagesAsync(request.Messages, request.Tools, effectiveCt).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (effectiveCt.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            attachmentFailure = ex is RuntimeProviderException runtimeException
+                ? runtimeException.Error : ProviderErrorFactory.Create("Kimi", ex);
+        }
+
+        if (attachmentFailure is not null)
+        {
+            yield return new InvocationFailedProviderEvent(request.InvocationId, attachmentFailure);
+            yield break;
+        }
         var options = new ChatOptions
         {
             ModelId = request.ModelId,
@@ -145,7 +168,7 @@ public sealed class KimiProviderAdapter : IRuntimeProviderAdapter
         await foreach (var update in MafSkillsAgentFactory.CreateResponseStream(
                                chatClient,
                                request,
-                               messages,
+                               messages!,
                                options,
                                effectiveCt)
                            .ConfigureAwait(false))
@@ -165,6 +188,11 @@ public sealed class KimiProviderAdapter : IRuntimeProviderAdapter
 
                     case TextContent text when !string.IsNullOrEmpty(text.Text):
                         yield return new TextDeltaProviderEvent(request.InvocationId, text.Text);
+                        break;
+
+                    case ProviderOutputAttachmentContent attachment:
+                        yield return new AttachmentCompletedProviderEvent(request.InvocationId,
+                            attachment.Blob, attachment.FileName);
                         break;
 
                     case FunctionCallContent functionCall:
@@ -199,9 +227,10 @@ public sealed class KimiProviderAdapter : IRuntimeProviderAdapter
         yield return new InvocationCompletedProviderEvent(request.InvocationId, finishReason);
     }
 
-    private static ChatMessage[] ConvertMessages(
+    private async ValueTask<ChatMessage[]> ConvertMessagesAsync(
         RuntimeProviderMessage[] source,
-        ToolDescriptor[]? tools)
+        ToolDescriptor[]? tools,
+        CancellationToken ct)
     {
         var messages = new List<ChatMessage>(source.Length);
         foreach (var message in source)
@@ -229,7 +258,11 @@ public sealed class KimiProviderAdapter : IRuntimeProviderAdapter
                     case ToolResultContentBlock toolResult:
                         content.Add(new FunctionResultContent(
                             toolResult.CallId,
-                            ConvertToolResult(toolResult)));
+                            await ProviderToolResultMapper.ToContentAsync(
+                                toolResult, ResolveBlobAsync, ct).ConfigureAwait(false)));
+                        break;
+                    case BlobRefContentBlock blob:
+                        content.Add(await ResolveBlobAsync(blob.Blob, ct).ConfigureAwait(false));
                         break;
                     default:
                         throw new InvalidOperationException(
@@ -240,8 +273,11 @@ public sealed class KimiProviderAdapter : IRuntimeProviderAdapter
             messages.Add(new ChatMessage(ConvertRole(message.Role), content));
         }
 
-        return [.. messages];
+        return ProviderToolResultMapper.ProjectForChatCompletions([.. messages]);
     }
+
+    private ValueTask<DataContent> ResolveBlobAsync(BlobReference blob, CancellationToken ct) =>
+        ProviderBlobContentResolver.ResolveAsync(_blobResolver, blob, ProviderAttachmentRoute.OpenAIChatCompletions, ct);
 
     private List<AITool>? CreateTools(ToolDescriptor[]? tools)
     {
@@ -308,18 +344,6 @@ public sealed class KimiProviderAdapter : IRuntimeProviderAdapter
         }
 
         return converted;
-    }
-
-    private static object ConvertToolResult(ToolResultContentBlock toolResult)
-    {
-        if (toolResult.Content is [TextContentBlock text])
-        {
-            return text.Text;
-        }
-
-        return JsonSerializer.SerializeToElement(
-            toolResult.Content,
-            RuntimeJsonContext.Default.ContentBlockArray);
     }
 
     private static string ResolveToolId(ToolDescriptor[]? tools, string name) =>

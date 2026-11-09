@@ -22,7 +22,7 @@ if (!string.Equals(slug, Slug, StringComparison.Ordinal))
 }
 
 var streams = ProviderWorkerStreams.Bind();
-return await ProviderWorkerHost.RunAsync(
+return await ProviderWorkerHost.RunWithBlobResolverAsync(
     Protocol,
     Slug,
     BuildAdapter,
@@ -32,7 +32,7 @@ return await ProviderWorkerHost.RunAsync(
     declaredCapabilities: null,
     declaredModels: Madorin.AI.Runtime.Providers.Kimi.Models.KimiModelCatalog.All);
 
-static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config)
+static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config, IProviderBlobResolver blobResolver)
 {
     ArgumentNullException.ThrowIfNull(config);
     return new KimiProviderAdapter(
@@ -42,5 +42,5 @@ static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config)
             : config.BaseUrl.Trim(),
         models: ProviderConnectionModels.Resolve(config, Madorin.AI.Runtime.Providers.Kimi.Models.KimiModelCatalog.All),
         providerId: config.ProviderId,
-        maxTools: config.MaxTools);
+        maxTools: config.MaxTools, blobResolver: blobResolver);
 }

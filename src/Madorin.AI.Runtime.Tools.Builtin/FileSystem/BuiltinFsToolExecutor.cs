@@ -14,10 +14,13 @@ public sealed partial class BuiltinFsToolExecutor : IToolExecutor
         encoderShouldEmitUTF8Identifier: false,
         throwOnInvalidBytes: true);
     private readonly WorkspaceMutationLock _workspaceMutationLock;
+    private readonly IToolResultBlobStore? _blobStore;
 
-    public BuiltinFsToolExecutor(WorkspaceMutationLock? workspaceMutationLock = null)
+    public BuiltinFsToolExecutor(WorkspaceMutationLock? workspaceMutationLock = null,
+        IToolResultBlobStore? blobStore = null)
     {
         _workspaceMutationLock = workspaceMutationLock ?? new WorkspaceMutationLock();
+        _blobStore = blobStore;
     }
 
     public bool CanExecute(string toolId) =>
@@ -25,6 +28,7 @@ public sealed partial class BuiltinFsToolExecutor : IToolExecutor
         || string.Equals(toolId, BuiltinToolRegistry.FileListToolId, StringComparison.Ordinal)
         || string.Equals(toolId, BuiltinToolRegistry.FileStatusToolId, StringComparison.Ordinal)
         || string.Equals(toolId, BuiltinToolRegistry.FileReadToolId, StringComparison.Ordinal)
+        || string.Equals(toolId, BuiltinToolRegistry.FileAttachToolId, StringComparison.Ordinal)
         || string.Equals(toolId, BuiltinToolRegistry.FileWriteToolId, StringComparison.Ordinal)
         || string.Equals(toolId, BuiltinToolRegistry.FileAppendToolId, StringComparison.Ordinal)
         || string.Equals(toolId, BuiltinToolRegistry.DirectoryCreateToolId, StringComparison.Ordinal)

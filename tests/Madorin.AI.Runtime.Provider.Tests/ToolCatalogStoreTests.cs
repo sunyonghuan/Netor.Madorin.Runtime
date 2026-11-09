@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Madorin.AI.Runtime.Contracts;
+using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Services.Tools;
 using Madorin.AI.Runtime.Tools.Abstractions;
 using Madorin.AI.Runtime.Tools.Builtin;
@@ -9,6 +10,36 @@ namespace Madorin.AI.Runtime.Provider.Tests;
 [TestClass]
 public sealed class ToolCatalogStoreTests
 {
+    [TestMethod]
+    public void Replace_NullLegacyDescription_IsNormalizedBeforeEstimation()
+    {
+        var store = CreateStore();
+        var snapshot = store.ReplaceHostCatalog(new ToolCatalogReplaceRequest(
+            "legacy-v1", [CreateHostTool("host.recall") with { Description = null! }]));
+
+        Assert.IsTrue(snapshot.TryGetTool("host.recall", out var tool));
+        Assert.IsNotNull(tool);
+        Assert.AreEqual(string.Empty, tool.Description);
+        var estimate = ProviderTokenEstimator.Estimate(new RuntimeProviderRequest(
+            "invocation", "agent", "provider", "model", [], Tools: [tool]));
+        Assert.IsGreaterThan(0, estimate.InputTokens!.Value);
+    }
+
+    [TestMethod]
+    public void Estimate_NullLegacyDescription_MatchesEmptyDescription()
+    {
+        var tool = new ToolDescriptor("host.recall", "host", "Recall", null!, "{}");
+        var request = new RuntimeProviderRequest("invocation", "agent", "provider", "model", [], Tools: [tool]);
+
+        var estimate = ProviderTokenEstimator.Estimate(request);
+        var expected = ProviderTokenEstimator.Estimate(request with
+        {
+            Tools = [tool with { Description = string.Empty }]
+        });
+
+        Assert.AreEqual(expected, estimate);
+    }
+
     [TestMethod]
     public void ReplaceAndPatch_PreserveExistingInvocationSnapshot()
     {

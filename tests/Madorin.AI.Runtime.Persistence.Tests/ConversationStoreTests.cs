@@ -73,6 +73,84 @@ public sealed class ConversationStoreTests
     }
 
     [TestMethod]
+    [DataRow(1)]
+    [DataRow(29)]
+    [DataRow(30)]
+    [DataRow(31)]
+    [DataRow(95)]
+    public async Task ReadRoundsPageAsync_ReturnsLatestCompleteUserAnchoredRounds(int roundCount)
+    {
+        var dataDirectory = CreateTemporaryDirectory();
+        try
+        {
+            const int rounds = 95;
+            var store = new ConversationStore(dataDirectory);
+            for (var round = 1; round <= rounds; round++)
+            {
+                await store.AppendMessageAsync(
+                    "session-round-pages",
+                    new ConversationRecordV1(
+                        $"user-{round}",
+                        (round - 1) * 3L + 1,
+                        $"invocation-{round}",
+                        "user",
+                        "user",
+                        CreateDraft($"prompt-{round}").Content,
+                        DateTimeOffset.UtcNow),
+                    TestContext.CancellationToken);
+                await store.AppendMessageAsync(
+                    "session-round-pages",
+                    new ConversationRecordV1(
+                        $"assistant-{round}-1",
+                        (round - 1) * 3L + 2,
+                        $"invocation-{round}",
+                        "agent-1",
+                        "assistant",
+                        CreateDraft($"reply-{round}").Content,
+                        DateTimeOffset.UtcNow),
+                    TestContext.CancellationToken);
+                await store.AppendMessageAsync(
+                    "session-round-pages",
+                    new ConversationRecordV1(
+                        $"assistant-{round}-2",
+                        (round - 1) * 3L + 3,
+                        $"invocation-{round}",
+                        "agent-2",
+                        "assistant",
+                        CreateDraft($"follow-up-{round}").Content,
+                        DateTimeOffset.UtcNow),
+                    TestContext.CancellationToken);
+            }
+
+            var firstPage = await store.ReadRoundsPageAsync(
+                "session-round-pages",
+                roundCount,
+                ct: TestContext.CancellationToken);
+            var expectedFirstRound = Math.Max(1, rounds - roundCount + 1);
+            Assert.AreEqual((long)((expectedFirstRound - 1) * 3 + 1), firstPage.OldestUserSequence);
+            Assert.HasCount(roundCount * 3, firstPage.Records);
+            Assert.AreEqual(roundCount < rounds, firstPage.HasOlder);
+            Assert.AreEqual("user", firstPage.Records[0].Role);
+            Assert.AreEqual("assistant", firstPage.Records[^1].Role);
+
+            if (roundCount <= 30)
+            {
+                var olderPage = await store.ReadRoundsPageAsync(
+                    "session-round-pages",
+                    30,
+                    firstPage.OldestUserSequence,
+                    ct: TestContext.CancellationToken);
+                Assert.IsTrue(olderPage.Records.All(record => record.Sequence < firstPage.OldestUserSequence));
+                Assert.AreEqual(rounds - roundCount >= 30, olderPage.HasOlder);
+            }
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(dataDirectory);
+        }
+    }
+
+    [TestMethod]
     [DataRow(ConversationStoreFailurePoint.BeforeFileAppend, 0, false)]
     [DataRow(ConversationStoreFailurePoint.AfterRecordPrefix, 0, true)]
     [DataRow(ConversationStoreFailurePoint.AfterRecordBytes, 1, false)]
@@ -515,6 +593,45 @@ public sealed class ConversationStoreTests
                 "Tool intents cannot be reconstructed from JSONL alone.");
             CollectionAssert.Contains(result.UnrecoverableDiagnostics,
                 "Invocation snapshots cannot be reconstructed from JSONL alone.");
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(dataDirectory);
+        }
+    }
+
+    [TestMethod]
+    [DataRow("mcli_fs_attach", "text/plain")]
+    [DataRow("other_tool", "image/png")]
+    public async Task NestedAttachments_KeepReferencesInStreamModeAndProtectSharedBlobOnDelete(
+        string toolId, string contentType)
+    {
+        var dataDirectory = CreateTemporaryDirectory();
+        try
+        {
+            var blobs = new ConversationBlobStore(dataDirectory);
+            var blob = await blobs.StoreAsync(new byte[] { 255, 0, 254 }, contentType, "run",
+                ct: TestContext.CancellationToken);
+            var store = new ConversationStore(dataDirectory);
+            using var content = JsonDocument.Parse($$$"""
+                [{"type":"tool_result","callId":"call","toolId":"{{{toolId}}}","success":true,"content":[{"type":"blob_ref","blob":{"blobId":"{{{blob.BlobId}}}","length":3,"sha256":"{{{blob.Sha256}}}","contentType":"{{{contentType}}}","accessScope":"run","expiresAt":"{{{blob.ExpiresAt:O}}}"}}]}]
+                """);
+            var draft = CreateDraft("unused") with { Content = content.RootElement.Clone() };
+            await store.AppendMessageAsync("session-one", draft, TestContext.CancellationToken);
+            await store.AppendMessageAsync("session-two", draft, TestContext.CancellationToken);
+            var metadata = await store.GetHistoryMetadataAsync("session-one", TestContext.CancellationToken);
+            Assert.AreEqual(blob.BlobId, Assert.ContainsSingle(metadata.BlobIds));
+            var stream = await store.ReadPageAsync("session-one", null, 1,
+                new ConversationReadOptions(ConversationBlobReadMode.Stream, MaxExpandedBlobBytes: 1),
+                TestContext.CancellationToken);
+            Assert.AreEqual("blob_ref", stream[0].Content[0].GetProperty("content")[0].GetProperty("type").GetString());
+            var omitted = await store.ReadPageAsync("session-one", null, 1,
+                new ConversationReadOptions(ConversationBlobReadMode.Omit), TestContext.CancellationToken);
+            Assert.AreEqual("text", omitted[0].Content[0].GetProperty("content")[0].GetProperty("type").GetString());
+            var canonical = await store.ReadPageAsync("session-one", null, 1, ct: TestContext.CancellationToken);
+            Assert.AreEqual("blob_ref", canonical[0].Content[0].GetProperty("content")[0].GetProperty("type").GetString());
+            await store.PrepareSessionDeletionAsync("session-one", true, TestContext.CancellationToken);
+            Assert.IsTrue(blobs.Exists(blob.BlobId));
         }
         finally
         {

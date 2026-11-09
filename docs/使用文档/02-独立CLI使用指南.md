@@ -29,6 +29,8 @@ madorin-cli.exe
 madorin-cli
 ```
 
+发布包中的实际文件名是 `madorin-cli.exe` 或 `madorin-cli`；本文后续使用的 `madorin` 是加入 PATH 后的命令别名。你也可以直接把示例中的 `madorin` 替换为发布包中的实际文件名。
+
 ### 添加到 PATH（推荐）
 
 **Windows:**
@@ -47,6 +49,8 @@ export PATH="$PATH:/path/to/madorin/bin"
 
 ```bash
 madorin version
+# 等价的根级快捷写法
+madorin --version
 ```
 
 ## 配置管理
@@ -79,37 +83,41 @@ madorin config validate
 
 ```json
 {
-  "schemaVersion": 1,
+  "defaultProvider": "my-openai",
+  "defaultModel": "gpt-5",
+  "defaultAgent": "default",
   "providers": [
     {
-      "id": "my-openai",
+      "name": "my-openai",
       "protocol": "OpenAI",
       "apiKey": "sk-...",
-      "baseUrl": "https://api.openai.com/v1"
+      "baseUrl": "https://api.openai.com/v1",
+      "models": ["gpt-5"]
     },
     {
-      "id": "my-anthropic",
+      "name": "my-anthropic",
       "protocol": "Anthropic",
       "apiKey": "sk-ant-...",
-      "baseUrl": "https://api.anthropic.com"
+      "baseUrl": "https://api.anthropic.com",
+      "models": ["claude-opus-4-1"]
     },
     {
-      "id": "deepseek",
+      "name": "deepseek",
       "protocol": "DeepSeek",
       "apiKey": "sk-...",
-      "baseUrl": "https://api.deepseek.com"
+      "baseUrl": "https://api.deepseek.com/v1",
+      "models": ["deepseek-chat"]
     }
-  ],
-  "selection": {
-    "provider": "my-openai",
-    "model": "gpt-4o",
-    "agent": "default"
-  },
-  "proxy": {
-    "enabled": true,
-    "url": "http://proxy.company.com:8080"
-  }
+  ]
 }
+```
+
+这是全局独立 CLI 配置 `~/.madorin/config.json` 的结构。工作区配置 `<workspace>/.madorin/config.json` 只用于覆盖当前工作区的 Provider、模型和 Agent 选择，结构为 `{"schemaVersion":1,"selection":{"provider":"my-openai","model":"gpt-5","agent":"default"}}`；代理等扩展能力应按当前 Provider 配置和宿主环境设置，不要把未定义的 `proxy` 节点直接写入独立配置。
+
+查询当前构建支持的 Provider 协议名称：
+
+```bash
+madorin provider protocols
 ```
 
 ### 支持的 Provider
@@ -124,6 +132,7 @@ madorin config validate
 | Gemini | `Gemini` | Google Gemini |
 | GLM | `GLM` | 智谱 GLM |
 | Ollama | `Ollama` | 本地 Ollama 服务 |
+| Custom | `Custom` | 自定义 HTTP Provider 配置 |
 | Azure OpenAI | `Azure OpenAI` | Azure OpenAI Service（实验性） |
 | 自定义兼容 | `OpenAI Compatible` | 兼容 OpenAI 协议的服务 |
 
@@ -170,31 +179,54 @@ madorin run --input "长时间任务" --timeout 300
 # 继续已有会话
 madorin run --session <session-id> --input "继续刚才的话题"
 
-# 列出所有会话
+# 列出最近 20 条活动会话（默认状态 active）
 madorin session list
 
-# 查看会话详情
-madorin session get <session-id>
+# 指定数量，并过滤归档状态、更新时间或标题
+madorin session list --limit 10
+madorin session list --status all --since 2026-09-01T00:00:00+08:00
+madorin session list --search "订单分析"
+
+# 默认最多返回 200 条；查询归档会话需指定状态
+madorin session list --status archived --limit 200
+
+# 查看会话详情与消息摘要
+madorin session show <session-id> --messages
+
+# 在交互 REPL 内列出最近 10 个会话，按时间从新到旧
+/resume
+
+# 指定列出数量（范围 1 到 100）
+/resume 10
+
+# 恢复所选会话，在 REPL 内继续对话
+/resume <session-id>
 ```
+
+`/resume` 列表时间使用本地时间并精确到秒。列表中的完整 Session ID 可直接传给 `/resume <session-id>`，也可在退出程序后使用 `madorin run --session <session-id>` 恢复。
 
 ### 输出格式
 
 ```bash
 # 文本格式（默认，人类可读）
-madorin run --input "你好" --format text
+madorin run --input "你好" --output-format text
 
 # JSON 格式（单个 JSON 对象，包含完整结果）
-madorin run --input "你好" --format json
+madorin run --input "你好" --output-format json
 
 # JSONL 格式（流式事件，每行一个 JSON）
-madorin run --input "你好" --format jsonl
+madorin run --input "你好" --output-format jsonl
 ```
 
-## 三种运行模式
+`--json` 是全局机器可读输出选项；`--output-format` 用于选择 `text`、`json` 或 `jsonl` 运行结果格式。`--input` 与 `--input-file` 不能同时使用。
 
-### Expert 模式（默认）
+## 运行模式
+
+### Expert 模式（当前 CLI 执行模式）
 
 深度分析和复杂决策，适合技术问题和深入研究。支持子 Agent 委派、工具调用和精细化请求参数控制。
+
+`--mode expert` 是当前 CLI 的实际执行模式。`--mode standalone` 仍被接受以兼容旧调用方式，但会解析为同一个 Expert 执行模式，不代表独立的第三种模式。
 
 ```bash
 # 基础对话
@@ -230,65 +262,132 @@ Expert 模式支持以下请求控制参数，用于精细化调整模型行为�
 # 列出所有会话
 madorin session list
 
-# 限制数量
+# 指定数量（默认 20，最多 200）
 madorin session list --limit 10
 
-# 按时间过滤
-madorin session list --since 2026-09-01
+# 按状态过滤：active（默认）、archived 或 all
+madorin session list --status archived
+madorin session list --status all
+
+# 按 Expert 模式、更新时间、标题关键词过滤
+madorin session list --mode expert
+madorin session list --since 2026-09-01T00:00:00+08:00
+madorin session list --search "项目复盘"
+
+# 继续游标分页
+madorin session list --limit 20 --cursor <next-cursor>
 ```
 
 ### 查看会话
 
 ```bash
-# 查看会话元数据
-madorin session get <session-id>
+# 查看会话详情
+madorin session show <session-id>
 
-# 列出会话消息
-madorin session messages <session-id>
-
-# 读取完整历史
-madorin session history <session-id>
+# 同时包含消息元数据摘要
+madorin session show <session-id> --messages
 ```
+
+`--messages` 输出消息元数据摘要；需要读取完整对话内容时，使用 `session export`。
 
 ### 导出会话
 
 ```bash
-# 导出为 JSONL
-madorin session export <session-id> --output conversation.jsonl
+# 导出为 Markdown（默认）
+madorin session export <session-id> --output conversation.md
 
-# 导出为 JSON（单个对象）
-madorin session export <session-id> --format json --output conversation.json
+# 导出为纯文本或 JSONL
+madorin session export <session-id> --format txt --output conversation.txt
+madorin session export <session-id> --format jsonl --output conversation.jsonl
+
+# 按需包含思考和工具调用细节
+madorin session export <session-id> --include-reasoning --include-tool-calls
 ```
 
-### 恢复会话
+### 压缩会话上下文
 
 ```bash
-# 从检查点恢复
-madorin session resume <session-id>
-```
+# 预览摘要压缩方案，不调用模型、不写缓存
+madorin session compact <session-id> --dry-run
 
-### 删除会话
-
-```bash
-# 删除单个会话
-madorin session delete <session-id>
-
-# 删除多个会话
-madorin session delete <session-id-1> <session-id-2>
-
-# 删除所有会话（危险操作，会提示确认）
-madorin session delete --all
-```
-
-### 压缩和归档
-
-```bash
-# 压缩会话（减少存储空间）
+# 使用默认 summary 策略压缩
 madorin session compact <session-id>
 
-# 归档会话（移动到归档目录）
-madorin session archive <session-id>
+# 使用滑动窗口并设置保留 Token 预算
+madorin session compact <session-id> --strategy sliding-window --keep-last-tokens 12000
+
+# 临时指定用于压缩的 Provider 和模型
+madorin session compact <session-id> --provider my-openai --model gpt-5
+
+# 强制重新生成当前投影
+madorin session compact <session-id> --force
 ```
+
+压缩生成上下文投影，原始历史仍保留；它与删除会话、恢复检查点是不同操作。
+
+### 删除和归档会话
+
+```bash
+# 删除必须显式确认
+madorin session delete <session-id> --confirm
+
+# 同时清理未被其他会话引用的 Blob
+madorin session delete <session-id> --confirm --include-blobs
+
+# 归档和取消归档
+madorin session archive <session-id>
+madorin session unarchive <session-id>
+```
+
+删除命令每次只接受一个 Session ID，不支持批量 ID 或 `--all`。
+
+## 交互式 REPL 命令
+
+运行 `madorin` 或 `madorin run` 且未提供单次输入时进入 REPL。直接输入内容开始一轮对话，以 `/` 开头的输入作为交互命令。默认帮助为中文；使用 `/help en` 切换英文，使用 `/help zh` 切回中文。输入 `/help <命令名>` 查看单个命令，也支持中文别名，例如 `/help 历史`。
+
+| 命令 | 用途 |
+| --- | --- |
+| `/help [命令]` | 列出交互命令或查看单个命令；语言别名支持 `/help en`、`/help english`、`/help zh`、`/help cn`、`/help chinese`、`/help 中文` |
+| `/exit`、`/quit` | 保存当前会话并退出 |
+| `/provider [名称]`、`/model [编号]`、`/agent [编号]` | 选择下一轮的 Provider、模型或 Agent |
+| `/session` | 查看当前 Session 和下一轮选择 |
+| `/new` | 保留旧会话，并在下一次发送内容时新建会话 |
+| `/resume [条数 \| 会话编号]` | 列出最近会话或恢复指定会话；默认 10 条，条数范围 1–100 |
+| `/history [条数 \| all]` | 查看当前会话最近 5 条消息、指定数量或全部消息 |
+| `/export [路径]` | 将当前会话导出为 Markdown；省略路径时输出到屏幕 |
+| `/compact`、`/context` | 压缩当前会话上下文，或查看完整历史与模型实际上下文估算 |
+| `/cd [目录]` | 查看或切换工作区；目标目录必须存在 |
+| `/status`、`/mode` | 查看 Runtime 状态和当前运行模式 |
+| `/clear` | 清屏，不删除会话和历史 |
+| `/memory [global \| project \| effective]` | 查看全局、项目或合并后的记忆；省略参数等同 `effective` |
+| `/remember <global \| project>` | 输入一行内容，追加到指定记忆文件 |
+| `/tools`、`/skill <list \| show 名称 \| refresh>` | 查看工具权限或管理本地 Skills |
+| `/permission`、`/instructions` | 查看或切换本次 CLI 进程的工具权限和工作区说明加载方式 |
+
+离开已有会话时，REPL 会显示 Session ID 和两种恢复命令：程序内使用 `/resume <session-id>`，退出后使用 `madorin run --session <session-id>`。状态行显示 `working 3s`、`thinking 5s` 或 `tool:<toolname> 8s` 等当前状态和耗时；每轮结束后会显示上下文大小，例如 `1.25k`。
+
+旧的 `/pause` 和 `/interrupt` 命令已移除。正在执行的 Run 按一次 Ctrl+C 会取消当前 Run 并返回 REPL；再次按 Ctrl+C 会退出。`/help` 中列出的命令可以按中文别名搜索，例如 `/help 历史`；帮助语言也支持 `english`、`cn`、`chinese` 和 `中文` 别名。
+
+## 全局选项和 `run` 选项
+
+`--workspace`、`--data-dir`、`--log-level`、`--no-color`、`--json` 是可用的全局选项。`run` 还支持：
+
+| 选项 | 用途 |
+| --- | --- |
+| `--provider`、`--model`、`--agent`、`--mode` | 选择模型执行配置和 Expert 模式 |
+| `--session` | 续接已有 Session |
+| `--input`、`--input-file` | 提供任务内容，二者不能同时指定 |
+| `--output-file`、`--output-format`、`--no-stream` | 控制结果目的地、格式和流式行为 |
+| `--timeout`、`--lock-wait` | 设置任务超时和工作区锁等待时间 |
+| `--allow-tools`、`--permission-mode` | 配置工具白名单和权限模式 |
+| `--instructions-mode` | 设置工作区 `AGENTS.md` 自动加载方式 |
+| `--temperature`、`--top-p`、`--top-k`、`--max-tokens` | 控制模型采样和输出长度 |
+| `--frequency-penalty`、`--presence-penalty`、`--seed`、`--stop` | 控制惩罚项、随机种子和停止序列 |
+| `--response-format` | 选择文本或 JSON 结构化输出 |
+
+交互权限模式为 `ask-all`、`auto-tools` 和 `auto-all`。`auto-tools` 自动批准工具请求，但工作流审批仍会询问；`auto-all` 自动批准工具和工作流请求。权限模式仅在当前 CLI 进程内有效。
+
+这些是当前源码中 `run` 的参数。Provider 对请求控制字段的支持有差异，详见[请求控制参数详解](./请求控制参数详解.md)。
 
 ## Agent 管理
 
@@ -307,8 +406,9 @@ madorin agent list
 madorin agent create
 
 # 指定名称和指令
-madorin agent create --name code-reviewer \
-  --instruction "你是一个代码审查专家，关注性能和安全"
+madorin agent create code-reviewer \
+  --name "Code Reviewer" \
+  --system-prompt "你是一个代码审查专家，关注性能和安全"
 ```
 
 ### 编辑 Agent
@@ -322,6 +422,8 @@ madorin agent edit <agent-name>
 ```bash
 madorin agent delete <agent-name>
 ```
+
+Agent ID 是位置参数；创建和编辑时可使用 `--name`、`--description`、`--system-prompt`、`--provider`、`--model` 和 `--temperature` 配置 Agent。创建 ID 的格式必须是安全文件名，删除默认 Agent 时还需指定 `--replacement`。JSON 模式下交互式 Agent 创建/编辑不可用。
 
 ### 使用 Agent
 
@@ -337,39 +439,70 @@ madorin config edit
 
 Runtime 支持全局和项目级记忆文件。
 
-### 列出记忆
+### 初始化和查看记忆
 
 ```bash
-# 全局记忆
-madorin memory list --scope global
+# 初始化全局记忆文件
+madorin memory init global
 
-# 项目记忆
-madorin memory list --scope project
+# 初始化项目记忆文件
+madorin memory init project
+
+# 查看全局、项目或合并后的有效记忆
+madorin memory show global
+madorin memory show project
+madorin memory show effective
 ```
 
-### 创建记忆
+### 追加和编辑记忆
 
 ```bash
-# 全局记忆
-madorin memory create --scope global --name "user-preference" \
-  --content "用户偏好使用 Python 和 TypeScript"
+# 追加一条全局记忆，命令从标准输入读取一行内容
+echo "用户偏好使用 Python 和 TypeScript" | madorin memory add global
 
-# 项目记忆
-madorin memory create --scope project --name "project-context" \
-  --content "这是一个 .NET 10 项目，使用 C# 和 Native AOT"
+# 追加一条项目记忆
+echo "这是一个 .NET 10 项目，使用 C# 和 Native AOT" | madorin memory add project
 ```
 
-### 编辑记忆
+### 编辑和清空记忆
 
 ```bash
-madorin memory edit --scope global --name "user-preference"
+# 编辑记忆文件；没有可用编辑器时回退到交互输入
+madorin memory edit global
+madorin memory edit project
+
+# 清空项目记忆，默认需要确认
+madorin memory clear project
+
+# 脚本或 JSON 模式下跳过确认
+madorin memory clear project --yes
 ```
 
-### 删除记忆
+记忆命令使用位置参数 `global` 或 `project`；`effective` 只用于 `memory show`，表示合并后的有效内容。
+
+## Skills 管理
+
+Skills 可以来自当前工作区、用户全局目录，或两者合并后的有效目录。默认 scope 为 `effective`。
 
 ```bash
-madorin memory delete --scope global --name "user-preference"
+# 列出当前生效的 Skills
+madorin skill list
+
+# 按来源筛选：effective、workspace 或 global
+madorin skill list --scope workspace
+madorin skill list --scope global
+
+# 查看指定 Skill 定义
+madorin skill show <skill-name> --scope effective
+
+# 校验 Skills 定义，不执行其中脚本
+madorin skill validate
+
+# 重新扫描并刷新本地 Skill catalog
+madorin skill refresh
 ```
+
+交互式 REPL 也支持 `/skill list`、`/skill show <名称>` 和 `/skill refresh`。CLI 的 `skill refresh` 会读取并刷新当前 catalog；它不修改 Skill 文件。
 
 ## 数据管理
 
@@ -379,31 +512,56 @@ madorin memory delete --scope global --name "user-preference"
 # 检查完整性
 madorin db check
 
-# 检查并自动修复
-madorin db check --repair
+# 输出每一项数据库检查的详细结果
+madorin db check --verbose
+
+# 先预览可修复的问题
+madorin db repair --dry-run
+
+# 确认并执行修复；--yes 跳过交互确认
+madorin db repair --yes
 ```
+
+`db repair --dry-run` 只显示可识别的 JSONL 尾部损坏和消息索引漂移，不会获取写锁、创建备份或修改数据。确认计划后，使用 `db repair --yes` 执行修复；不加 `--yes` 时会交互询问。JSON 模式下执行修复必须提供 `--yes`。该命令不使用 `--confirm`。
 
 ### 数据库维护
 
 ```bash
-# 重建索引
-madorin db rebuild
-
 # 压缩数据库
-madorin db compact
+madorin db vacuum
 
 # 备份数据库
-madorin db backup --output backup-2026-09-18.db
+madorin db backup --output backup-2026-09-18.db --include-messages
+
+# 预览数据库迁移，或迁移到最新支持版本
+madorin db migrate --dry-run
+madorin db migrate
+
+# 预览并迁移到指定的目标 schema 版本
+madorin db migrate --to 21 --dry-run
+madorin db migrate --to 21
+
+# 从权威消息文件重建索引和状态库；先预览，再明确确认
+madorin db rebuild --dry-run
+madorin db rebuild --confirm
 ```
+
+`db repair` 用于修复可识别的 JSONL 尾部损坏和消息索引漂移；`db rebuild` 会根据权威消息文件重建现有状态数据库。重建前应先执行 `--dry-run` 检查计划。
 
 ### 存储管理
 
 ```bash
 # 检查 Blob 存储
-madorin storage check
+madorin storage check --verify-hashes
 
-# 回收未引用的 Blob
-madorin storage gc
+# 预览待回收的未引用 Blob
+madorin storage gc --dry-run
+
+# 回收默认至少 7 天未引用的 Blob，需要确认
+madorin storage gc --confirm
+
+# 自定义未引用保留天数
+madorin storage gc --older-than 30 --confirm
 ```
 
 ## 常驻服务
@@ -413,18 +571,26 @@ madorin storage gc
 ### 启动服务
 
 ```bash
-# 启动默认实例
-madorin serve
+# 生成本地示例密钥；生产环境应从密钥管理服务注入
+export MADORIN_HANDSHAKE_SECRET="$(openssl rand -base64 32)"
 
-# 指定实例名称
-madorin serve --instance main
-
-# 指定数据目录
-madorin serve --data-dir /path/to/data
-
-# 限制并发数
-madorin serve --max-concurrent 5
+# 启动服务：workspace 必填，密钥通过 stdin 第一行传入
+printf '%s\n' "$MADORIN_HANDSHAKE_SECRET" | madorin serve --workspace /path/to/project --instance main
 ```
+
+服务还支持 `--data-dir`、`--config-dir`、`--log-dir`、`--pipe-prefix`、`--max-runs`、`--http-port` 和 `--log-level`。这些是同一条 `serve` 命令的可选参数，例如：
+
+```bash
+printf '%s\n' "$MADORIN_HANDSHAKE_SECRET" | madorin serve \
+  --workspace /path/to/project \
+  --data-dir /path/to/data \
+  --instance main \
+  --max-runs 5 \
+  --log-dir /path/to/logs \
+  --http-port 5080
+```
+
+服务会从 stdin 第一行读取握手密钥；连接该实例的客户端必须使用相同密钥。不要把实际密钥写入命令参数、脚本、历史记录或日志。
 
 ### 控制服务
 
@@ -440,7 +606,21 @@ madorin ctl runs --instance main
 
 # 停止服务（优雅关闭）
 madorin ctl shutdown --instance main
+
+# 取消指定的活动 Run
+madorin ctl cancel <run-id> --reason "用户取消"
+
+# 为等待凭据的 Run 更新凭据；API Key 从环境变量读取
+madorin ctl credential update --run <run-id> --provider <provider-id> --api-key-env MADORIN_API_KEY
+
+# 可选指定 Provider profile 和带时区的过期时间
+madorin ctl credential update --run <run-id> --provider <provider-id> --profile production --api-key-env MADORIN_API_KEY --expires-at 2026-12-31T23:59:59+08:00
+
+# 只查看指定 Session 的活动 Run
+madorin ctl runs --session <session-id> --instance main
 ```
+
+`ctl credential update` 只适用于等待凭据的 Run。不要把 API Key 直接写进命令行参数；使用 `--api-key-env` 指向已设置的环境变量。
 
 ## 工作区与数据隔离
 
@@ -490,6 +670,16 @@ madorin run --data-dir /custom/data --input "任务"
 madorin doctor
 ```
 
+`doctor` 默认只读检查配置、Provider 访问、数据库和运行环境。使用 `--provider <id>` 只检查指定 Provider；`--fix` 会先备份数据并尝试修复已识别的数据库问题，`--yes` 可用于非交互确认且必须与 `--fix` 一起使用：
+
+```bash
+madorin doctor --provider my-openai
+madorin doctor --fix
+madorin doctor --fix --yes
+```
+
+修复行为会写入数据，建议先运行默认只读检查并保留备份。
+
 输出示例：
 
 ```
@@ -518,19 +708,15 @@ madorin run --log-level Error --input "任务"
 | --- | --- |
 | `0` | 成功 |
 | `1` | 通用错误 |
-| `2` | 配置错误 |
-| `3` | 网络错误 |
-| `4` | 认证失败 |
-| `5` | 数据库错误 |
-| `6` | Provider 不支持 |
-| `7` | 会话不存在 |
-| `8` | 工作区锁定失败 |
-
-详见 [自动化与故障排查](../开发文档/06-自动化与故障排查.md)。
+| `2` | 参数或配置错误 |
+| `3` | 认证失败 |
+| `4` | 工作区或数据错误 |
+| `5` | Runtime 连接失败 |
+| `130` | 用户中断，例如 Ctrl+C |
 
 ## 全局选项
 
-所有命令支持的全局选项：
+常用全局选项如下；以具体命令的 `--help` 输出为准：
 
 ```bash
 --workspace <path>   # 指定工作区目录
@@ -550,14 +736,18 @@ madorin run --log-level Error --input "任务"
 | `madorin ctl` | 控制运行实例 |
 | `madorin version` | 查看版本信息 |
 | `madorin doctor` | 检查环境状态 |
+| `madorin provider protocols` | 列出可用 Provider 协议 |
 | `madorin config` | 管理配置 |
 | `madorin agent` | 管理 Agent |
+| `madorin skill` | 查看、校验和刷新 Skills |
 | `madorin memory` | 管理记忆 |
 | `madorin session` | 管理会话 |
 | `madorin db` | 数据库维护 |
 | `madorin storage` | 存储管理 |
 
 完整命令参考见 [CLI 命令矩阵](../命令规范/09-CLI命令矩阵.md)。
+
+本指南提供常用操作和 REPL 命令说明；完整参数、确认要求和命令行为以命令矩阵及具体命令的 `--help` 为准。
 
 ## 高级用法
 
@@ -566,12 +756,11 @@ madorin run --log-level Error --input "任务"
 适用于脚本和 CI/CD：
 
 ```bash
-# 禁用所有交互式提示
-madorin run --input "任务" --no-interactive
-
 # 使用 JSON 输出便于解析
 madorin run --input "任务" --json
 ```
+
+`run` 当前没有 `--no-interactive` 选项；脚本应使用 `--input` 或 `--input-file` 提供输入，并结合 `--json`、`--output-format json/jsonl` 或 `--output-file` 获取机器可读结果。
 
 ### 批量处理
 
@@ -589,15 +778,17 @@ done
 madorin run --input "任务" --timeout 60
 
 # 在另一个终端取消运行
-madorin ctl cancel --run-id <run-id>
+madorin ctl cancel <run-id> --reason "操作员取消"
 ```
+
+当前 CLI 退出码：`0` 表示成功，`1` 通用错误，`2` 参数或配置错误，`3` 认证失败，`4` 工作区或数据错误，`5` Runtime 连接失败，`130` 用户中断。旧版部署脚本如仍按退出码 6–8 分类，应同步迁移。
 
 ## 最佳实践
 
 1. **配置管理**：在项目根目录创建 `.madorin/config.json`，便于团队共享配置
 2. **版本控制**：`.madorin/config.json` 可以提交，但其他数据目录应加入 `.gitignore`
 3. **安全**：不要在配置文件中硬编码 API Key，使用环境变量或密钥管理工具
-4. **定期维护**：定期运行 `madorin db compact` 和 `madorin storage gc` 清理空间
+4. **定期维护**：按需运行 `madorin db vacuum` 和 `madorin storage gc --dry-run` 检查、维护存储
 5. **备份**：重要会话使用 `madorin session export` 备份
 
 ## 下一步

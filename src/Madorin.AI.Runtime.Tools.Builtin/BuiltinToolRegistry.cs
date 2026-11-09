@@ -14,6 +14,7 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
     public const string FileListToolId = "mcli_fs_list";
     public const string FileStatusToolId = "mcli_fs_stat";
     public const string FileReadToolId = "mcli_fs_read";
+    public const string FileAttachToolId = "mcli_fs_attach";
     public const string FileWriteToolId = "mcli_fs_write";
     public const string FileAppendToolId = "mcli_fs_append";
     public const string DirectoryCreateToolId = "mcli_fs_mkdir";
@@ -22,7 +23,7 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
     public const string FileDeleteToolId = "mcli_fs_delete";
     public const string FileSearchToolId = "mcli_fs_search";
     public const string FileEditToolId = "mcli_fs_edit";
-    public const string ProcessRunToolId = "mcli_process";
+    public const string CommandToolId = CommandToolAuthorization.ToolId;
     public const string HttpRequestToolId = "mcli_http";
     public const string DelegateToAgentToolId = "mcli_delegate_agent";
     public const string AgentJobCreateToolId = "mcli_agent_job_create";
@@ -74,6 +75,15 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
             "Reads a text file by line range.",
             """{"type":"object","properties":{"path":{"type":"string"},"encoding":{"type":"string","enum":["auto","utf-8","utf-16le","utf-16be","gb2312","gbk","gb18030","ascii","latin1"]},"startLine":{"type":"integer","minimum":1},"endLine":{"type":"integer","minimum":1}},"required":["path","encoding"],"additionalProperties":false}""",
             """{"type":"object","properties":{"content":{"type":"string"},"encoding":{"type":"string"},"codePage":{"type":"integer"},"byteLength":{"type":"integer"},"startLine":{"type":"integer"},"endLine":{"type":"integer"},"totalLines":{"type":"integer"},"sha256":{"type":"string"},"hasBom":{"type":"boolean"},"lineEnding":{"type":"string"},"endsWithNewline":{"type":"boolean"},"truncated":{"type":"boolean"}},"required":["content","encoding","codePage","byteLength","startLine","endLine","totalLines","sha256","hasBom","lineEnding","endsWithNewline","truncated"],"additionalProperties":false}""",
+            Capabilities: ["filesystem.read"],
+            Risk: ToolRiskLevel.SensitiveRead),
+        new(
+            FileAttachToolId,
+            "mcli",
+            "Attach file",
+            "Reads one authorized local file as an attachment. Returns bounded metadata and a separate Blob, without decoding the file as text.",
+            """{"type":"object","properties":{"path":{"type":"string"},"expectedHash":{"type":"string"}},"required":["path"],"additionalProperties":false}""",
+            """{"type":"object","properties":{"fileName":{"type":"string"},"contentType":{"type":"string"},"byteLength":{"type":"integer"},"sha256":{"type":"string"}},"required":["fileName","contentType","byteLength","sha256"],"additionalProperties":false}""",
             Capabilities: ["filesystem.read"],
             Risk: ToolRiskLevel.SensitiveRead),
         new(
@@ -137,12 +147,26 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
             Risk: ToolRiskLevel.Write,
             IsIdempotent: false),
         new(
-            ProcessRunToolId,
+            CommandToolId,
             "mcli",
-            "Run process",
-            "Runs an allowed executable.",
-            """{"type":"object","properties":{"fileName":{"type":"string"},"arguments":{"type":"array","items":{"type":"string"}},"workingDirectory":{"type":"string"},"environment":{"type":"object","additionalProperties":{"type":"string"}},"stdin":{"type":"string"}},"required":["fileName"],"additionalProperties":false}""",
-            """{"type":"object","properties":{"exitCode":{"type":"integer"},"stdout":{"type":"string"},"stderr":{"type":"string"},"stdoutTruncated":{"type":"boolean"},"stderrTruncated":{"type":"boolean"}},"required":["exitCode","stdout","stderr","stdoutTruncated","stderrTruncated"],"additionalProperties":false}""",
+            "Run command",
+            "Run commands and programs such as git, dotnet, Python, and installed CLIs. Put the command and its arguments in script; separate multiple commands with newlines to execute them in one shell process. Use the current platform's shell syntax and quote paths containing spaces. Script text, paths, and arguments use Unicode. Keep script within 8 KiB UTF-8: use mcli_fs_write for long prompts, request bodies, or scripts, then pass file paths using the program's supported file-input options or invoke script files with their interpreter. Do not read a long file back into a command-line argument. Alternatively, use stdin (up to 1 MiB UTF-8) when the program supports standard input. Input errors are returned as tool failures; correct the input and retry with a new tool call id. Permission denials must not be bypassed. Returns shell, exitCode, stdout, stderr, stdoutTruncated, and stderrTruncated. Example: {\"script\":\"git status\\ngit diff\"}.",
+            """
+            {
+              "type":"object",
+              "properties":{
+                "script":{"type":"string","minLength":1,"description":"Required command or multiline script, including program arguments. Maximum 8 KiB of UTF-8 script text."},
+                "shell":{"type":"string","enum":["auto","pwsh","powershell","cmd","bash","zsh","sh"],"default":"auto","description":"Script interpreter. Default auto: Windows selects pwsh, then powershell, then cmd; macOS/Linux selects bash, then zsh, then sh. Commands and programs belong in script."},
+                "workingDirectory":{"type":"string","description":"Initial working directory. Default: current workspace root. Relative paths resolve from the workspace root."},
+                "environment":{"type":"object","additionalProperties":{"type":"string"},"default":{},"description":"Environment variable overrides, as string values. Default: inherit the full CLI environment."},
+                "stdin":{"type":"string","default":"","description":"Standard input text, up to 1 MiB UTF-8. Use for long prompts or request bodies only when the program supports standard input. Default: empty input followed by EOF."},
+                "encoding":{"type":"string","enum":["utf-8","gbk","gb18030"],"default":"utf-8","description":"Character encoding for stdin, stdout, and stderr. Default utf-8. Select gbk or gb18030 for programs using that stream encoding."}
+              },
+              "required":["script"],
+              "additionalProperties":false
+            }
+            """,
+            """{"type":"object","properties":{"exitCode":{"type":"integer"},"stdout":{"type":"string"},"stderr":{"type":"string"},"stdoutTruncated":{"type":"boolean"},"stderrTruncated":{"type":"boolean"},"shell":{"type":"string"}},"required":["exitCode","stdout","stderr","stdoutTruncated","stderrTruncated","shell"],"additionalProperties":false}""",
             Capabilities: ["process.execute"],
             Risk: ToolRiskLevel.Process,
             IsIdempotent: false),
@@ -305,7 +329,7 @@ public sealed class BuiltinToolRegistry : IBuiltinToolRegistry
     private static readonly IReadOnlyList<ToolDescriptor> Tools = Array.AsReadOnly(
         [.. AdvertisedTools, .. BuiltinToolAliasCatalog.Tools]);
 
-    public string CatalogVersion => "3.5.1";
+    public string CatalogVersion => "3.5.3";
 
     public IReadOnlyList<ToolDescriptor> GetTools() => Tools;
 

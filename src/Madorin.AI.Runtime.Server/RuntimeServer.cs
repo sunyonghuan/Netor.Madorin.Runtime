@@ -14,6 +14,7 @@ using Madorin.AI.Runtime.Server.Auth;
 using Madorin.AI.Runtime.Server.Http;
 using Madorin.AI.Runtime.Services;
 using Madorin.AI.Runtime.Services.Memory;
+using Madorin.AI.Runtime.Services.Prompt;
 using Madorin.AI.Runtime.Services.Skills;
 using Madorin.AI.Runtime.Services.Tools;
 using Madorin.AI.Runtime.Tools.Abstractions;
@@ -32,6 +33,7 @@ public sealed class RuntimeServer : IAsyncDisposable
     private readonly FileStream _instanceNameLock;
     private readonly string _dataDirectory;
     private readonly string _databaseConnectionString;
+    private readonly ConversationStore _conversationStore;
     private readonly string _handshakeSecret;
     private readonly TimeProvider _timeProvider;
     private readonly DateTimeOffset _startedAt;
@@ -83,6 +85,7 @@ public sealed class RuntimeServer : IAsyncDisposable
         _instanceNameLock = instanceNameLock;
         _dataDirectory = options.DataDirectory;
         _databaseConnectionString = databaseConnectionString;
+        _conversationStore = new ConversationStore(options.DataDirectory);
         _handshakeSecret = options.HandshakeSecret
             ?? throw new ArgumentException("A handshake secret is required.", nameof(options));
         _timeProvider = options.TimeProvider;
@@ -108,7 +111,8 @@ public sealed class RuntimeServer : IAsyncDisposable
         _compactionService = new SessionCompactionService(
             _dataDirectory,
             _databaseConnectionString,
-            selection => ResolveProviderAdapter(selection, selection.DefaultSelection.ProviderId));
+            selection => ResolveProviderAdapter(selection, selection.DefaultSelection.ProviderId),
+            diagnosticLog);
         var userHome = options.MemoryUserHome
             ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         ArgumentException.ThrowIfNullOrWhiteSpace(userHome);
@@ -128,7 +132,8 @@ public sealed class RuntimeServer : IAsyncDisposable
             agentContextComposer,
             memoryFiles,
             CreateNegotiatedLimits(supportsStage5: true),
-            _blobStore);
+            _blobStore,
+            options.WorkspaceInstructionsState ?? new WorkspaceInstructionsState(enabled: true));
         _runRegistry = new RunRegistry(
             options.MaxConcurrentRuns,
             options.MaxConcurrentRunsPerProvider,
@@ -850,7 +855,8 @@ public sealed class RuntimeServer : IAsyncDisposable
             toolStateStore,
             toolGateway,
             toolCatalogSnapshot,
-            workRecoveryStore: null);
+            workRecoveryStore: null,
+            isRunActive: runId => _activeRuns.ContainsKey(runId));
         try
         {
             await recoveryService.RecoverSentToolIntentsAsync(ct).ConfigureAwait(false);
@@ -999,13 +1005,16 @@ public sealed class RuntimeServer : IAsyncDisposable
             }
 
             var snapshot = session.ToolCatalogStore.ReplaceHostCatalog(parameters);
-            await RecoverSentToolIntentsAsync(
-                session,
-                repository,
-                toolStateStore,
-                outbox,
-                snapshot,
-                ct).ConfigureAwait(false);
+            if (Volatile.Read(ref _startupToolRecoveryPending) != 0)
+            {
+                await RecoverSentToolIntentsAsync(
+                    session,
+                    repository,
+                    toolStateStore,
+                    outbox,
+                    snapshot,
+                    ct).ConfigureAwait(false);
+            }
             var result = JsonSerializer.SerializeToElement(
                 new ToolCatalogUpdateResponse(
                     snapshot.HostCatalogVersion,
@@ -1033,13 +1042,16 @@ public sealed class RuntimeServer : IAsyncDisposable
             }
 
             var snapshot = session.ToolCatalogStore.PatchHostCatalog(parameters);
-            await RecoverSentToolIntentsAsync(
-                session,
-                repository,
-                toolStateStore,
-                outbox,
-                snapshot,
-                ct).ConfigureAwait(false);
+            if (Volatile.Read(ref _startupToolRecoveryPending) != 0)
+            {
+                await RecoverSentToolIntentsAsync(
+                    session,
+                    repository,
+                    toolStateStore,
+                    outbox,
+                    snapshot,
+                    ct).ConfigureAwait(false);
+            }
             var result = JsonSerializer.SerializeToElement(
                 new ToolCatalogUpdateResponse(
                     snapshot.HostCatalogVersion,
@@ -1242,6 +1254,12 @@ public sealed class RuntimeServer : IAsyncDisposable
                 .ConfigureAwait(false);
         }
 
+        if (string.Equals(request.Method, MessageTypes.SessionHistoryRoundsRead, StringComparison.Ordinal))
+        {
+            return await CreateSessionHistoryRoundsReadResponseAsync(request, repository, ct)
+                .ConfigureAwait(false);
+        }
+
         if (string.Equals(request.Method, MessageTypes.SessionSelectionUpdate, StringComparison.Ordinal))
         {
             return await CreateSessionSelectionUpdateResponseAsync(request, repository, ct)
@@ -1295,6 +1313,13 @@ public sealed class RuntimeServer : IAsyncDisposable
                 _timeProvider.GetUtcNow().ToUnixTimeMilliseconds(),
                 RuntimeJsonContext.Default.Int64);
             return new JsonRpcResponse("2.0", request.Id, result);
+        }
+
+        if (string.Equals(request.Method, MessageTypes.RuntimeShutdown, StringComparison.Ordinal))
+        {
+            var accepted = JsonSerializer.SerializeToElement(true, RuntimeJsonContext.Default.Boolean);
+            _ = Task.Run(RequestHostShutdownAsync, CancellationToken.None);
+            return new JsonRpcResponse("2.0", request.Id, accepted);
         }
 
         if (string.Equals(request.Method, MessageTypes.RunCancel, StringComparison.Ordinal))
@@ -1798,8 +1823,7 @@ public sealed class RuntimeServer : IAsyncDisposable
             return Error(request.Id, -32004, $"Session '{parameters.SessionId}' was not found.");
         }
 
-        var store = new ConversationStore(_dataDirectory);
-        var page = await store.ReadPageAsync(
+        var page = await _conversationStore.ReadPageAsync(
                 parameters.SessionId,
                 parameters.Cursor,
                 parameters.PageSize + 1,
@@ -1819,6 +1843,53 @@ public sealed class RuntimeServer : IAsyncDisposable
         var payload = JsonSerializer.SerializeToElement(
             result,
             RuntimeJsonContext.Default.SessionHistoryReadResult);
+        return new JsonRpcResponse("2.0", request.Id, payload);
+    }
+
+    private async Task<JsonRpcResponse> CreateSessionHistoryRoundsReadResponseAsync(
+        JsonRpcRequest request,
+        SqliteSessionRepository repository,
+        CancellationToken ct)
+    {
+        var parameters = request.Params is { } json
+            ? json.Deserialize(RuntimeJsonContext.Default.SessionHistoryRoundsReadParameters)
+            : null;
+        if (parameters is null
+            || string.IsNullOrWhiteSpace(parameters.SessionId)
+            || parameters.RoundCount is <= 0 or > 100
+            || parameters.BeforeSequence is < 0
+            || !LocalRuntime.TryParseBlobMode(parameters.BlobMode, out var blobMode))
+        {
+            return Error(request.Id, -32602, "The session.history.rounds.read parameters are invalid.");
+        }
+
+        var snapshot = await repository.GetSessionSnapshotAsync(parameters.SessionId, ct)
+            .ConfigureAwait(false);
+        if (snapshot is null)
+        {
+            return Error(request.Id, -32004, $"Session '{parameters.SessionId}' was not found.");
+        }
+
+        var page = await _conversationStore.ReadRoundsPageAsync(
+                parameters.SessionId,
+                parameters.RoundCount,
+                parameters.BeforeSequence,
+                new ConversationReadOptions(blobMode),
+                ct)
+            .ConfigureAwait(false);
+        var messages = page.Records
+            .Select(record => LocalRuntime.MapHistoryMessage(
+                record,
+                parameters.IncludeReasoning,
+                parameters.IncludeToolCalls))
+            .ToArray();
+        var result = new SessionHistoryRoundsReadResult(
+            messages,
+            page.OldestUserSequence,
+            page.HasOlder);
+        var payload = JsonSerializer.SerializeToElement(
+            result,
+            RuntimeJsonContext.Default.SessionHistoryRoundsReadResult);
         return new JsonRpcResponse("2.0", request.Id, payload);
     }
 
@@ -2612,6 +2683,7 @@ public sealed class RuntimeServer : IAsyncDisposable
                     activeRun,
                     refreshCt),
                 () => activeRun.IsTimedOut,
+                isRunActive: runId => _activeRuns.ContainsKey(runId),
                 providerFactory: providerFactory,
                 skillCatalog: session.SkillCatalog,
                 isHostModeSkills: _hostProviderRegistry is not null,
@@ -2817,13 +2889,19 @@ public sealed class RuntimeServer : IAsyncDisposable
             errorJson,
             MeetingStatus: "Failed",
             InterruptWorkSession: false);
+        // Expert 自动压缩的摘要请求失败时，外层错误码是 RunExecutionFailed，
+        // 额外写出摘要 Provider 的原始错误和请求诊断，避免细节丢失。
+        var summaryFailure = SummaryFailureDiagnostics.Find(exception);
         await _diagnosticLog.TryWriteAsync(
                 RuntimeDiagnosticLogLevel.Error,
                 "RunFailed",
                 runId,
                 sessionId,
                 exception: exception,
-                error: error)
+                error: error,
+                writeDetails: summaryFailure is null
+                    ? null
+                    : writer => SummaryFailureDiagnostics.WriteProviderFailure(writer, summaryFailure))
             .ConfigureAwait(false);
         return await CompleteTerminalRunAsync(pending).ConfigureAwait(false);
     }
@@ -3556,6 +3634,26 @@ public sealed class RuntimeServer : IAsyncDisposable
     private async Task ObserveConnectionTasksAsync()
     {
         await ObserveTasksAsync(_connections.Values.ToArray()).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 宿主关闭命令：取消服务运行令牌，使 <see cref="RunAsync"/> 返回后由调用方释放服务。
+    /// 释放路径会取消活跃 Run，并向 Provider 写入 shutdown 帧。
+    /// </summary>
+    private async Task RequestHostShutdownAsync()
+    {
+        try
+        {
+            await _diagnosticLog.TryWriteAsync(
+                    RuntimeDiagnosticLogLevel.Information,
+                    "RuntimeShutdownRequested",
+                    alwaysWrite: true)
+                .ConfigureAwait(false);
+            await _shutdown.CancelAsync().ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+        }
     }
 
     private void TriggerRuntimeFatal(Exception failure)

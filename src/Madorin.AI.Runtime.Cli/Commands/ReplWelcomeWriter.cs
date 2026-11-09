@@ -4,6 +4,26 @@ namespace Madorin.AI.Runtime.Cli.Commands;
 
 internal static class ReplWelcomeWriter
 {
+    private const string IntroIndent = "           ";
+    internal const string Banner = "ＭＡＤＯＲＩＮ ＡＩ ＲＵＮＴＩＭＥ";
+
+    private static readonly string[] Horse =
+    [
+        """              /\          /\""",
+        """             /  \        /  \""",
+        """            /    \      /    \""",
+        """           |      \    /      |""",
+        """           |   o          o   |""",
+        """           |        ||        |""",
+        """            \       ||       /""",
+        """             \     /  \     /""",
+        """              \   |    |   /""",
+        """               \  |    |  /""",
+        """                \ | __ | /""",
+        """                 \| [] |/""",
+        """                  |____|"""
+    ];
+
     public static void Write(ICliTerminal terminal, ReplWelcomeSnapshot snapshot)
     {
         ArgumentNullException.ThrowIfNull(terminal);
@@ -13,11 +33,26 @@ internal static class ReplWelcomeWriter
             ? snapshot.AgentId
             : snapshot.AgentName;
 
-        terminal.WriteLine($"Madorin AI Runtime {snapshot.Version}", CliTextStyle.Title);
-        terminal.Write("Local runtime ");
+        terminal.Write(Banner, CliTextStyle.Title);
+        terminal.Write(" ");
+        terminal.Write(snapshot.Version, CliTextStyle.Title);
+        terminal.Write("  ");
         terminal.WriteLine("ready", CliTextStyle.Success);
         terminal.WriteLine();
-        WriteField(terminal, "Mode", snapshot.Mode.ToString());
+        if (!terminal.TryWriteLogo(IntroIndent.Length))
+        {
+            WriteHorse(terminal);
+        }
+
+        terminal.WriteLine();
+        terminal.WriteLine($"{IntroIndent}有史以来", CliTextStyle.Muted);
+        terminal.WriteLine($"{IntroIndent}功能最强大 · 性能最快 · 效率最高", CliTextStyle.Muted);
+        terminal.WriteLine($"{IntroIndent}集成最简单 · token 最省", CliTextStyle.Muted);
+        terminal.WriteLine($"{IntroIndent}的 CLI", CliTextStyle.Muted);
+        terminal.WriteLine();
+        terminal.WriteLine($"{IntroIndent}@madorins.com", CliTextStyle.Muted);
+        terminal.WriteLine($"{IntroIndent}service@madorins.com", CliTextStyle.Muted);
+        terminal.WriteLine();
         WriteField(terminal, "Agent", agent, CliTextStyle.Selected);
         WriteField(terminal, "Provider", snapshot.Provider, CliTextStyle.Selected);
         WriteField(terminal, "Model", snapshot.Model, CliTextStyle.Selected);
@@ -40,5 +75,13 @@ internal static class ReplWelcomeWriter
     {
         terminal.Write(label.PadRight(11), CliTextStyle.Muted);
         terminal.WriteLine(value, valueStyle);
+    }
+
+    private static void WriteHorse(ICliTerminal terminal)
+    {
+        foreach (var line in Horse)
+        {
+            terminal.WriteLine(line, CliTextStyle.Muted);
+        }
     }
 }

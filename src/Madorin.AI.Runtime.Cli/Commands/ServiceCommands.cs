@@ -1,5 +1,6 @@
 using System.CommandLine;
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -12,6 +13,7 @@ using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Server;
 using Madorin.AI.Runtime.Server.ProviderWorkers;
 using Madorin.AI.Runtime.Services.Memory;
+using Madorin.AI.Runtime.Services.Prompt;
 using Madorin.AI.Runtime.Services.Tools;
 using StandaloneSelection = Madorin.AI.Runtime.Cli.Config.ResolvedStandaloneSelection;
 
@@ -22,6 +24,8 @@ internal static class ServiceCommands
     private static readonly UTF8Encoding StrictUtf8 = new(
         encoderShouldEmitUTF8Identifier: false,
         throwOnInvalidBytes: true);
+    private const int DefaultResumeListCount = 10;
+    private const int MaxResumeListCount = 100;
 
     public static Command CreateServe(
         Option<bool> jsonOption,
@@ -96,6 +100,7 @@ internal static class ServiceCommands
                     context.Cancel = true;
                     CancelNoThrow(shutdown);
                 });
+            using var parentExitRegistration = ParentProcessExitRegistration.Track(shutdown);
 
             string handshakeSecret;
             try
@@ -193,6 +198,12 @@ internal static class ServiceCommands
         var noStreamOption = CommandOptions.Create<bool>(
             "--no-stream",
             "Wait for the complete result; output streams by default.");
+        var permissionModeOption = CommandOptions.Create<string?>(
+            "--permission-mode",
+            "Set permission mode: ask-all (default), auto-tools, or auto-all.");
+        var instructionsModeOption = CommandOptions.Create<string?>(
+            "--instructions-mode",
+            "Set workspace instructions mode: off (default) or auto.");
 
         // Expert RequestControl options (passed via ExpertModeOptions.RequestControl)
         var temperatureOption = CommandOptions.Create<float?>("--temperature", "Sampling temperature (0.0-2.0).");
@@ -224,6 +235,8 @@ internal static class ServiceCommands
                 CommandOptions.Create<string?>(
                     "--allow-tools",
                     "Comma-separated tool ids to allow without an interactive prompt."),
+                permissionModeOption,
+                instructionsModeOption,
                 temperatureOption,
                 topPOption,
                 topKOption,
@@ -329,6 +342,82 @@ internal static class ServiceCommands
                 return ExitCodes.InvalidArguments;
             }
 
+            var allowToolsValue = parseResult.GetValue<string?>("--allow-tools");
+            if (!StandaloneToolAllowList.TryParse(
+                    allowToolsValue,
+                    out var listedTools,
+                    out var allowToolsError)
+                && allowToolsValue is not null)
+            {
+                RunOutputWriter.WriteCommandFailure(
+                    output,
+                    error,
+                    outputFormat,
+                    machineOutputRedirected,
+                    "InvalidAllowTools",
+                    allowToolsError ?? "--allow-tools is invalid.");
+                return ExitCodes.InvalidArguments;
+            }
+
+            if (!StandaloneToolConsentPolicy.TryParsePermissionMode(
+                    parseResult.GetValue(permissionModeOption),
+                    out var permissionMode))
+            {
+                RunOutputWriter.WriteCommandFailure(
+                    output,
+                    error,
+                    outputFormat,
+                    machineOutputRedirected,
+                    "InvalidPermissionMode",
+                    "--permission-mode must be ask-all, auto-tools, or auto-all.");
+                return ExitCodes.InvalidArguments;
+            }
+
+            if (!TryParseWorkspaceInstructionsMode(
+                    parseResult.GetValue(instructionsModeOption),
+                    out var workspaceInstructionsEnabled))
+            {
+                RunOutputWriter.WriteCommandFailure(
+                    output,
+                    error,
+                    outputFormat,
+                    machineOutputRedirected,
+                    "InvalidInstructionsMode",
+                    "--instructions-mode must be off or auto.");
+                return ExitCodes.InvalidArguments;
+            }
+
+            if (listedTools is not null
+                && permissionMode is not StandaloneToolPermissionMode.AskAll)
+            {
+                RunOutputWriter.WriteCommandFailure(
+                    output,
+                    error,
+                    outputFormat,
+                    machineOutputRedirected,
+                    "ConflictingPermissionOptions",
+                    "--allow-tools cannot be combined with --permission-mode auto-tools or auto-all.");
+                return ExitCodes.InvalidArguments;
+            }
+
+            var interactiveConsentEnabled =
+                StandaloneToolConsentPolicy.IsInteractiveConsentEnabled(
+                    terminal,
+                    outputFormat is RunOutputFormat.Text,
+                    outputFile is not null);
+            if (permissionMode is StandaloneToolPermissionMode.AutoTools
+                && !interactiveConsentEnabled)
+            {
+                RunOutputWriter.WriteCommandFailure(
+                    output,
+                    error,
+                    outputFormat,
+                    machineOutputRedirected,
+                    "InvalidPermissionMode",
+                    "--permission-mode auto-tools requires an interactive text session without --output-file.");
+                return ExitCodes.InvalidArguments;
+            }
+
             AtomicOutputFile? atomicOutputFile = null;
             try
             {
@@ -357,6 +446,16 @@ internal static class ServiceCommands
             var requestedAgent = parseResult.GetValue(agentOption);
             var showWorkspaceWelcome = showWelcome;
             var announceWorkspaceChange = false;
+            var workspaceInstructionsState = new WorkspaceInstructionsState(
+                workspaceInstructionsEnabled);
+            using var interactiveConsent = listedTools is null
+                && (permissionMode is StandaloneToolPermissionMode.AutoAll
+                    || interactiveConsentEnabled)
+                ? new StandaloneToolConsentHandler(
+                    terminal,
+                    new StandaloneToolGrantFactory(),
+                    permissionMode)
+                : null;
             while (true)
             {
                 StandaloneRuntimeContext context;
@@ -479,22 +578,6 @@ internal static class ServiceCommands
                     return ExitCodes.InvalidArguments;
                 }
 
-                if (!StandaloneToolAllowList.TryParse(
-                        parseResult.GetValue<string?>("--allow-tools"),
-                        out var listedTools,
-                        out var allowToolsError)
-                    && parseResult.GetValue<string?>("--allow-tools") is not null)
-                {
-                    RunOutputWriter.WriteCommandFailure(
-                        output,
-                        error,
-                        outputFormat,
-                        machineOutputRedirected,
-                        "InvalidAllowTools",
-                        allowToolsError ?? "--allow-tools is invalid.");
-                    return ExitCodes.InvalidArguments;
-                }
-
                 // Collect Expert RequestControl from CLI (only meaningful for Expert mode)
                 ExpertRequestControl? requestControl = null;
                 var cliTemperature = parseResult.GetValue(temperatureOption);
@@ -540,15 +623,6 @@ internal static class ServiceCommands
                     var memoryFiles = new MemoryFileService(
                         Path.GetFullPath(resolvedMemoryUserHome),
                         context.WorkspaceRoot);
-                    using var interactiveConsent = listedTools is null
-                        && StandaloneToolConsentPolicy.IsInteractiveConsentEnabled(
-                            terminal,
-                            outputFormat is RunOutputFormat.Text,
-                            outputFile is not null)
-                        ? new StandaloneToolConsentHandler(
-                            terminal,
-                            new StandaloneToolGrantFactory())
-                        : null;
                     IToolConsentHandler? consentHandler = listedTools is null
                         ? interactiveConsent
                         : listedTools;
@@ -562,6 +636,7 @@ internal static class ServiceCommands
                             {
                                 MemoryFiles = memoryFiles,
                                 ToolConsentHandler = consentHandler,
+                                WorkspaceInstructionsState = workspaceInstructionsState,
                                 WorkerSupervisor = workerSupervisor,
                                 MinimumLogLevel = minimumLogLevel,
                                 WorkspaceLockTimeout = lockWait is > 0
@@ -642,6 +717,8 @@ internal static class ServiceCommands
                                 output,
                                 error,
                                 runtime,
+                                interactiveConsent,
+                                workspaceInstructionsState,
                                 memoryFiles,
                                 sessionId,
                                 mode,
@@ -700,6 +777,8 @@ internal static class ServiceCommands
         TextWriter output,
         TextWriter error,
         LocalRuntime runtime,
+        StandaloneToolConsentHandler? interactiveConsent,
+        WorkspaceInstructionsState workspaceInstructionsState,
         MemoryFileService memoryFiles,
         string? sessionId,
         RuntimeMode mode,
@@ -710,10 +789,15 @@ internal static class ServiceCommands
         bool showWelcome,
         CancellationToken ct)
     {
-        ReplLoopResult Complete(int exitCode) => new(exitCode, null, selection);
-
         var selectionVersion = 1;
         var helpLanguage = ReplHelpLanguage.Chinese;
+        ReplLoopResult Complete(int exitCode) => new(exitCode, null, selection);
+        ReplLoopResult Leave(int exitCode)
+        {
+            ReplSessionResumeHint.Write(terminal, sessionId);
+            return Complete(exitCode);
+        }
+
         if (sessionId is not null)
         {
             var snapshot = await runtime.GetSessionSnapshotAsync(sessionId, ct).ConfigureAwait(false);
@@ -798,7 +882,7 @@ internal static class ServiceCommands
                 {
                     if (interruptState == ReplInterruptState.Exiting)
                     {
-                        return Complete(ExitCodes.UserInterrupted);
+                        return Leave(ExitCodes.UserInterrupted);
                     }
 
                     interruptState = ReplInterruptState.Idle;
@@ -807,13 +891,12 @@ internal static class ServiceCommands
                 terminal.Write("madorin", CliTextStyle.Prompt);
                 terminal.Write(" [", CliTextStyle.Muted);
                 terminal.Write($"{selection.Provider.Name}/{selection.Model}", CliTextStyle.Selected);
-                terminal.Write("] ", CliTextStyle.Muted);
-                terminal.Write("> ", CliTextStyle.Prompt);
+                terminal.WriteLine("]", CliTextStyle.Muted);
 
-                var userInput = await terminal.ReadLineAsync(exitCts.Token).ConfigureAwait(false);
+                var userInput = await terminal.ReadBlockAsync(exitCts.Token).ConfigureAwait(false);
                 if (userInput is null)
                 {
-                    return Complete(ExitCodes.Success);
+                    return Leave(ExitCodes.Success);
                 }
 
                 if (string.IsNullOrWhiteSpace(userInput))
@@ -821,12 +904,16 @@ internal static class ServiceCommands
                     continue;
                 }
 
-                var commandResult = await TryHandleCoreReplCommandAsync(
+                var isSingleLine = !userInput.Contains('\n');
+                var commandResult = isSingleLine
+                    ? await TryHandleCoreReplCommandAsync(
                         userInput,
                         terminal,
                         output,
                         error,
                         runtime,
+                        interactiveConsent,
+                        workspaceInstructionsState,
                         sessionId,
                         mode,
                         selection,
@@ -835,7 +922,8 @@ internal static class ServiceCommands
                         config,
                         helpLanguage,
                         exitCts.Token)
-                    .ConfigureAwait(false);
+                        .ConfigureAwait(false)
+                    : null;
                 if (commandResult is not null)
                 {
                     helpLanguage = commandResult.HelpLanguage;
@@ -852,13 +940,14 @@ internal static class ServiceCommands
 
                     if (commandResult.ExitCode is { } commandExitCode)
                     {
-                        return Complete(commandExitCode);
+                        return Leave(commandExitCode);
                     }
 
                     continue;
                 }
 
-                if (await TryHandleMemoryReplCommandAsync(
+                if (isSingleLine
+                    && await TryHandleMemoryReplCommandAsync(
                         userInput,
                         terminal,
                         output,
@@ -875,7 +964,7 @@ internal static class ServiceCommands
                 {
                     if (interruptState == ReplInterruptState.Exiting)
                     {
-                        return Complete(ExitCodes.UserInterrupted);
+                        return Leave(ExitCodes.UserInterrupted);
                     }
 
                     activeRunCts = runCts;
@@ -903,18 +992,48 @@ internal static class ServiceCommands
                             agents,
                             selectionVersion),
                         runCts.Token);
+                var replyOutput = terminal.IsInteractive
+                    ? new TerminalStyleTextWriter(
+                        terminal,
+                        CliTextStyle.Assistant,
+                        output,
+                        () => terminal.WriteLine(
+                            DateTime.Now.ToString("HH:mm:ss"),
+                            CliTextStyle.Muted))
+                    : output;
+                using var activity = terminal.IsInteractive
+                    ? new ReplThinkingStatus(terminal)
+                    : null;
+                if (interactiveConsent is not null)
+                {
+                    interactiveConsent.Activity = activity;
+                }
+
+                activity?.Start();
                 var runOutputWriter = new RunOutputWriter(
-                    output,
+                    replyOutput,
                     error,
                     RunOutputFormat.Text,
                     noStream: false,
                     machineOutputRedirected: false,
-                    message => RedactSecrets(message, config));
-                var result = await ExecuteOneRunAsync(
-                        events,
-                        runOutputWriter,
-                        exitCts.Token)
-                    .ConfigureAwait(false);
+                    message => RedactSecrets(message, config),
+                    activity);
+                RunOutputResult result;
+                try
+                {
+                    result = await ExecuteOneRunAsync(
+                            events,
+                            runOutputWriter,
+                            exitCts.Token)
+                        .ConfigureAwait(false);
+                }
+                finally
+                {
+                    if (interactiveConsent is not null)
+                    {
+                        interactiveConsent.Activity = null;
+                    }
+                }
 
                 bool continueAfterCancellation;
                 var wasPausing = false;
@@ -932,14 +1051,22 @@ internal static class ServiceCommands
 
                 sessionId = result.SessionId ?? sessionId;
                 activeMeetingSessionId = sessionId;
+                await WriteTurnContextSizeAsync(
+                        terminal,
+                        runtime,
+                        sessionId,
+                        runOutputWriter.HasText && !runOutputWriter.EndsWithNewLine,
+                        exitCts.Token)
+                    .ConfigureAwait(false);
                 if (exitCts.IsCancellationRequested)
                 {
-                    return Complete(ExitCodes.UserInterrupted);
+                    return Leave(ExitCodes.UserInterrupted);
                 }
 
                 if (result.ExitCode == ExitCodes.UserInterrupted
                     && (continueAfterCancellation || wasPausing))
                 {
+                    ReplSessionResumeHint.Write(terminal, sessionId);
                     continue;
                 }
 
@@ -950,13 +1077,13 @@ internal static class ServiceCommands
 
                 if (result.ExitCode != ExitCodes.Success)
                 {
-                    return Complete(result.ExitCode);
+                    return Leave(result.ExitCode);
                 }
             }
         }
         catch (OperationCanceledException) when (exitCts.IsCancellationRequested)
         {
-            return Complete(ExitCodes.UserInterrupted);
+            return Leave(ExitCodes.UserInterrupted);
         }
     }
 
@@ -968,12 +1095,84 @@ internal static class ServiceCommands
         }
     }
 
+    internal static string FormatSessionTime(DateTimeOffset updatedAt) =>
+        updatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+
+    private static bool TryReadResumeListCount(
+        string argument,
+        ReplHelpLanguage language,
+        out int count,
+        out string? error)
+    {
+        count = 0;
+        error = null;
+        if (argument.Length > 3
+            || !int.TryParse(argument, NumberStyles.None, CultureInfo.InvariantCulture, out count))
+        {
+            return false;
+        }
+
+        if (count is < 1 or > MaxResumeListCount)
+        {
+            error = language == ReplHelpLanguage.English
+                ? $"Session list count must be from 1 to {MaxResumeListCount}."
+                : $"条数必须是 1 到 {MaxResumeListCount}。";
+        }
+
+        return true;
+    }
+
+    private static async Task WriteTurnContextSizeAsync(
+        ICliTerminal terminal,
+        LocalRuntime runtime,
+        string? sessionId,
+        bool breakBeforeLine,
+        CancellationToken ct)
+    {
+        if (!terminal.IsInteractive || string.IsNullOrWhiteSpace(sessionId))
+        {
+            return;
+        }
+
+        SessionContextStatus? status;
+        try
+        {
+            status = await runtime.GetSessionContextStatusAsync(sessionId, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception exception) when (exception is IOException
+            or InvalidDataException
+            or InvalidOperationException)
+        {
+            return;
+        }
+
+        if (status is null)
+        {
+            return;
+        }
+
+        if (breakBeforeLine)
+        {
+            terminal.WriteLine();
+        }
+
+        terminal.WriteLine(
+            TokenCountFormat.FormatKilo(status.ProjectionEstimatedTokens),
+            CliTextStyle.Muted);
+    }
+
     private static async Task<ReplCommandResult?> TryHandleCoreReplCommandAsync(
         string command,
         ICliTerminal terminal,
         TextWriter output,
         TextWriter error,
         LocalRuntime runtime,
+        StandaloneToolConsentHandler? interactiveConsent,
+        WorkspaceInstructionsState workspaceInstructionsState,
         string? sessionId,
         RuntimeMode mode,
         StandaloneSelection selection,
@@ -1203,6 +1402,70 @@ internal static class ServiceCommands
                     await output.WriteLineAsync($"Mode: {mode}").ConfigureAwait(false);
                     return Current();
 
+                case "/INSTRUCTIONS":
+                    if (argument is not null)
+                    {
+                        await error.WriteLineAsync("Usage: /instructions").ConfigureAwait(false);
+                        return Current();
+                    }
+
+                    var selectedWorkspaceInstructions = await PromptForWorkspaceInstructionsAsync(
+                            terminal,
+                            workspaceInstructionsState.Enabled,
+                            ct)
+                        .ConfigureAwait(false);
+                    if (selectedWorkspaceInstructions is null)
+                    {
+                        return Current();
+                    }
+
+                    workspaceInstructionsState.SetEnabled(selectedWorkspaceInstructions.Value);
+                    await WriteWorkspaceInstructionsStatusAsync(
+                            output,
+                            workspaceInstructionsState.Enabled,
+                            runtime.WorkspaceRoot,
+                            ct)
+                        .ConfigureAwait(false);
+                    return Current();
+
+                case "/PERMISSION":
+                    if (argument is not null)
+                    {
+                        await error.WriteLineAsync("Usage: /permission").ConfigureAwait(false);
+                        return Current();
+                    }
+
+                    if (interactiveConsent is null)
+                    {
+                        await error.WriteLineAsync(
+                                "Permission mode cannot be changed because --allow-tools is active or interactive consent is unavailable.")
+                            .ConfigureAwait(false);
+                        return Current();
+                    }
+
+                    var selectedPermissionMode = await PromptForPermissionModeAsync(
+                            terminal,
+                            interactiveConsent.PermissionMode,
+                            ct)
+                        .ConfigureAwait(false);
+                    if (selectedPermissionMode is null)
+                    {
+                        return Current();
+                    }
+
+                    interactiveConsent.SetPermissionMode(selectedPermissionMode.Value);
+                    if (selectedPermissionMode is StandaloneToolPermissionMode.AutoAll)
+                    {
+                        terminal.WriteLine(
+                            "Warning: all tool and workflow requests will be approved automatically for this CLI session.",
+                            CliTextStyle.Warning);
+                    }
+
+                    await output.WriteLineAsync(
+                            $"Permission mode: {StandaloneToolConsentPolicy.GetPermissionModeName(selectedPermissionMode.Value)}")
+                        .ConfigureAwait(false);
+                    return Current();
+
                 case "/SESSION":
                     if (argument is not null)
                     {
@@ -1242,9 +1505,15 @@ internal static class ServiceCommands
                         return Current();
                     }
 
+                    ReplSessionResumeHint.Write(terminal, sessionId);
                     await output.WriteLineAsync("A new Session will be created on the next turn.")
                         .ConfigureAwait(false);
-                    return new ReplCommandResult(null, selection, 1, ExitCode: null);
+                    return new ReplCommandResult(
+                        null,
+                        selection,
+                        1,
+                        ExitCode: null,
+                        HelpLanguage: helpLanguage);
 
                 case "/PAUSE":
                 {
@@ -1261,10 +1530,25 @@ internal static class ServiceCommands
                 }
 
                 case "/RESUME":
-                    if (argument is null)
+                    var listCount = DefaultResumeListCount;
+                    string? listCountError = null;
+                    var resumeById = argument is not null
+                        && !TryReadResumeListCount(
+                            argument,
+                            helpLanguage,
+                            out listCount,
+                            out listCountError);
+                    if (!resumeById)
                     {
+                        if (listCountError is not null)
+                        {
+                            await error.WriteLineAsync(listCountError).ConfigureAwait(false);
+                            return Current();
+                        }
+
+                        var count = argument is null ? DefaultResumeListCount : listCount;
                         var sessions = await runtime.ListSessionsAsync(
-                                new SessionListParameters(Mode: mode, Limit: 10),
+                                new SessionListParameters(Mode: mode, Limit: count),
                                 ct)
                             .ConfigureAwait(false);
                         if (sessions.Sessions.Length == 0)
@@ -1277,18 +1561,24 @@ internal static class ServiceCommands
                         foreach (var item in sessions.Sessions)
                         {
                             await output.WriteLineAsync(
-                                    $"{item.SessionId}  {item.Mode}  {item.Status}  {item.UpdatedAt:O}")
+                                    $"{item.SessionId}  {item.Mode}  {item.Status}  {FormatSessionTime(item.UpdatedAt)}")
                                 .ConfigureAwait(false);
                         }
 
+                        await output.WriteLineAsync(
+                                helpLanguage == ReplHelpLanguage.English
+                                    ? "Continue one with /resume <session-id>."
+                                    : "用 /resume <会话编号> 继续对应对话。")
+                            .ConfigureAwait(false);
                         return Current();
                     }
 
-                    var resumeSnapshot = await runtime.GetSessionSnapshotAsync(argument, ct)
+                    var sessionToResume = argument ?? string.Empty;
+                    var resumeSnapshot = await runtime.GetSessionSnapshotAsync(sessionToResume, ct)
                         .ConfigureAwait(false);
                     if (resumeSnapshot is null)
                     {
-                        await error.WriteLineAsync($"Session '{argument}' was not found.")
+                        await error.WriteLineAsync($"Session '{sessionToResume}' was not found.")
                             .ConfigureAwait(false);
                         return Current();
                     }
@@ -1296,12 +1586,12 @@ internal static class ServiceCommands
                     if (resumeSnapshot.Mode != mode)
                     {
                         await error.WriteLineAsync(
-                                $"Session '{argument}' uses {resumeSnapshot.Mode} mode; the current REPL uses {mode} mode.")
+                                $"Session '{sessionToResume}' uses {resumeSnapshot.Mode} mode; the current REPL uses {mode} mode.")
                             .ConfigureAwait(false);
                         return Current();
                     }
 
-                    var savedSelection = await runtime.GetSessionSelectionAsync(argument, ct)
+                    var savedSelection = await runtime.GetSessionSelectionAsync(sessionToResume, ct)
                         .ConfigureAwait(false);
                     if (savedSelection is null
                         || !StandaloneConfigurationResolver.TryResolveGlobalSelection(
@@ -1313,15 +1603,15 @@ internal static class ServiceCommands
                             out var resumedSelection))
                     {
                         await error.WriteLineAsync(
-                                $"Session '{argument}' references an Agent, Provider, or model that is not available locally.")
+                                $"Session '{sessionToResume}' references an Agent, Provider, or model that is not available locally.")
                             .ConfigureAwait(false);
                         return Current();
                     }
 
-                    await output.WriteLineAsync($"Resumed Session: {argument}")
+                    await output.WriteLineAsync($"Resumed Session: {sessionToResume}")
                         .ConfigureAwait(false);
                     return new ReplCommandResult(
-                        argument,
+                        sessionToResume,
                         resumedSelection,
                         resumeSnapshot.SelectionVersion ?? savedSelection.SelectionVersion,
                         ExitCode: null);
@@ -1372,9 +1662,11 @@ internal static class ServiceCommands
 
                     if (sessionId is null)
                     {
-                        await output.WriteLineAsync("CanonicalHistory: 0 messages | about 0 tokens")
+                        await output.WriteLineAsync(
+                                $"CanonicalHistory: 0 messages | about {TokenCountFormat.Format(0)} tokens")
                             .ConfigureAwait(false);
-                        await output.WriteLineAsync("ContextProjection: 0 messages | about 0 tokens (full)")
+                        await output.WriteLineAsync(
+                                $"ContextProjection: 0 messages | about {TokenCountFormat.Format(0)} tokens (full)")
                             .ConfigureAwait(false);
                         return Current();
                     }
@@ -1390,11 +1682,11 @@ internal static class ServiceCommands
 
                     await output.WriteLineAsync(
                             $"CanonicalHistory: {contextStatus.CanonicalMessageCount} messages | " +
-                            $"about {contextStatus.CanonicalEstimatedTokens} tokens")
+                            $"about {TokenCountFormat.Format(contextStatus.CanonicalEstimatedTokens)} tokens")
                         .ConfigureAwait(false);
                     await output.WriteLineAsync(
                             $"ContextProjection: {contextStatus.ProjectionMessageCount} messages | " +
-                            $"about {contextStatus.ProjectionEstimatedTokens} tokens " +
+                            $"about {TokenCountFormat.Format(contextStatus.ProjectionEstimatedTokens)} tokens " +
                             $"({contextStatus.ProjectionStrategy})")
                         .ConfigureAwait(false);
                     return Current();
@@ -1593,8 +1885,8 @@ internal static class ServiceCommands
                     {
                         await error.WriteLineAsync(
                                 nextLanguage == ReplHelpLanguage.English
-                                    ? $"Unknown command '{argument}'. Use /help to list commands."
-                                    : $"没有这个命令：{argument}。用 /help 查看命令。")
+                                    ? $"Unknown command '{argument}'. Use /help to list commands, /help <command> for one command, or /help zh for Chinese."
+                                    : $"没有这个命令：{argument}。用 /help 查看全部，/help 命令名 查看用法，/help en 切换英文。")
                             .ConfigureAwait(false);
                         return Current();
                     }
@@ -1608,8 +1900,8 @@ internal static class ServiceCommands
                 default:
                     await error.WriteLineAsync(
                             helpLanguage == ReplHelpLanguage.English
-                                ? $"Unknown command '{commandName}'. Use /help to list commands."
-                                : $"没有这个命令：{commandName}。用 /help 查看命令。")
+                                ? $"Unknown command '{commandName}'. Use /help to list commands, /help <command> for one command, or /help zh for Chinese."
+                                : $"没有这个命令：{commandName}。用 /help 查看全部，/help 命令名 查看用法，/help en 切换英文。")
                         .ConfigureAwait(false);
                     return Current();
             }
@@ -1627,6 +1919,181 @@ internal static class ServiceCommands
                 .ConfigureAwait(false);
             return Current();
         }
+    }
+
+    internal static async Task<StandaloneToolPermissionMode?> PromptForPermissionModeAsync(
+        ICliTerminal terminal,
+        StandaloneToolPermissionMode current,
+        CancellationToken ct)
+    {
+        const int maxInputAttempts = 3;
+        terminal.WriteLine("Permission mode:", CliTextStyle.Title);
+        WritePermissionModeOption(
+            terminal,
+            1,
+            "Ask every time",
+            current is StandaloneToolPermissionMode.AskAll);
+        WritePermissionModeOption(
+            terminal,
+            2,
+            "Auto-approve tools (workflow approvals still ask)",
+            current is StandaloneToolPermissionMode.AutoTools);
+        WritePermissionModeOption(
+            terminal,
+            3,
+            "Auto-approve everything (no confirmations)",
+            current is StandaloneToolPermissionMode.AutoAll);
+        WritePermissionModeOption(terminal, 4, "Cancel", isCurrent: false);
+
+        for (var attempt = 0; attempt < maxInputAttempts; attempt++)
+        {
+            terminal.Write("Select [1/2/3/4]: ", CliTextStyle.Prompt);
+            var input = await terminal.ReadLineAsync(ct).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(input))
+            {
+                return null;
+            }
+
+            switch (input.Trim())
+            {
+                case "1":
+                    return StandaloneToolPermissionMode.AskAll;
+                case "2":
+                    return StandaloneToolPermissionMode.AutoTools;
+                case "3":
+                    return StandaloneToolPermissionMode.AutoAll;
+                case "4":
+                    return null;
+                default:
+                    terminal.WriteLine("Enter 1, 2, 3, or 4.", CliTextStyle.Error);
+                    break;
+            }
+        }
+
+        return null;
+    }
+
+    internal static async Task<bool?> PromptForWorkspaceInstructionsAsync(
+        ICliTerminal terminal,
+        bool isEnabled,
+        CancellationToken ct)
+    {
+        const int maxInputAttempts = 3;
+        terminal.WriteLine("Workspace instructions:", CliTextStyle.Title);
+        WriteWorkspaceInstructionsOption(
+            terminal,
+            1,
+            "Disabled",
+            !isEnabled);
+        WriteWorkspaceInstructionsOption(
+            terminal,
+            2,
+            "Load AGENTS.md automatically",
+            isEnabled);
+        WriteWorkspaceInstructionsOption(terminal, 3, "Cancel", isCurrent: false);
+
+        for (var attempt = 0; attempt < maxInputAttempts; attempt++)
+        {
+            terminal.Write("Select [1/2/3]: ", CliTextStyle.Prompt);
+            var input = await terminal.ReadLineAsync(ct).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(input))
+            {
+                return null;
+            }
+
+            switch (input.Trim())
+            {
+                case "1":
+                    return false;
+                case "2":
+                    return true;
+                case "3":
+                    return null;
+                default:
+                    terminal.WriteLine("Enter 1, 2, or 3.", CliTextStyle.Error);
+                    break;
+            }
+        }
+
+        return null;
+    }
+
+    private static void WriteWorkspaceInstructionsOption(
+        ICliTerminal terminal,
+        int number,
+        string description,
+        bool isCurrent)
+    {
+        terminal.Write($"  {number}. ", CliTextStyle.Parameter);
+        terminal.Write(
+            description,
+            isCurrent ? CliTextStyle.Selected : CliTextStyle.Default);
+        terminal.WriteLine(
+            isCurrent ? " (current)" : string.Empty,
+            CliTextStyle.Muted);
+    }
+
+    private static async Task WriteWorkspaceInstructionsStatusAsync(
+        TextWriter output,
+        bool enabled,
+        string workspaceRoot,
+        CancellationToken ct)
+    {
+        if (!enabled)
+        {
+            await output.WriteLineAsync("Workspace instructions: disabled").ConfigureAwait(false);
+            return;
+        }
+
+        var instructions = await WorkspaceInstructionsLoader.LoadAsync(workspaceRoot, ct)
+            .ConfigureAwait(false);
+        if (instructions is null)
+        {
+            await output.WriteLineAsync(
+                    $"Workspace instructions: enabled ({WorkspaceInstructionsLoader.FileName} not found)")
+                .ConfigureAwait(false);
+            return;
+        }
+
+        await output.WriteLineAsync("Workspace instructions: enabled").ConfigureAwait(false);
+        await output.WriteLineAsync($"File: {instructions.Path}").ConfigureAwait(false);
+    }
+
+    private static bool TryParseWorkspaceInstructionsMode(
+        string? value,
+        out bool enabled)
+    {
+        enabled = false;
+        if (value is null)
+        {
+            return true;
+        }
+
+        switch (value.Trim().ToLowerInvariant())
+        {
+            case "off":
+                return true;
+            case "auto":
+                enabled = true;
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private static void WritePermissionModeOption(
+        ICliTerminal terminal,
+        int number,
+        string description,
+        bool isCurrent)
+    {
+        terminal.Write($"  {number}. ", CliTextStyle.Parameter);
+        terminal.Write(
+            description,
+            isCurrent ? CliTextStyle.Selected : CliTextStyle.Default);
+        terminal.WriteLine(
+            isCurrent ? " (current)" : string.Empty,
+            CliTextStyle.Muted);
     }
 
     private static bool TryResolveReplWorkspace(

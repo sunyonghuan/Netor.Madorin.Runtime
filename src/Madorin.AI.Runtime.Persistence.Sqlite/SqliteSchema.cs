@@ -5,7 +5,7 @@ namespace Madorin.AI.Runtime.Persistence.Sqlite;
 /// <summary>Creates and migrates the Runtime SQLite metadata schema.</summary>
 public static class SqliteSchema
 {
-    public const int CurrentVersion = 20;
+    public const int CurrentVersion = 21;
 
     private static readonly string[] RequiredTables =
     [
@@ -76,6 +76,7 @@ public static class SqliteSchema
         ("tool_grants", "approval_request_id"),
         ("tool_grants", "allowed_skill_script_keys"),
         ("tool_grants", "skill_catalog_version"),
+        ("tool_grants", "command_working_directory"),
         ("tool_approvals", "request_kind"),
         ("tool_audit", "session_id"),
         ("tool_audit", "invocation_id"),
@@ -333,6 +334,9 @@ public static class SqliteSchema
                     break;
                 case 20:
                     await ApplyVersionTwentyAsync(conn, ct).ConfigureAwait(false);
+                    break;
+                case 21:
+                    await ApplyVersionTwentyOneAsync(conn, ct).ConfigureAwait(false);
                     break;
                 default:
                     throw new InvalidOperationException($"No migration is registered for schema version {version}.");
@@ -1558,6 +1562,21 @@ public static class SqliteSchema
             """;
         await versionCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
 
+        transaction.Commit();
+    }
+
+    private static async Task ApplyVersionTwentyOneAsync(SqliteConnection conn, CancellationToken ct)
+    {
+        using var transaction = conn.BeginTransaction(deferred: false);
+        await AddColumnIfMissingAsync(
+            conn, transaction, "tool_grants", "command_working_directory", "TEXT", ct).ConfigureAwait(false);
+        await using var command = conn.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT OR IGNORE INTO schema_versions(version, applied_at)
+            VALUES(21, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            """;
+        await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         transaction.Commit();
     }
 

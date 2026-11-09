@@ -15,7 +15,8 @@ public sealed record ToolRequestedScope(
     string[] AllowedEnvironmentVariables,
     bool AllowPowerShell,
     NetworkPolicy NetworkPolicy,
-    bool CanGrantForRun);
+    bool CanGrantForRun,
+    string? CommandWorkingDirectory = null);
 
 /// <summary>Contains either a safely normalized tool scope or a fail-closed resolution error.</summary>
 public sealed record ToolConsentScopeResolution(

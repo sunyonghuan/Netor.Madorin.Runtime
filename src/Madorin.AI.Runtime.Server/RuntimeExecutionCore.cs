@@ -15,6 +15,7 @@ using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Services;
 using Madorin.AI.Runtime.Services.AgentJobs;
 using Madorin.AI.Runtime.Services.Memory;
+using Madorin.AI.Runtime.Services.Prompt;
 using Madorin.AI.Runtime.Services.Skills;
 using Madorin.AI.Runtime.Services.Tools;
 using Madorin.AI.Runtime.Tools.Abstractions;
@@ -34,7 +35,8 @@ internal sealed class RuntimeExecutionCore(
     AgentContextComposer agentContextComposer,
     MemoryFileService memoryFiles,
     RuntimeLimits runtimeLimits,
-    IToolResultBlobStore resultBlobStore)
+    IToolResultBlobStore resultBlobStore,
+    WorkspaceInstructionsState? workspaceInstructionsState = null)
 {
     private readonly AgentContextComposer _agentContextComposer = agentContextComposer
         ?? throw new ArgumentNullException(nameof(agentContextComposer));
@@ -49,6 +51,7 @@ internal sealed class RuntimeExecutionCore(
         ?? throw new ArgumentNullException(nameof(resultBlobStore));
     private readonly string _runtimeInstanceId = runtimeInstanceId;
     private readonly string _workspaceRoot = Path.GetFullPath(workspaceRoot);
+    private readonly WorkspaceInstructionsState? _workspaceInstructionsState = workspaceInstructionsState;
 
     public async IAsyncEnumerable<RuntimeEventEnvelope> RunAsync(
         string runId,
@@ -61,6 +64,7 @@ internal sealed class RuntimeExecutionCore(
         Func<CredentialsRefreshRequestedEvent, CancellationToken, Task<bool>>?
             credentialRefreshHandler = null,
         Func<bool>? isRunTimedOut = null,
+        Func<string, bool>? isRunActive = null,
         Func<string, IRuntimeProviderAdapter>? providerFactory = null,
         IToolConsentHandler? localToolConsentHandler = null,
         SkillCatalogService? skillCatalog = null,
@@ -135,8 +139,8 @@ internal sealed class RuntimeExecutionCore(
         var conversationStore = new ConversationStore(_dataDirectory);
         var executors = new List<IToolExecutor>
         {
-            new BuiltinFsToolExecutor(_memoryFiles.WorkspaceMutationLock),
-            new BuiltinProcessToolExecutor(),
+            new BuiltinFsToolExecutor(_memoryFiles.WorkspaceMutationLock, _resultBlobStore),
+            new BuiltinCommandToolExecutor(),
             new BuiltinHttpToolExecutor(),
             new BuiltinMemoryToolExecutor(_memoryFiles),
             new BuiltinDelegateAgentToolExecutor(),
@@ -178,7 +182,8 @@ internal sealed class RuntimeExecutionCore(
             toolStateStore,
             toolGateway,
             gatewayCatalogSnapshot,
-            workRecoveryStore: null);
+            workRecoveryStore: null,
+            isRunActive: isRunActive);
         await recoveryService.RecoverSentToolIntentsAsync(ct).ConfigureAwait(false);
         // Live catalog must stay aligned with search/browse inject; consent re-entry
         // must not freeze the Run-start snapshot or CallId identity will conflict.
@@ -261,7 +266,8 @@ internal sealed class RuntimeExecutionCore(
                 isHostModeSkills: isHostModeSkills,
                 skillActivationStore: skillActivationStore,
                 agentJobCoordinator: agentJobCoordinator,
-                providerResolver: expertProviderResolver),
+                providerResolver: expertProviderResolver,
+                workspaceInstructionsState: _workspaceInstructionsState),
 
             _ => throw new NotSupportedException(
                 $"Runtime mode '{request.Mode}' is not supported.")

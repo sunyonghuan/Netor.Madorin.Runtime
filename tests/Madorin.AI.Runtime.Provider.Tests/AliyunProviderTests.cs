@@ -75,12 +75,9 @@ public sealed class AliyunProviderTests
                 [new ReasoningContentBlock("reasoning")],
                 _testContext.CancellationToken);
         });
-        await Assert.ThrowsExactlyAsync<RuntimeProviderException>(async () =>
-        {
-            await adapter.ValidateCapabilitiesAsync(
-                [CreateImageBlock()],
-                _testContext.CancellationToken);
-        });
+        await adapter.ValidateCapabilitiesAsync(
+            [CreateImageBlock()],
+            _testContext.CancellationToken);
         Assert.ContainsSingle(server.Requests);
     }
 

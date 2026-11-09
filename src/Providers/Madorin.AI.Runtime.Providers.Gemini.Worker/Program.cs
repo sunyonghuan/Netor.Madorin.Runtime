@@ -22,7 +22,7 @@ if (!string.Equals(slug, Slug, StringComparison.Ordinal))
 }
 
 var streams = ProviderWorkerStreams.Bind();
-return await ProviderWorkerHost.RunAsync(
+return await ProviderWorkerHost.RunWithBlobResolverAsync(
     Protocol,
     Slug,
     BuildAdapter,
@@ -32,7 +32,7 @@ return await ProviderWorkerHost.RunAsync(
     declaredCapabilities: null,
     declaredModels: Madorin.AI.Runtime.Providers.Gemini.GeminiModelCatalog.All);
 
-static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config)
+static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config, IProviderBlobResolver blobResolver)
 {
     ArgumentNullException.ThrowIfNull(config);
     return new GeminiProviderAdapter(
@@ -46,5 +46,5 @@ static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config)
             ProviderConnectionModels.Resolve(config, Madorin.AI.Runtime.Providers.Gemini.GeminiModelCatalog.All),
             string.IsNullOrWhiteSpace(config.ConfigurationVersion)
                 ? "1"
-                : config.ConfigurationVersion.Trim()));
+                : config.ConfigurationVersion.Trim()), blobResolver: blobResolver);
 }

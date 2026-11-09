@@ -278,6 +278,86 @@ public sealed class ConversationStore
         }
     }
 
+    /// <summary>
+    /// Reads complete display rounds. A round starts at a top-level user record and
+    /// extends up to (but not including) the next user record.
+    /// </summary>
+    public async Task<ConversationRoundsPage> ReadRoundsPageAsync(
+        string sessionId,
+        int roundCount,
+        long? beforeSequence = null,
+        ConversationReadOptions? options = null,
+        CancellationToken ct = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(roundCount);
+        if (beforeSequence is < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(beforeSequence));
+        }
+
+        var path = GetSessionPath(sessionId);
+        var state = GetSessionState(sessionId);
+        await state.Gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await EnsureInitializedAsync(sessionId, path, state, ct).ConfigureAwait(false);
+            var anchors = await LoadUserAnchorsAsync(
+                    sessionId,
+                    beforeSequence,
+                    checked(roundCount + 1),
+                    ct)
+                .ConfigureAwait(false);
+            if (anchors.Count == 0)
+            {
+                return new ConversationRoundsPage([], null, false);
+            }
+
+            var hasOlder = anchors.Count > roundCount;
+            var selected = anchors.Take(roundCount).ToArray();
+            var oldestUserSequence = selected[^1];
+            var endExclusive = beforeSequence ?? checked(state.LastSequence + 1);
+            if (endExclusive <= oldestUserSequence)
+            {
+                throw new InvalidDataException(
+                    $"Conversation '{sessionId}' contains an invalid round boundary.");
+            }
+
+            var entries = await LoadIndexRangeAsync(
+                    sessionId,
+                    oldestUserSequence,
+                    endExclusive,
+                    ct)
+                .ConfigureAwait(false);
+            if (entries.Count != endExclusive - oldestUserSequence
+                || entries.Count == 0
+                || entries[0].Sequence != oldestUserSequence)
+            {
+                throw new InvalidDataException(
+                    $"Conversation '{sessionId}' has an incomplete user-anchored round.");
+            }
+
+            for (var index = 1; index < entries.Count; index++)
+            {
+                if (entries[index].Sequence != entries[index - 1].Sequence + 1)
+                {
+                    throw new InvalidDataException(
+                        $"Conversation '{sessionId}' has a discontinuous user-anchored round.");
+                }
+            }
+
+            var page = await ReadIndexedRecordsAsync(sessionId, path, entries, ct)
+                .ConfigureAwait(false);
+            return new ConversationRoundsPage(
+                await ApplyReadOptionsAsync(page, options, ct).ConfigureAwait(false),
+                oldestUserSequence,
+                hasOlder);
+        }
+        finally
+        {
+            state.Gate.Release();
+        }
+    }
+
     private static bool IsCompleteIndexPage(
         IReadOnlyList<IndexLocation> entries,
         long cursor,
@@ -534,12 +614,99 @@ public sealed class ConversationStore
             return;
         }
 
+        if (!state.NeedsIndexRepair
+            && await TryInitializeFromIndexTailAsync(sessionId, path, state, ct).ConfigureAwait(false))
+        {
+            return;
+        }
+
         await RepairCoreAsync(sessionId, path, ct).ConfigureAwait(false);
         var scan = await ScanAsync(sessionId, path, ct).ConfigureAwait(false);
         state.LastSequence = scan.LastSequence;
         state.IsInitialized = true;
         await SynchronizeIndexesAsync(sessionId, scan.Records, ct).ConfigureAwait(false);
         state.NeedsIndexRepair = false;
+    }
+
+    private async Task<bool> TryInitializeFromIndexTailAsync(
+        string sessionId,
+        string path,
+        SessionState state,
+        CancellationToken ct)
+    {
+        if (!File.Exists(path))
+        {
+            return false;
+        }
+
+        await ReadHeaderAsync(sessionId, path, ct).ConfigureAwait(false);
+        var indexState = await LoadIndexStateAsync(sessionId, ct).ConfigureAwait(false);
+        if (indexState is null
+            || indexState.Count <= 0
+            || indexState.Count != indexState.Tail.Sequence)
+        {
+            return false;
+        }
+
+        var tail = indexState.Tail;
+
+        var fileLength = new FileInfo(path).Length;
+        if (tail.Offset < 0
+            || tail.Length <= 0
+            || tail.Offset > fileLength - tail.Length
+            || tail.Offset + tail.Length != fileLength)
+        {
+            return false;
+        }
+
+        var records = await ReadIndexedRecordsAsync(sessionId, path, [tail], ct).ConfigureAwait(false);
+        if (records.Count != 1 || records[0].Sequence != tail.Sequence)
+        {
+            return false;
+        }
+
+        state.LastSequence = tail.Sequence;
+        state.IsInitialized = true;
+        state.NeedsIndexRepair = false;
+        return true;
+    }
+
+    private async Task<IndexState?> LoadIndexStateAsync(string sessionId, CancellationToken ct)
+    {
+        await using var connection = await OpenIndexConnectionAsync(ct).ConfigureAwait(false);
+        long count;
+        await using (var countCommand = connection.CreateCommand())
+        {
+            countCommand.CommandText = "SELECT COUNT(*) FROM message_index WHERE session_id = $sessionId;";
+            countCommand.Parameters.AddWithValue("$sessionId", sessionId);
+            count = Convert.ToInt64(
+                await countCommand.ExecuteScalarAsync(ct).ConfigureAwait(false),
+                CultureInfo.InvariantCulture);
+        }
+
+        if (count == 0)
+        {
+            return null;
+        }
+
+        await using var tailCommand = connection.CreateCommand();
+        tailCommand.CommandText = """
+            SELECT message_id, sequence, file_offset, record_length
+            FROM message_index
+            WHERE session_id = $sessionId
+            ORDER BY sequence DESC
+            LIMIT 1;
+            """;
+        tailCommand.Parameters.AddWithValue("$sessionId", sessionId);
+        await using var reader = await tailCommand.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        if (!await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            return null;
+        }
+
+        return new IndexState(
+            count,
+            new IndexLocation(reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2), reader.GetInt64(3)));
     }
 
     private async Task<RecordLocation> AppendRecordCoreAsync(
@@ -1140,6 +1307,69 @@ public sealed class ConversationStore
         command.Parameters.AddWithValue("$cursor", cursor);
         command.Parameters.AddWithValue("$pageSize", pageSize);
         var entries = new List<IndexLocation>(pageSize);
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            entries.Add(new IndexLocation(
+                reader.GetString(0),
+                reader.GetInt64(1),
+                reader.GetInt64(2),
+                reader.GetInt64(3)));
+        }
+
+        return entries;
+    }
+
+    private async Task<IReadOnlyList<long>> LoadUserAnchorsAsync(
+        string sessionId,
+        long? beforeSequence,
+        int limit,
+        CancellationToken ct)
+    {
+        await using var connection = await OpenIndexConnectionAsync(ct).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT sequence
+            FROM message_index
+            WHERE session_id = $sessionId
+              AND role = 'user'
+              AND ($beforeSequence IS NULL OR sequence < $beforeSequence)
+            ORDER BY sequence DESC
+            LIMIT $limit;
+            """;
+        command.Parameters.AddWithValue("$sessionId", sessionId);
+        command.Parameters.AddWithValue("$beforeSequence", (object?)beforeSequence ?? DBNull.Value);
+        command.Parameters.AddWithValue("$limit", limit);
+        var anchors = new List<long>(limit);
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            anchors.Add(reader.GetInt64(0));
+        }
+
+        return anchors;
+    }
+
+    private async Task<IReadOnlyList<IndexLocation>> LoadIndexRangeAsync(
+        string sessionId,
+        long startSequence,
+        long endExclusive,
+        CancellationToken ct)
+    {
+        await using var connection = await OpenIndexConnectionAsync(ct).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT message_id, sequence, file_offset, record_length
+            FROM message_index
+            WHERE session_id = $sessionId
+              AND sequence >= $startSequence
+              AND sequence < $endExclusive
+            ORDER BY sequence;
+            """;
+        command.Parameters.AddWithValue("$sessionId", sessionId);
+        command.Parameters.AddWithValue("$startSequence", startSequence);
+        command.Parameters.AddWithValue("$endExclusive", endExclusive);
+        var entries = new List<IndexLocation>();
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
         while (await reader.ReadAsync(ct).ConfigureAwait(false))
         {
@@ -2149,11 +2379,33 @@ public sealed class ConversationStore
 
         var contentNode = JsonNode.Parse(record.Content.GetRawText()) as JsonArray
             ?? throw new InvalidOperationException("Conversation content must be a JSON array.");
+        var changed = await TransformContentAsync(contentNode, options, attachment: false, ct)
+            .ConfigureAwait(false);
+        return changed ? record with { Content = ToElement(contentNode) } : record;
+    }
+
+    private async Task<bool> TransformContentAsync(JsonArray contentNode, ConversationReadOptions options,
+        bool attachment, CancellationToken ct)
+    {
         var changed = false;
         for (var index = 0; index < contentNode.Count; index++)
         {
-            if (contentNode[index] is not JsonObject block
-                || block["type"]?.GetValue<string>() is not "blob_ref"
+            ct.ThrowIfCancellationRequested();
+            if (contentNode[index] is not JsonObject block)
+            {
+                continue;
+            }
+
+            if (block["type"]?.GetValue<string>() is "tool_result"
+                && block["content"] is JsonArray nested)
+            {
+                changed |= await TransformContentAsync(nested, options,
+                    attachment || block["toolId"]?.GetValue<string>() == "mcli_fs_attach", ct)
+                    .ConfigureAwait(false);
+                continue;
+            }
+
+            if (block["type"]?.GetValue<string>() is not "blob_ref"
                 || block["blob"] is not JsonObject blob)
             {
                 continue;
@@ -2162,6 +2414,15 @@ public sealed class ConversationStore
             var blobId = blob["blobId"]?.GetValue<string>();
             var length = blob["length"]?.GetValue<long>() ?? -1;
             if (string.IsNullOrWhiteSpace(blobId))
+            {
+                continue;
+            }
+
+            var mime = blob["contentType"]?.GetValue<string>() ?? string.Empty;
+            var providerAttachment = blob["accessScope"]?.GetValue<string>()?
+                .StartsWith("provider-output:", StringComparison.Ordinal) is true;
+            if (options.BlobMode is ConversationBlobReadMode.Stream
+                && (attachment || providerAttachment || !IsExpandableTextBlob(mime)))
             {
                 continue;
             }
@@ -2194,11 +2455,19 @@ public sealed class ConversationStore
             }
         }
 
-        return changed
-            ? record with { Content = ToElement(contentNode) }
-            : record;
+        return changed;
     }
 
+    private static bool IsExpandableTextBlob(string mime)
+    {
+        var separator = mime.IndexOf(';');
+        var mediaType = (separator < 0 ? mime : mime[..separator]).Trim();
+        return mediaType.StartsWith("text/", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(mediaType, "application/json", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(mediaType, "application/xml", StringComparison.OrdinalIgnoreCase)
+            || mediaType.EndsWith("+json", StringComparison.OrdinalIgnoreCase)
+            || mediaType.EndsWith("+xml", StringComparison.OrdinalIgnoreCase);
+    }
 
     private static JsonElement ToElement(JsonNode node)
     {
@@ -2215,6 +2484,15 @@ public sealed class ConversationStore
 
         foreach (var block in content.EnumerateArray())
         {
+            if (block.ValueKind is JsonValueKind.Object
+                && block.TryGetProperty("type", out var blockType)
+                && blockType.GetString() is "tool_result"
+                && block.TryGetProperty("content", out var nested))
+            {
+                CollectBlobIds(nested, blobIds);
+                continue;
+            }
+
             if (block.ValueKind is not JsonValueKind.Object
                 || !block.TryGetProperty("type", out var type)
                 || type.GetString() is not "blob_ref"
@@ -2250,6 +2528,8 @@ public sealed class ConversationStore
         long Sequence,
         long Offset,
         long Length);
+
+    private sealed record IndexState(long Count, IndexLocation Tail);
 
     private sealed record ScanResult(
         IReadOnlyList<IndexedRecord> Records,

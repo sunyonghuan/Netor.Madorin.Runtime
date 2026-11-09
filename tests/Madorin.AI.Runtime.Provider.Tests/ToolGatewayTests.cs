@@ -6,6 +6,7 @@ using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Persistence.Abstractions;
 using Madorin.AI.Runtime.Persistence.Sqlite;
 using Madorin.AI.Runtime.Services.Tools;
+using Madorin.AI.Runtime.Server;
 using Madorin.AI.Runtime.Tools.Abstractions;
 using Madorin.AI.Runtime.Tools.Builtin;
 using Microsoft.Data.Sqlite;
@@ -392,6 +393,40 @@ public sealed class ToolGatewayTests
     }
 
     [TestMethod]
+    public async Task ExecuteAsync_AttachmentPreservesMetadataHashAndBlobAcrossRetry()
+    {
+        await File.WriteAllBytesAsync(Path.Join(_workspaceRoot, "attachment.bin"), [1, 2, 3],
+            TestContext.CancellationToken);
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync(TestContext.CancellationToken);
+        await SqliteSchema.EnsureCreatedAsync(connection, TestContext.CancellationToken);
+        using var repository = new SqliteToolIntentRepository(connection);
+        using var outbox = new SqliteEventOutbox(connection);
+        await using var blobs = new BlobStagingStore(Path.Join(_workspaceRoot, "store"),
+            new RuntimeLimits(), 16 * 1024 * 1024);
+        var validator = new JsonSchemaToolValidator();
+        using var gateway = new ToolGateway(
+            new ToolCatalogStore(new BuiltinToolRegistry(), validator), validator,
+            new ToolAuthorizationService(repository, RuntimeToolPolicy.CreateRestricted(_workspaceRoot)),
+            [new BuiltinFsToolExecutor(blobStore: blobs)], repository, outbox, resultBlobStore: blobs);
+        var invocation = CreateFileInvocation(BuiltinToolRegistry.FileAttachToolId,
+            CreateArguments(("path", "attachment.bin")), "call-attachment");
+        var first = await gateway.ExecuteAsync(invocation, null, TestContext.CancellationToken);
+        Assert.AreEqual(ToolGatewayResultKind.Success, first.Kind, first.Error?.Message);
+        Assert.IsNotNull(first.Result);
+        Assert.IsNotNull(first.Result.ResultBlob);
+        Assert.IsNotNull(first.Result.OutputJson);
+        Assert.AreEqual(Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(first.Result.OutputJson))),
+            first.Result.ResultHash);
+        Assert.AreNotEqual(first.Result.ResultHash, first.Result.ResultBlob.Sha256);
+        File.Delete(Path.Join(_workspaceRoot, "attachment.bin"));
+        var retry = await gateway.ExecuteAsync(invocation, CreatePermission(), TestContext.CancellationToken);
+        Assert.AreEqual(ToolGatewayResultKind.Success, retry.Kind);
+        Assert.AreEqual(first.Result, retry.Result);
+        await blobs.ValidateReferenceAsync(retry.Result!.ResultBlob!, TestContext.CancellationToken);
+    }
+
+    [TestMethod]
     public async Task ExecuteAsync_OversizedResult_PersistsBlobAndReusesIt()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
@@ -443,6 +478,50 @@ public sealed class ToolGatewayTests
         Assert.IsNotNull(persisted.ResultBlob);
         Assert.AreEqual(first.Result.ResultBlob.BlobId, persisted.ResultBlob.BlobId);
         Assert.AreEqual(first.Result.ResultHash, persisted.ResultHash);
+    }
+
+    [TestMethod]
+    public async Task ExecuteAsync_HttpDnsFailure_ReturnsToolFailureInsteadOfThrowing()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync(TestContext.CancellationToken);
+        await SqliteSchema.EnsureCreatedAsync(connection, TestContext.CancellationToken);
+        using var repository = new SqliteToolIntentRepository(connection);
+        using var outbox = new SqliteEventOutbox(connection);
+        var validator = new JsonSchemaToolValidator();
+        using var gateway = new ToolGateway(
+            new ToolCatalogStore(new BuiltinToolRegistry(), validator),
+            validator,
+            new ToolAuthorizationService(
+                repository,
+                RuntimeToolPolicy.CreateRestricted(_workspaceRoot)),
+            [new BuiltinHttpToolExecutor()],
+            repository,
+            outbox);
+        var invocation = CreateFileInvocation(
+            BuiltinToolRegistry.HttpRequestToolId,
+            CreateArguments(
+                ("method", "GET"),
+                ("url", "https://definitely-not-a-real-host.invalid/")),
+            "call-http-dns-failure");
+        var permission = CreatePermission() with
+        {
+            DenyNetwork = false,
+            AllowedToolIds = [BuiltinToolRegistry.HttpRequestToolId],
+            MaximumRisk = ToolRiskLevel.Network,
+            NetworkPolicy = new NetworkPolicy(
+                DenyAll: false,
+                AllowedHosts: ["definitely-not-a-real-host.invalid"])
+        };
+
+        var result = await gateway.ExecuteAsync(
+            invocation,
+            permission,
+            TestContext.CancellationToken);
+
+        Assert.AreEqual(ToolGatewayResultKind.Failed, result.Kind);
+        Assert.AreEqual(RuntimeErrorCodes.ToolExecutionFailed, result.Error?.Code);
+        Assert.IsFalse(string.IsNullOrWhiteSpace(result.Error?.Message));
     }
 
     [TestMethod]
@@ -505,7 +584,7 @@ public sealed class ToolGatewayTests
             new ToolAuthorizationService(
                 repository,
                 new RuntimeToolPolicy(runtimePermission)),
-            [new BuiltinProcessToolExecutor()],
+            [new BuiltinCommandToolExecutor()],
             repository,
             outbox);
         var invocation = CreateProcessInvocation("call-process-audit");
@@ -525,9 +604,8 @@ public sealed class ToolGatewayTests
         command.Parameters.AddWithValue("$callId", invocation.CallId);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
         Assert.IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
-        Assert.AreEqual(
-            OperatingSystem.IsWindows() ? "process:dotnet.exe" : "process:dotnet",
-            reader.GetString(0));
+        StringAssert.StartsWith(reader.GetString(0),
+            $"command:{CommandToolAuthorization.NormalizeDirectory(_workspaceRoot)}; shell:");
         Assert.AreEqual(
             Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(invocation.ArgumentsJson))),
             reader.GetString(1));
@@ -766,7 +844,7 @@ public sealed class ToolGatewayTests
         using var outbox = new SqliteEventOutbox(connection);
         var validator = new JsonSchemaToolValidator();
         var registry = new BuiltinToolRegistry();
-        var executor = new PreparedCountingToolExecutor(BuiltinToolRegistry.ProcessRunToolId);
+        var executor = new PreparedCountingToolExecutor(BuiltinToolRegistry.CommandToolId);
         var runtimePermission = CreateProcessPermission("runtime-process");
         using var gateway = new ToolGateway(
             new ToolCatalogStore(registry, validator),
@@ -1201,18 +1279,21 @@ public sealed class ToolGatewayTests
             _workspaceRoot,
             [_workspaceRoot],
             [_workspaceRoot],
-            AllowedExecutables: ["dotnet"],
-            AllowedToolIds: [BuiltinToolRegistry.ProcessRunToolId],
+            AllowedExecutables: OperatingSystem.IsWindows()
+                ? ["pwsh", "powershell", "cmd"]
+                : ["bash", "zsh", "sh"],
+            AllowedToolIds: [BuiltinToolRegistry.CommandToolId],
             MaximumRisk: ToolRiskLevel.Process,
-            AllowedEnvironmentVariables: []);
+            AllowedEnvironmentVariables: Madorin.AI.Runtime.Services.Skills.SkillScriptEnvironmentPolicy.InheritedVariableNames.ToArray(),
+            CommandWorkingDirectory: _workspaceRoot);
 
     private static ToolInvocation CreateProcessInvocation(string callId) =>
         new(
             callId,
-            BuiltinToolRegistry.ProcessRunToolId,
+            BuiltinToolRegistry.CommandToolId,
             "agent-1",
             ParentAgentId: null,
-            """{"fileName":"dotnet","arguments":["--version"]}""",
+            """{"script":"dotnet --version"}""",
             "run-1",
             "session-1",
             InvocationId: "invocation-1");

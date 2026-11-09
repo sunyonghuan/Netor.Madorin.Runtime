@@ -70,7 +70,8 @@ public sealed class SqliteToolIntentRepository(SqliteConnection connection) : IT
                revocation_reason,
                approval_request_id,
                allowed_skill_script_keys,
-               skill_catalog_version
+               skill_catalog_version,
+               command_working_directory
         FROM tool_grants
         """;
 
@@ -539,7 +540,8 @@ public sealed class SqliteToolIntentRepository(SqliteConnection connection) : IT
                     revocation_reason,
                     approval_request_id,
                     allowed_skill_script_keys,
-                    skill_catalog_version)
+                    skill_catalog_version,
+                    command_working_directory)
                 VALUES(
                     $grantId,
                     $runId,
@@ -568,7 +570,8 @@ public sealed class SqliteToolIntentRepository(SqliteConnection connection) : IT
                     $revocationReason,
                     $approvalRequestId,
                     $allowedSkillScriptKeys,
-                    $skillCatalogVersion);
+                    $skillCatalogVersion,
+                    $commandWorkingDirectory);
                 """;
             BindGrant(command, grant);
             if (await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false) == 1)
@@ -1123,6 +1126,7 @@ public sealed class SqliteToolIntentRepository(SqliteConnection connection) : IT
         command.Parameters.AddWithValue(
             "$skillCatalogVersion",
             DbValue(grant.SkillCatalogVersion));
+        command.Parameters.AddWithValue("$commandWorkingDirectory", DbValue(grant.CommandWorkingDirectory));
     }
 
     private static ToolGrantState ReadGrant(SqliteDataReader reader) =>
@@ -1154,7 +1158,8 @@ public sealed class SqliteToolIntentRepository(SqliteConnection connection) : IT
             GetNullableString(reader, 24),
             GetNullableString(reader, 25),
             DeserializeStrings(GetNullableString(reader, 26) ?? "[]"),
-            GetNullableString(reader, 27));
+            GetNullableString(reader, 27),
+            GetNullableString(reader, 28));
 
     private static void ValidateIntentIdentity(ToolIntentState intent)
     {
@@ -1263,6 +1268,10 @@ public sealed class SqliteToolIntentRepository(SqliteConnection connection) : IT
         && string.Equals(
             first.SkillCatalogVersion,
             second.SkillCatalogVersion,
+            StringComparison.Ordinal)
+        && string.Equals(
+            first.CommandWorkingDirectory,
+            second.CommandWorkingDirectory,
             StringComparison.Ordinal);
 
     private static string SerializeStrings(IEnumerable<string> values)

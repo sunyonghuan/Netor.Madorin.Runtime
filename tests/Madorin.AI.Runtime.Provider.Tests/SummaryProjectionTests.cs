@@ -126,14 +126,41 @@ public sealed class SummaryProjectionTests
     }
 
     [TestMethod]
-    public void Budget_UnknownWindowRequiresExplicitInputBudget()
+    [DataRow(null)]
+    [DataRow(0)]
+    [DataRow(-1)]
+    public void Budget_UnknownWindowAllowsInvocationWithoutInventingLimit(int? contextWindow)
     {
-        Assert.Throws<InvalidOperationException>(() => ContextTokenBudget.Resolve(new ProviderModel("m", "m")));
+        var unknown = ContextTokenBudget.Resolve(new ProviderModel("m", "m", ContextWindow: contextWindow));
+        Assert.IsNull(unknown.ContextWindow);
+        Assert.AreEqual(int.MaxValue, unknown.InputLimit);
+        Assert.AreEqual(4096, unknown.OutputLimit);
+        Assert.IsNull(ContextTokenBudget.Resolve(null).ContextWindow);
+        Assert.AreEqual(int.MaxValue, ContextTokenBudget.Resolve(null).InputLimit);
         Assert.AreEqual(2000, ContextTokenBudget.Resolve(null, 2000).InputLimit);
+    }
+
+    [TestMethod]
+    public void Budget_KnownWindowAndExplicitOutputStillConstrainInput()
+    {
         var budget = ContextTokenBudget.Resolve(new ProviderModel("m", "m", ContextWindow: 10000, MaxOutputTokens: 3000),
             9500, 2500);
         Assert.AreEqual(7500, budget.InputLimit);
         Assert.AreEqual(2500, budget.OutputLimit);
+        Assert.AreEqual(2000, ContextTokenBudget.Resolve(null, 2000, 128).InputLimit);
+        Assert.AreEqual(128, ContextTokenBudget.Resolve(null, 2000, 128).OutputLimit);
+        Assert.AreEqual(512, ContextTokenBudget.Resolve(new ProviderModel("m", "m", MaxOutputTokens: 512),
+            requestedMaxOutputTokens: 1024).OutputLimit);
+        Assert.Throws<InvalidOperationException>(() => ContextTokenBudget.Resolve(
+            new ProviderModel("m", "m", ContextWindow: 100), requestedMaxOutputTokens: 100));
+    }
+
+    [TestMethod]
+    public async Task Summary_UnknownWindowStillCallsProvider()
+    {
+        var provider = new SummaryProvider(ValidJson) { ContextWindow = 0 };
+        Assert.IsTrue(StrictConversationSummarizer.IsValidatedSummary(await GenerateAsync(provider)));
+        Assert.HasCount(1, provider.Requests);
     }
 
     [TestMethod]

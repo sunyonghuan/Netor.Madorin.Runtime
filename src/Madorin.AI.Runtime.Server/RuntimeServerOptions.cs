@@ -1,6 +1,7 @@
 using Madorin.AI.Runtime.Contracts;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Server.ProviderWorkers;
+using Madorin.AI.Runtime.Services.Prompt;
 
 namespace Madorin.AI.Runtime.Server;
 
@@ -75,6 +76,12 @@ public sealed record RuntimeServerOptions
     public Func<NextTurnSelection, IRuntimeProviderAdapter>? ProviderResolver { get; init; }
 
     public IProviderWorkerSupervisor? WorkerSupervisor { get; init; }
+
+    /// <summary>
+    /// Process-level switch for loading AGENTS.md from the workspace root.
+    /// Host mode defaults to enabled.
+    /// </summary>
+    public WorkspaceInstructionsState? WorkspaceInstructionsState { get; init; }
 
     /// <summary>
     /// Optional HTTP port for REST API endpoint. If null or 0, HTTP server is disabled.

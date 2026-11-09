@@ -3,7 +3,11 @@ namespace Madorin.AI.Runtime.Providers.WorkerHost;
 /// <summary>Worker stdin/stdout frame limits and IPC version.</summary>
 public static class ProviderWorkerIpc
 {
-    public const int Version = 1;
+    public const int Version = 3;
+
+    public const int MaxBlobChunkBytes = 128 * 1024;
+    public const int MaxBlobChunkFrameBytes = 256 * 1024;
+    public const int MaxBufferedBlobBytes = 64 * 1024 * 1024;
 
     public const int MaxFrameLength = 16 * 1024 * 1024;
 

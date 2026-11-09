@@ -18,15 +18,24 @@ internal sealed partial class SessionCompactionService : IDisposable, IAsyncDisp
     private readonly string _dataDirectory;
     private readonly string _databaseConnectionString;
     private readonly Func<NextTurnSelection, IRuntimeProviderAdapter> _providerResolver;
+    /// <summary>运行时诊断日志；为空时不写压缩事件（例如单元测试直接构造服务）。</summary>
+    private readonly RuntimeDiagnosticLog? _diagnosticLog;
 
+    /// <summary>创建压缩服务。</summary>
+    /// <param name="dataDirectory">会话数据目录。</param>
+    /// <param name="databaseConnectionString">SQLite 连接串。</param>
+    /// <param name="providerResolver">按 Selection 解析 Provider。</param>
+    /// <param name="diagnosticLog">可选的运行时诊断日志，用于记录压缩成功与失败事件。</param>
     public SessionCompactionService(
         string dataDirectory,
         string databaseConnectionString,
-        Func<NextTurnSelection, IRuntimeProviderAdapter> providerResolver)
+        Func<NextTurnSelection, IRuntimeProviderAdapter> providerResolver,
+        RuntimeDiagnosticLog? diagnosticLog = null)
     {
         _dataDirectory = dataDirectory;
         _databaseConnectionString = databaseConnectionString;
         _providerResolver = providerResolver;
+        _diagnosticLog = diagnosticLog;
     }
 
     private async Task<SessionCompactionResult?> CompactCoreAsync(

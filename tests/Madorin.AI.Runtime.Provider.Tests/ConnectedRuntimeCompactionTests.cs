@@ -24,15 +24,21 @@ public sealed class ConnectedRuntimeCompactionTests(TestContext testContext)
         var workspace = Path.Combine(Path.GetTempPath(), "madorin-compaction-worker-tests", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(workspace);
         var summaryCalls = 0;
+        var streamingSummaryCalls = 0;
         await using var http = await FakeProviderServer.StartAsync(request =>
         {
             using var body = JsonDocument.Parse(request.Body);
             var isSummary = body.RootElement.GetProperty("model").GetString() == "summary-model";
+            var isStreaming = IsStreamingRequest(body);
             if (isSummary)
             {
                 Interlocked.Increment(ref summaryCalls);
+                if (isStreaming)
+                {
+                    Interlocked.Increment(ref streamingSummaryCalls);
+                }
             }
-            return TextResponse(isSummary ? Summary : "main response");
+            return TextResponse(isSummary ? Summary : "main response", isStreaming);
         }, testContext.CancellationToken);
         var config = new HostProviderConfig("host-provider", "OpenAI Compatible",
             new Uri(http.BaseAddress, "v1").AbsoluteUri, "test-key", Models: ["chat-model", "summary-model"],
@@ -115,6 +121,9 @@ public sealed class ConnectedRuntimeCompactionTests(TestContext testContext)
             using var resumedBody = JsonDocument.Parse(http.Requests[^1].Body);
             Assert.AreEqual(512, resumedBody.RootElement.GetProperty("max_completion_tokens").GetInt32());
             Assert.AreEqual(2, summaryCalls);
+            // 摘要请求经 Worker 进程到达 HTTP 层时必须是非流式；普通对话轮次仍是流式。
+            Assert.AreEqual(0, streamingSummaryCalls);
+            Assert.IsTrue(IsStreamingRequest(resumedBody));
         }
         finally
         {
@@ -339,9 +348,22 @@ public sealed class ConnectedRuntimeCompactionTests(TestContext testContext)
         Assert.AreEqual(512, json.RootElement.GetProperty("max_completion_tokens").GetInt32());
     }
 
-    private static FakeProviderResponse TextResponse(string text)
+    /// <summary>按 OpenAI Chat Completions 约定判断请求是否要求流式响应。</summary>
+    private static bool IsStreamingRequest(JsonDocument body) =>
+        body.RootElement.TryGetProperty("stream", out var stream) && stream.ValueKind == JsonValueKind.True;
+
+    /// <summary>
+    /// 模拟真实服务：流式请求返回 SSE，非流式请求返回单个 chat.completion JSON。
+    /// </summary>
+    private static FakeProviderResponse TextResponse(string text, bool streaming = true)
     {
         var escaped = JsonSerializer.Serialize(text, RuntimeJsonContext.Default.String);
+        if (!streaming)
+        {
+            var completion = "{\"id\":\"test\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":" + escaped + "},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}";
+            return new FakeProviderResponse(200, "application/json", [new FakeProviderChunk(completion)]);
+        }
+
         var payload = "data: {\"id\":\"test\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":" + escaped + "},\"finish_reason\":null}]}\n\n" +
             "data: {\"id\":\"test\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
             "data: [DONE]\n\n";

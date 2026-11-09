@@ -15,4 +15,5 @@ public sealed record OpenAICompatibleProviderOptions(
     string? ProbePath = "models",
     int MaximumProbeResponseBytes = 65_536,
     ProviderAuthenticationMode AuthenticationMode = ProviderAuthenticationMode.Required,
-    string? UserAgent = null);
+    string? UserAgent = null,
+    bool UseVideoUrlContent = false);

@@ -10,7 +10,7 @@ namespace Madorin.AI.Runtime.Provider.Tests;
 
 /// <summary>
 /// 验证 Host 风格「人审 Granted + 空 AllowedExecutables Grant」在 Runtime 用 scope 定稿后，
-/// mcli_process 能二次执行成功——不依赖 UI 点击。
+/// mcli_command 能二次执行成功——不依赖 UI 点击。
 /// </summary>
 [TestClass]
 public sealed class ProcessConsentChainTests
@@ -46,10 +46,10 @@ public sealed class ProcessConsentChainTests
             TestContext.CancellationToken);
         var invocation = new ToolInvocation(
             "call-process-1",
-            BuiltinToolRegistry.ProcessRunToolId,
+            BuiltinToolRegistry.CommandToolId,
             "agent-expert",
             ParentAgentId: null,
-            """{"fileName":"dotnet","arguments":["--version"]}""",
+            """{"script":"dotnet --version"}""",
             "run-process-1",
             "session-process-1",
             "invocation-process-1");
@@ -94,17 +94,157 @@ public sealed class ProcessConsentChainTests
     }
 
     [TestMethod]
-    public async Task HostEmptyExecutableGrant_WithoutScopeResolver_FailsWithNoProgress()
+    public async Task Command_RunGrant_ReusesDirectoryAcrossShellsCommandsAndEnvironmentOverrides()
+    {
+        await using var harness = await ProcessConsentHarness.CreateAsync(_workspace, TestContext.CancellationToken);
+        var handler = new HostStyleEmptyExecutableGrantHandler(bindToCall: false);
+        var coordinator = new ToolConsentCoordinator(
+            harness.Gateway, harness.Authorization, harness.Catalog, handler,
+            new BuiltinToolConsentScopeResolver(), _workspace, harness.Store);
+        var shells = OperatingSystem.IsWindows() ? new[] { "cmd", "powershell", "auto" } : ["sh", "auto"];
+        foreach (var shell in shells)
+        {
+            var invocation = CreateCommandInvocation(shell, "echo command-ok", ".");
+            var result = await harness.Gateway.ExecuteAsync(invocation, null, harness.Catalog, TestContext.CancellationToken);
+            if (result.Kind is ToolGatewayResultKind.NeedsPermission)
+            {
+                result = await coordinator.ResolveAndExecuteAsync(invocation, result, TestContext.CancellationToken);
+            }
+
+            Assert.AreEqual(ToolGatewayResultKind.Success, result.Kind, result.Error?.Message ?? result.Result?.Error);
+            using var output = JsonDocument.Parse(result.Result!.OutputJson!);
+            Assert.AreEqual(0, output.RootElement.GetProperty("exitCode").GetInt32(), result.Result.OutputJson);
+            StringAssert.Contains(output.RootElement.GetProperty("stdout").GetString(), "command-ok");
+        }
+
+        Assert.AreEqual(1, handler.PermissionCount);
+        var grants = await harness.Store.ListActiveGrantsAsync("run-command", DateTimeOffset.UtcNow, TestContext.CancellationToken);
+        Assert.HasCount(1, grants);
+        Assert.AreEqual(CommandToolAuthorization.NormalizeDirectory(_workspace), grants[0].CommandWorkingDirectory);
+        Assert.IsEmpty(grants[0].AllowedExecutables);
+
+        await harness.Authorization.RevokeGrantAsync(grants[0].GrantId, false, "test revoke", TestContext.CancellationToken);
+        var revoked = await harness.Gateway.ExecuteAsync(
+            CreateCommandInvocation(shells[0], "echo revoked", "."), null, harness.Catalog, TestContext.CancellationToken);
+        Assert.AreEqual(ToolGatewayResultKind.NeedsPermission, revoked.Kind);
+    }
+
+    [TestMethod]
+    public async Task Command_RunGrant_RequiresExactDirectoryAndReusesPreviouslyAuthorizedDirectory()
+    {
+        var child = Directory.CreateDirectory(Path.Combine(_workspace, "子目录")).FullName;
+        await using var harness = await ProcessConsentHarness.CreateAsync(_workspace, TestContext.CancellationToken);
+        var handler = new HostStyleEmptyExecutableGrantHandler(bindToCall: false);
+        var coordinator = new ToolConsentCoordinator(
+            harness.Gateway, harness.Authorization, harness.Catalog, handler,
+            new BuiltinToolConsentScopeResolver(), _workspace, harness.Store);
+        var shell = OperatingSystem.IsWindows() ? "cmd" : "sh";
+        foreach (var directory in new[] { _workspace, child, _workspace + Path.DirectorySeparatorChar, child })
+        {
+            var invocation = CreateCommandInvocation(shell, "echo directory-ok", directory);
+            var result = await harness.Gateway.ExecuteAsync(invocation, null, harness.Catalog, TestContext.CancellationToken);
+            if (result.Kind is ToolGatewayResultKind.NeedsPermission)
+            {
+                result = await coordinator.ResolveAndExecuteAsync(invocation, result, TestContext.CancellationToken);
+            }
+
+            Assert.AreEqual(ToolGatewayResultKind.Success, result.Kind, result.Error?.Message ?? result.Result?.Error);
+        }
+
+        Assert.AreEqual(2, handler.PermissionCount);
+        var supplied = new ToolPermissionContext("supplied", "run-command", _workspace, [], [],
+            MaximumRisk: ToolRiskLevel.Process, CommandWorkingDirectory: _workspace);
+        var outside = CreateCommandInvocation(shell, "echo outside", Path.GetTempPath());
+        var descriptor = harness.Catalog.Tools.Single(tool => tool.ToolId == BuiltinToolRegistry.CommandToolId);
+        var resultOutside = await harness.Authorization.AuthorizeAsync(
+            outside, descriptor, supplied, TestContext.CancellationToken);
+        Assert.AreEqual(ToolAuthorizationDecision.Denied, resultOutside.Decision);
+    }
+
+    [TestMethod]
+    public async Task Command_OutsideWorkspaceDirectory_CanBeAuthorizedIndependently()
+    {
+        await using var harness = await ProcessConsentHarness.CreateAsync(_workspace, TestContext.CancellationToken);
+        var handler = new HostStyleEmptyExecutableGrantHandler(bindToCall: false);
+        var coordinator = new ToolConsentCoordinator(
+            harness.Gateway, harness.Authorization, harness.Catalog, handler,
+            new BuiltinToolConsentScopeResolver(), _workspace, harness.Store);
+        var invocation = CreateCommandInvocation(OperatingSystem.IsWindows() ? "cmd" : "sh", "echo outside-ok", Path.GetTempPath());
+        var pending = await harness.Gateway.ExecuteAsync(invocation, null, harness.Catalog, TestContext.CancellationToken);
+        Assert.AreEqual(ToolGatewayResultKind.NeedsPermission, pending.Kind);
+        var result = await coordinator.ResolveAndExecuteAsync(invocation, pending, TestContext.CancellationToken);
+        Assert.AreEqual(ToolGatewayResultKind.Success, result.Kind, result.Error?.Message ?? result.Result?.Error);
+    }
+
+    [TestMethod]
+    public async Task CommandDirectory_MigrationFromV20_IsIdempotent()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync(TestContext.CancellationToken);
+        await SqliteSchema.MigrateAsync(connection, 0, 20, TestContext.CancellationToken);
+        await SqliteSchema.EnsureCreatedAsync(connection, TestContext.CancellationToken);
+        await SqliteSchema.EnsureCreatedAsync(connection, TestContext.CancellationToken);
+        Assert.AreEqual(SqliteSchema.CurrentVersion, await SqliteSchema.ReadCurrentVersionAsync(connection, TestContext.CancellationToken));
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM pragma_table_info('tool_grants') WHERE name = 'command_working_directory'";
+        Assert.AreEqual(1L, await command.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    [TestMethod]
+    public void CommandDirectory_IntersectionDoesNotWidenDirectoryOrGrantMissingCapability()
+    {
+        var permission = new ToolPermissionContext("first", "run", _workspace, [], [], CommandWorkingDirectory: _workspace);
+        Assert.IsNull(ToolGrantCalculator.Intersect([permission, permission with { CommandWorkingDirectory = null }]).CommandWorkingDirectory);
+        Assert.IsNull(ToolGrantCalculator.Intersect([permission, permission with { CommandWorkingDirectory = Path.GetTempPath() }]).CommandWorkingDirectory);
+        Assert.IsNotNull(ToolGrantCalculator.Intersect([permission, permission with { CommandWorkingDirectory = _workspace + Path.DirectorySeparatorChar }]).CommandWorkingDirectory);
+    }
+
+    [TestMethod]
+    public async Task Command_LegacyGrant_RequiresNewDirectoryConsent()
+    {
+        await using var harness = await ProcessConsentHarness.CreateAsync(_workspace, TestContext.CancellationToken);
+        var invocation = CreateCommandInvocation(OperatingSystem.IsWindows() ? "cmd" : "sh", "echo legacy", ".");
+        await harness.Authorization.SaveGrantAsync(new ToolGrant(
+            "legacy-command", invocation.RunId, _workspace, [_workspace], [_workspace], false, false, false,
+            ["cmd", "powershell", "pwsh", "sh"], true, new NetworkPolicy(), DateTimeOffset.UtcNow.AddHours(1),
+            false, [], AllowedToolIds: [BuiltinToolRegistry.CommandToolId], MaximumRisk: ToolRiskLevel.Process),
+            ct: TestContext.CancellationToken);
+        var result = await harness.Gateway.ExecuteAsync(invocation, null, harness.Catalog, TestContext.CancellationToken);
+        Assert.AreEqual(ToolGatewayResultKind.NeedsPermission, result.Kind);
+    }
+
+    private static ToolInvocation CreateCommandInvocation(string shell, string script, string workingDirectory)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("shell", shell);
+            writer.WriteString("script", script);
+            writer.WriteString("workingDirectory", workingDirectory);
+            writer.WriteStartObject("environment");
+            writer.WriteString("COMMAND_TEST_CUSTOM", "custom-value");
+            writer.WriteEndObject();
+            writer.WriteEndObject();
+        }
+
+        return new ToolInvocation(Guid.NewGuid().ToString("N"), BuiltinToolRegistry.CommandToolId,
+            "agent-expert", null, System.Text.Encoding.UTF8.GetString(stream.ToArray()),
+            "run-command", "session-command", "invocation-command");
+    }
+
+    [TestMethod]
+    public async Task CommandGrant_WithoutScopeResolver_FailsWithoutDirectoryAuthorization()
     {
         await using var harness = await ProcessConsentHarness.CreateAsync(
             _workspace,
             TestContext.CancellationToken);
         var invocation = new ToolInvocation(
             "call-process-2",
-            BuiltinToolRegistry.ProcessRunToolId,
+            BuiltinToolRegistry.CommandToolId,
             "agent-expert",
             ParentAgentId: null,
-            """{"fileName":"dotnet","arguments":["--version"]}""",
+            """{"script":"dotnet --version"}""",
             "run-process-2",
             "session-process-2",
             "invocation-process-2");
@@ -135,7 +275,7 @@ public sealed class ProcessConsentChainTests
         Assert.AreEqual(ToolGatewayResultKind.Failed, result.Kind);
         StringAssert.Contains(
             result.Error?.Message ?? string.Empty,
-            "permission Grant did not make progress");
+            "narrowed Grant");
     }
 
     [TestMethod]
@@ -330,6 +470,13 @@ public sealed class ProcessConsentChainTests
             CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
+            if (context.Invocation.ToolId == BuiltinToolRegistry.CommandToolId
+                && context.ScopeResolution.IsSuccess)
+            {
+                StringAssert.Contains(context.Request.Reason, "execute any commands");
+                StringAssert.Contains(context.Request.Reason, context.ScopeResolution.Scope!.CommandWorkingDirectory!);
+            }
+
             Interlocked.Increment(ref _permissionCount);
             var grantId = $"host-{Guid.NewGuid():N}";
             var grant = new ToolGrant(
@@ -421,7 +568,7 @@ public sealed class ProcessConsentChainTests
                 authorization,
                 [
                     new BuiltinFsToolExecutor(),
-                    new BuiltinProcessToolExecutor()
+                    new BuiltinCommandToolExecutor()
                 ],
                 store,
                 outbox);

@@ -71,6 +71,10 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
                 workspaceRoot,
                 BuiltinFsToolExecutor.GetRequiredString(arguments, "path"),
                 "file read"),
+            BuiltinToolRegistry.FileAttachToolId => FileReadScope(
+                workspaceRoot,
+                BuiltinFsToolExecutor.GetRequiredString(arguments, "path"),
+                "file attachment read"),
             BuiltinToolRegistry.FileSearchToolId => FileReadScope(
                 workspaceRoot,
                 BuiltinFsToolExecutor.GetRequiredString(arguments, "path"),
@@ -95,7 +99,7 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
             BuiltinToolRegistry.MemoryAppendToolId => MemoryScope(arguments, "append memory lines"),
             BuiltinToolRegistry.MemoryUpdateToolId => MemoryScope(arguments, "update memory lines"),
             BuiltinToolRegistry.MemoryDeleteToolId => MemoryScope(arguments, "delete memory lines"),
-            BuiltinToolRegistry.ProcessRunToolId => ProcessScope(workspaceRoot, arguments),
+            BuiltinToolRegistry.CommandToolId => CommandScope(workspaceRoot, arguments),
             BuiltinToolRegistry.HttpRequestToolId => HttpScope(arguments),
             BuiltinToolRegistry.DelegateToAgentToolId => Create(
                 "agent:delegate",
@@ -348,32 +352,23 @@ public sealed class BuiltinToolConsentScopeResolver : IToolConsentScopeResolver
             canGrantForRun: canGrantForRun);
     }
 
-    private static ToolRequestedScope ProcessScope(
+    private static ToolRequestedScope CommandScope(
         string workspaceRoot,
         JsonElement arguments)
     {
-        var executable = BuiltinProcessRunner.NormalizeRequestedExecutable(
-            BuiltinProcessToolExecutor.GetRequiredString(arguments, "fileName"));
-        var processArguments = BuiltinProcessRunner.ParseArguments(arguments);
+        var script = BuiltinCommandToolExecutor.GetRequiredString(arguments, "script");
+        _ = BuiltinCommandRunner.ResolveEncoding(
+            BuiltinCommandToolExecutor.GetOptionalString(arguments, "encoding"));
+        _ = BuiltinCommandRunner.NormalizeShell(
+            BuiltinCommandToolExecutor.GetOptionalString(arguments, "shell"));
         var standardInput = BuiltinProcessRunner.ParseStandardInput(arguments);
-        var requestedEnvironmentNames = BuiltinProcessRunner.ParseRequestedEnvironmentVariableNames(
-            arguments);
-        var environmentNames = BuiltinProcessRunner.CreateAllowedEnvironmentVariableNames(
-            arguments,
-            SkillScriptEnvironmentPolicy.InheritedVariableNames);
-        var canGrantForRun = requestedEnvironmentNames.All(
-            SkillScriptEnvironmentPolicy.InheritedVariableNames.Contains);
-        var workingDirectory = BuiltinFsPathPolicy.ResolveRequestedPath(
-            workspaceRoot,
-            BuiltinProcessToolExecutor.GetOptionalString(arguments, "workingDirectory")
-                ?? workspaceRoot);
+        _ = BuiltinProcessRunner.ParseRequestedEnvironmentVariableNames(arguments);
+        var workingDirectory = CommandToolAuthorization.ResolveWorkingDirectory(workspaceRoot, arguments);
         return Create(
-            $"process:{Path.GetFileName(executable)}",
-            $"{processArguments.Length} arguments; stdin {standardInput?.Length ?? 0} characters",
-            readRoots: [workingDirectory],
-            allowedExecutables: [executable],
-            allowedEnvironmentVariables: environmentNames,
-            canGrantForRun: canGrantForRun);
+            $"command:{workingDirectory}",
+            "Allow AI to execute any commands with your user permissions from this directory. " +
+                $"{script.Length} script characters; stdin {standardInput?.Length ?? 0} characters",
+            canGrantForRun: true) with { CommandWorkingDirectory = workingDirectory };
     }
 
     private static ToolRequestedScope HttpScope(JsonElement arguments)

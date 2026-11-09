@@ -11,6 +11,20 @@ namespace Madorin.AI.Runtime.Provider.Tests;
 public sealed class LongTaskReliabilityTests
 {
     [TestMethod]
+    [DataRow("text/plain", "mcli_fs_attach")]
+    [DataRow("image/png", "other_tool")]
+    public async Task Materialize_PreservesAttachmentsWithMediaCapabilitiesDisabled(string contentType, string toolId)
+    {
+        var reference = new BlobReference(new string('a', 64), 10, new string('a', 64), contentType,
+            "run", DateTimeOffset.UtcNow.AddDays(1));
+        var result = new ToolResultContentBlock("call", toolId, true, [new BlobRefContentBlock(reference)]);
+        var materialized = await ToolResultPreview.MaterializeAsync(result, false, null, 512);
+        Assert.AreEqual(result.CallId, materialized.CallId);
+        Assert.ContainsSingle(materialized.Content);
+        Assert.AreSame(reference, ((BlobRefContentBlock)materialized.Content[0]).Blob);
+    }
+
+    [TestMethod]
     public async Task Materialize_TextBlobKeepsVisiblePrefix()
     {
         var body = new string('中', 40_000);
@@ -87,7 +101,7 @@ public sealed class LongTaskReliabilityTests
                 CreateContext(workspace, "mcli_fs_read", "call-read"),
                 CancellationToken.None);
             var denied = await allowList.RequestPermissionAsync(
-                CreateContext(workspace, "mcli_process", "call-process"),
+                CreateContext(workspace, "mcli_command", "call-process"),
                 CancellationToken.None);
 
             Assert.AreEqual(ToolAuthorizationDecision.Granted, allowed.Decision);

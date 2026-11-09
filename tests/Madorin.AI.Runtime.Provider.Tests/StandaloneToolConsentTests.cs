@@ -111,6 +111,31 @@ public sealed class StandaloneToolConsentTests
     }
 
     [TestMethod]
+    public void Create_CommandRunGrant_BindsDirectoryWithoutFilesystemOrExecutablePermissions()
+    {
+        var descriptor = new BuiltinToolRegistry().GetTools().Single(tool => tool.ToolId == BuiltinToolRegistry.CommandToolId);
+        var invocation = new ToolInvocation("command-call", descriptor.ToolId, "agent-1", null,
+            """{"script":"echo command","workingDirectory":"nested","environment":{"CUSTOM":"value"}}""",
+            "command-run", "command-session");
+        var resolution = new BuiltinToolConsentScopeResolver().Resolve(invocation, descriptor, _workspace);
+        var request = new ToolPermissionRequest("command-request", "agent-1", null, descriptor.ToolId,
+            invocation.CallId, "hash", "Process", "call-or-run", "command permission");
+        var context = new ToolPermissionConsentContext(request, invocation, descriptor, resolution, _workspace);
+        var factory = new StandaloneToolGrantFactory();
+
+        var grant = factory.Create(context, StandaloneToolGrantLifetime.Run);
+        Assert.AreEqual(Path.Combine(_workspace, "nested"), grant.CommandWorkingDirectory);
+        Assert.IsNull(grant.AllowedCallIds);
+        Assert.IsEmpty(grant.AllowedReadRoots);
+        Assert.IsEmpty(grant.AllowedWriteRoots);
+        Assert.IsEmpty(grant.AllowedExecutables);
+        Assert.IsEmpty(grant.AllowedEnvironmentVariables!);
+        var once = factory.Create(context, StandaloneToolGrantLifetime.Once);
+        Assert.AreEqual(grant.CommandWorkingDirectory, once.CommandWorkingDirectory);
+        Assert.AreEqual(invocation.CallId, once.AllowedCallIds![0]);
+    }
+
+    [TestMethod]
     public async Task Create_RunFileWriteGrantAuthorizesAnotherWorkspaceFileWithoutDestructiveFlags()
     {
         var context = CreateWritePermissionContext("call-write-1", "src/new-file.cs");
@@ -171,6 +196,149 @@ public sealed class StandaloneToolConsentTests
 
         Assert.ThrowsExactly<InvalidOperationException>(
             () => factory.Create(context, StandaloneToolGrantLifetime.Run));
+    }
+
+    [TestMethod]
+    public void TryParsePermissionMode_ParsesSupportedValues()
+    {
+        Assert.IsTrue(StandaloneToolConsentPolicy.TryParsePermissionMode(
+            null,
+            out var defaultMode));
+        Assert.AreEqual(StandaloneToolPermissionMode.AskAll, defaultMode);
+        Assert.IsTrue(StandaloneToolConsentPolicy.TryParsePermissionMode(
+            "auto-tools",
+            out var autoTools));
+        Assert.AreEqual(StandaloneToolPermissionMode.AutoTools, autoTools);
+        Assert.IsTrue(StandaloneToolConsentPolicy.TryParsePermissionMode(
+            "AUTO-ALL",
+            out var autoAll));
+        Assert.AreEqual(StandaloneToolPermissionMode.AutoAll, autoAll);
+        Assert.IsFalse(StandaloneToolConsentPolicy.TryParsePermissionMode(
+            "auto",
+            out _));
+    }
+
+    [TestMethod]
+    [DataRow("auto-tools")]
+    [DataRow("auto-all")]
+    public async Task RequestPermissionAsync_AutoModesSkipPromptAndCreateOnceGrant(
+        string modeValue)
+    {
+        Assert.IsTrue(StandaloneToolConsentPolicy.TryParsePermissionMode(
+            modeValue,
+            out var mode));
+        var terminal = new ScriptedTerminal(true);
+        using var handler = CreateHandler(terminal, mode);
+
+        var response = await handler.RequestPermissionAsync(
+            CreatePermissionContext(canGrantForRun: false),
+            TestContext.CancellationToken);
+
+        Assert.AreEqual(ToolAuthorizationDecision.Granted, response.Decision);
+        Assert.AreEqual(0, terminal.ReadCount);
+        Assert.IsNotNull(response.Grant);
+        Assert.IsNotNull(response.Grant.AllowedCallIds);
+        Assert.HasCount(1, response.Grant.AllowedCallIds);
+    }
+
+    [TestMethod]
+    public async Task RequestPermissionAsync_AutoAllStillDeniesInvalidScopeWithoutPrompt()
+    {
+        var terminal = new ScriptedTerminal(true);
+        using var handler = CreateHandler(
+            terminal,
+            StandaloneToolPermissionMode.AutoAll);
+        var context = CreatePermissionContext(canGrantForRun: true) with
+        {
+            ScopeResolution = ToolConsentScopeResolution.Failure("invalid scope")
+        };
+
+        var response = await handler.RequestPermissionAsync(
+            context,
+            TestContext.CancellationToken);
+
+        Assert.AreEqual(ToolAuthorizationDecision.Denied, response.Decision);
+        Assert.AreEqual(0, terminal.ReadCount);
+    }
+
+    [TestMethod]
+    public async Task RequestPermissionAsync_AutoAllWorksWithoutInteractiveTerminal()
+    {
+        var terminal = new ScriptedTerminal(isInteractive: false);
+        using var handler = CreateHandler(
+            terminal,
+            StandaloneToolPermissionMode.AutoAll);
+
+        var response = await handler.RequestPermissionAsync(
+            CreatePermissionContext(canGrantForRun: false),
+            TestContext.CancellationToken);
+
+        Assert.AreEqual(ToolAuthorizationDecision.Granted, response.Decision);
+        Assert.AreEqual(0, terminal.ReadCount);
+        Assert.IsNotNull(response.Grant);
+    }
+
+    [TestMethod]
+    public async Task RequestApprovalAsync_AutoToolsSkipsToolApprovalPromptButNotWorkflow()
+    {
+        var toolTerminal = new ScriptedTerminal(true);
+        using var toolHandler = CreateHandler(
+            toolTerminal,
+            StandaloneToolPermissionMode.AutoTools);
+        var toolResponse = await toolHandler.RequestApprovalAsync(
+            CreateApprovalContext(),
+            TestContext.CancellationToken);
+
+        Assert.AreEqual(ToolAuthorizationDecision.Granted, toolResponse.Decision);
+        Assert.AreEqual(0, toolTerminal.ReadCount);
+        Assert.IsNotNull(toolResponse.Grant);
+
+        var workflowTerminal = new ScriptedTerminal(true, "Y");
+        using var workflowHandler = CreateHandler(
+            workflowTerminal,
+            StandaloneToolPermissionMode.AutoTools);
+        var workflowResponse = await workflowHandler.RequestApprovalAsync(
+            CreateWorkflowApprovalContext(),
+            TestContext.CancellationToken);
+
+        Assert.AreEqual(ToolAuthorizationDecision.Granted, workflowResponse.Decision);
+        Assert.AreEqual(1, workflowTerminal.ReadCount);
+        Assert.IsNull(workflowResponse.Grant);
+    }
+
+    [TestMethod]
+    public async Task RequestApprovalAsync_AutoAllSkipsWorkflowPrompt()
+    {
+        var terminal = new ScriptedTerminal(isInteractive: false);
+        using var handler = CreateHandler(
+            terminal,
+            StandaloneToolPermissionMode.AutoAll);
+
+        var response = await handler.RequestApprovalAsync(
+            CreateWorkflowApprovalContext(),
+            TestContext.CancellationToken);
+
+        Assert.AreEqual(ToolAuthorizationDecision.Granted, response.Decision);
+        Assert.AreEqual(0, terminal.ReadCount);
+        Assert.IsNull(response.Grant);
+    }
+
+    [TestMethod]
+    public async Task SetPermissionMode_AskAllRestoresInteractivePrompt()
+    {
+        var terminal = new ScriptedTerminal(true, "3");
+        using var handler = CreateHandler(
+            terminal,
+            StandaloneToolPermissionMode.AutoAll);
+        handler.SetPermissionMode(StandaloneToolPermissionMode.AskAll);
+
+        var response = await handler.RequestPermissionAsync(
+            CreatePermissionContext(canGrantForRun: true),
+            TestContext.CancellationToken);
+
+        Assert.AreEqual(ToolAuthorizationDecision.Denied, response.Decision);
+        Assert.AreEqual(1, terminal.ReadCount);
+        Assert.Contains("Tool permission", terminal.Output, StringComparison.Ordinal);
     }
 
     [TestMethod]
@@ -452,10 +620,13 @@ public sealed class StandaloneToolConsentTests
         Assert.IsGreaterThan(firstIndex, secondIndex);
     }
 
-    private static StandaloneToolConsentHandler CreateHandler(ICliTerminal terminal) =>
+    private static StandaloneToolConsentHandler CreateHandler(
+        ICliTerminal terminal,
+        StandaloneToolPermissionMode mode = StandaloneToolPermissionMode.AskAll) =>
         new(
             terminal,
-            new StandaloneToolGrantFactory(new FixedTimeProvider(FixedNow)));
+            new StandaloneToolGrantFactory(new FixedTimeProvider(FixedNow)),
+            mode);
 
     private ToolPermissionConsentContext CreatePermissionContext(
         bool canGrantForRun,
@@ -607,6 +778,17 @@ public sealed class StandaloneToolConsentTests
             permission.Invocation,
             permission.Descriptor,
             permission.ScopeResolution,
+            _workspace);
+    }
+
+    private ToolApprovalConsentContext CreateWorkflowApprovalContext()
+    {
+        var approval = CreateApprovalContext();
+        return new ToolApprovalConsentContext(
+            approval.Request,
+            Invocation: null,
+            Descriptor: null,
+            ToolConsentScopeResolution.Failure("Workflow approval has no tool scope."),
             _workspace);
     }
 

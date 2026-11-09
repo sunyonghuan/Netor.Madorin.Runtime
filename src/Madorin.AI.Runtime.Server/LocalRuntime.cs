@@ -26,6 +26,7 @@ public sealed class LocalRuntime : IAsyncDisposable
 {
     private readonly string _dataDirectory;
     private readonly string _databaseConnectionString;
+    private readonly ConversationStore _conversationStore;
     private readonly BlobStagingStore _blobStore;
     private readonly RuntimeExecutionCore _executionCore;
     private readonly ToolCatalogStore _toolCatalogStore = new(
@@ -59,8 +60,13 @@ public sealed class LocalRuntime : IAsyncDisposable
     {
         _dataDirectory = options.DataDirectory;
         _databaseConnectionString = databaseConnectionString;
+        _conversationStore = new ConversationStore(options.DataDirectory);
         _providerResolver = options.ProviderResolver;
-        _compactionService = new SessionCompactionService(_dataDirectory, databaseConnectionString, selection => ResolveProvider(selection));
+        _compactionService = new SessionCompactionService(
+            _dataDirectory,
+            databaseConnectionString,
+            selection => ResolveProvider(selection),
+            diagnosticLog);
         _toolConsentHandler = options.ToolConsentHandler;
         _maintenanceAudit = new SessionMaintenanceAuditLog(options.DataDirectory);
         _diagnosticLog = diagnosticLog;
@@ -79,7 +85,8 @@ public sealed class LocalRuntime : IAsyncDisposable
             agentContextComposer,
             memoryFiles,
             options.RuntimeLimits,
-            _blobStore);
+            _blobStore,
+            options.WorkspaceInstructionsState);
         RuntimeInstanceId = options.RuntimeInstanceId;
         WorkspaceRoot = options.WorkspaceRoot;
     }
@@ -380,8 +387,7 @@ public sealed class LocalRuntime : IAsyncDisposable
             throw new KeyNotFoundException($"Session '{parameters.SessionId}' was not found.");
         }
 
-        var store = new ConversationStore(_dataDirectory);
-        var page = await store.ReadPageAsync(
+        var page = await _conversationStore.ReadPageAsync(
                 parameters.SessionId,
                 parameters.Cursor,
                 parameters.PageSize + 1,
@@ -398,6 +404,53 @@ public sealed class LocalRuntime : IAsyncDisposable
         return new SessionHistoryReadResult(
             messages,
             hasMore && messages.Length > 0 ? messages[^1].Sequence : null);
+    }
+
+    /// <summary>Reads complete user-anchored rounds for chat display.</summary>
+    public async Task<SessionHistoryRoundsReadResult> ReadSessionHistoryRoundsAsync(
+        SessionHistoryRoundsReadParameters parameters,
+        CancellationToken ct = default)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(parameters);
+        ArgumentException.ThrowIfNullOrWhiteSpace(parameters.SessionId);
+        if (parameters.RoundCount is < 1 or > 100)
+        {
+            throw new ArgumentOutOfRangeException(nameof(parameters));
+        }
+
+        if (parameters.BeforeSequence is < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(parameters));
+        }
+
+        if (!TryParseBlobMode(parameters.BlobMode, out var blobMode))
+        {
+            throw new ArgumentOutOfRangeException(nameof(parameters));
+        }
+
+        if (await GetSessionSnapshotAsync(parameters.SessionId, ct).ConfigureAwait(false) is null)
+        {
+            throw new KeyNotFoundException($"Session '{parameters.SessionId}' was not found.");
+        }
+
+        var page = await _conversationStore.ReadRoundsPageAsync(
+                parameters.SessionId,
+                parameters.RoundCount,
+                parameters.BeforeSequence,
+                new ConversationReadOptions(blobMode),
+                ct)
+            .ConfigureAwait(false);
+        var messages = page.Records
+            .Select(record => MapHistoryMessage(
+                record,
+                parameters.IncludeReasoning,
+                parameters.IncludeToolCalls))
+            .ToArray();
+        return new SessionHistoryRoundsReadResult(
+            messages,
+            page.OldestUserSequence,
+            page.HasOlder);
     }
 
     /// <summary>Reads the canonical message history for Session export.</summary>
@@ -611,7 +664,36 @@ public sealed class LocalRuntime : IAsyncDisposable
                 detail,
                 ct)
             .ConfigureAwait(false);
-        var result = await CompactSessionCoreAsync(sessionId, options, ct).ConfigureAwait(false);
+        SessionCompactionResult? result;
+        try
+        {
+            result = await CompactSessionCoreAsync(sessionId, options, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // 失败也要闭合审计记录，否则审计里只剩 prepared，无法判断操作是失败还是仍在执行。
+            // 详细原因写在 runtime.jsonl 的 CompactionFailed 事件里，这里只记异常类型。
+            try
+            {
+                await AppendMaintenanceAuditAsync(
+                        auditId,
+                        sessionId,
+                        "compact",
+                        "failed",
+                        ex is OperationCanceledException ? "timeout" : "error",
+                        $"{detail};errorType={ex.GetType().Name}",
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception auditException) when (auditException is IOException
+                or UnauthorizedAccessException)
+            {
+                // 审计写入失败不能覆盖压缩本身的异常。
+            }
+
+            throw;
+        }
+
         var outcome = result switch
         {
             null => "not-found",
@@ -969,12 +1051,17 @@ public sealed class LocalRuntime : IAsyncDisposable
             }
             catch (Exception exception)
             {
+                // 摘要 Provider 失败时附带原始 Provider 错误和摘要请求诊断。
+                var summaryFailure = SummaryFailureDiagnostics.Find(exception);
                 await _diagnosticLog.TryWriteAsync(
                         RuntimeDiagnosticLogLevel.Error,
                         "RunFailed",
                         prepared.RunId,
                         prepared.SessionId,
-                        exception: exception)
+                        exception: exception,
+                        writeDetails: summaryFailure is null
+                            ? null
+                            : writer => SummaryFailureDiagnostics.WriteProviderFailure(writer, summaryFailure))
                     .ConfigureAwait(false);
                 terminalEnvelope = await CompleteLocalTerminalRunAsync(
                     prepared,

@@ -10,6 +10,7 @@ using Madorin.AI.Runtime.Entities;
 using Madorin.AI.Runtime.Providers.Abstractions;
 using Madorin.AI.Runtime.Server;
 using Madorin.AI.Runtime.Services.Memory;
+using Madorin.AI.Runtime.Services.Prompt;
 using Madorin.AI.Runtime.Services.Tools;
 using Madorin.AI.Runtime.Transport.Abstractions;
 
@@ -773,6 +774,185 @@ public sealed class StandaloneLocalRuntimeTests
     }
 
     [TestMethod]
+    [Timeout(15_000, CooperativeCancellation = true)]
+    public async Task RunAsync_WorkspaceInstructions_DefaultOffAndEnabledInjectsAgentsMd()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var workspace = Path.Combine(root, "workspace");
+            Directory.CreateDirectory(workspace);
+            await File.WriteAllTextAsync(
+                Path.Combine(workspace, "AgEnTs.Md"),
+                "# Workspace rule\n\n- Always use tabs.",
+                _testContext.CancellationToken);
+
+            var disabledProvider = new RecordingProvider();
+            await using (var runtime = await LocalRuntime.StartAsync(
+                CreateOptions(
+                    workspace,
+                    Path.Combine(root, "disabled-data"),
+                    disabledProvider),
+                _testContext.CancellationToken))
+            {
+                _ = await CollectAsync(
+                    runtime.RunAsync(
+                        new NewSessionRunRequest(
+                            Guid.NewGuid().ToString("N"),
+                            Guid.NewGuid().ToString("N"),
+                            RuntimeMode.Expert,
+                            CreateSelection(),
+                            [new TextContentBlock("disabled")]),
+                        _testContext.CancellationToken),
+                    _testContext.CancellationToken);
+            }
+
+            var disabledInstructions = GetSystemInstructions(
+                Assert.ContainsSingle(disabledProvider.Requests));
+            Assert.DoesNotContain("Always use tabs.", disabledInstructions, StringComparison.Ordinal);
+            Assert.DoesNotContain("## Workspace Instructions", disabledInstructions, StringComparison.Ordinal);
+
+            var enabledProvider = new RecordingProvider();
+            await using (var runtime = await LocalRuntime.StartAsync(
+                CreateOptions(
+                    workspace,
+                    Path.Combine(root, "enabled-data"),
+                    enabledProvider) with
+                {
+                    WorkspaceInstructionsState = new WorkspaceInstructionsState(enabled: true)
+                },
+                _testContext.CancellationToken))
+            {
+                var firstEvents = await CollectAsync(
+                    runtime.RunAsync(
+                        new NewSessionRunRequest(
+                            Guid.NewGuid().ToString("N"),
+                            Guid.NewGuid().ToString("N"),
+                            RuntimeMode.Expert,
+                            CreateSelection(),
+                            [new TextContentBlock("enabled")]),
+                        _testContext.CancellationToken),
+                    _testContext.CancellationToken);
+                var accepted = firstEvents
+                    .Single(static envelope => envelope.MessageType == MessageTypes.RunAccepted)
+                    .Payload
+                    .Deserialize(RuntimeJsonContext.Default.RunAcceptedEvent);
+                Assert.IsNotNull(accepted);
+                var secondEvents = await CollectAsync(
+                    runtime.RunAsync(
+                        new ExistingSessionRunRequest(
+                            accepted.SessionId,
+                            Guid.NewGuid().ToString("N"),
+                            CreateSelection(),
+                            [new TextContentBlock("resume")]),
+                        _testContext.CancellationToken),
+                    _testContext.CancellationToken);
+                Assert.IsTrue(secondEvents.Any(static envelope =>
+                    envelope.MessageType == MessageTypes.RunCompleted));
+            }
+
+            var enabledRequests = enabledProvider.Requests.ToArray();
+            Assert.HasCount(2, enabledRequests);
+            var enabledInstructions = GetSystemInstructions(enabledRequests[0]);
+            var agentIndex = enabledInstructions.IndexOf(
+                "Preserve this system prompt exactly.",
+                StringComparison.Ordinal);
+            var headingIndex = enabledInstructions.IndexOf(
+                "## Workspace Instructions",
+                StringComparison.Ordinal);
+            var ruleIndex = enabledInstructions.IndexOf(
+                "- Always use tabs.",
+                StringComparison.Ordinal);
+            Assert.IsGreaterThanOrEqualTo(0, agentIndex);
+            Assert.IsGreaterThan(agentIndex, headingIndex);
+            Assert.IsGreaterThan(headingIndex, ruleIndex);
+            Assert.Contains(
+                "- Always use tabs.",
+                GetSystemInstructions(enabledRequests[1]),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [TestMethod]
+    [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task HostRuntime_LoadsWorkspaceInstructionsWithoutExplicitOption()
+    {
+        var root = CreateTemporaryDirectory();
+        using var serverCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            _testContext.CancellationToken);
+        try
+        {
+            var workspace = Path.Combine(root, "workspace");
+            Directory.CreateDirectory(workspace);
+            await File.WriteAllTextAsync(
+                Path.Combine(workspace, "agents.md"),
+                "# Host rule",
+                _testContext.CancellationToken);
+            var hostProvider = new RecordingProvider();
+            var hostData = Path.Combine(root, "host-data");
+            var instanceId = Guid.NewGuid().ToString("N");
+            var secret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+            await using var server = await RuntimeServer.StartAsync(
+                new RuntimeServerOptions(workspace)
+                {
+                    DataDirectory = hostData,
+                    ConfigDirectory = Path.Combine(hostData, "config"),
+                    LogDirectory = Path.Combine(hostData, "logs"),
+                    InstanceId = instanceId,
+                    PipePrefix = $"madorin.ai.runtime.instructions.{Guid.NewGuid():N}",
+                    HandshakeSecret = secret,
+                    MemoryUserHome = Path.Combine(root, "home"),
+                    ProviderResolver = _ => hostProvider
+                },
+                _testContext.CancellationToken);
+            var serverTask = server.RunAsync(serverCancellation.Token);
+            await using var client = new RuntimeClient(
+                new RuntimeClientOptions(
+                    server.PipeName,
+                    Guid.NewGuid().ToString("N"),
+                    ExpectedRuntimeInstanceId: instanceId,
+                    HandshakeSecret: secret));
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(
+                _testContext.CancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(10));
+            await client.ConnectAsync(timeout.Token);
+            var runId = await client.StartNewSessionRunAsync(
+                new NewSessionRunRequest(
+                    Guid.NewGuid().ToString("N"),
+                    Guid.NewGuid().ToString("N"),
+                    RuntimeMode.Expert,
+                    CreateSelection(),
+                    [new TextContentBlock("host")]),
+                timeout.Token);
+
+            await foreach (var envelope in client.ReadEventsAsync(0, timeout.Token))
+            {
+                if (envelope.RunId == runId
+                    && envelope.MessageType == MessageTypes.RunCompleted)
+                {
+                    break;
+                }
+            }
+
+            var instructions = GetSystemInstructions(Assert.ContainsSingle(hostProvider.Requests));
+            Assert.Contains("## Workspace Instructions", instructions, StringComparison.Ordinal);
+            Assert.Contains("# Host rule", instructions, StringComparison.Ordinal);
+            serverCancellation.Cancel();
+            await serverTask;
+        }
+        finally
+        {
+            serverCancellation.Cancel();
+            DeleteDirectory(root);
+        }
+    }
+
+    [TestMethod]
+    [Timeout(15_000, CooperativeCancellation = true)]
     public async Task RunAsync_ControlPeerAndLocalConsentHandler_AreMutuallyExclusive()
     {
         var root = CreateTemporaryDirectory();

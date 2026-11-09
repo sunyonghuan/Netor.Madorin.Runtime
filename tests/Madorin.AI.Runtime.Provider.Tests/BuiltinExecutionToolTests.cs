@@ -36,68 +36,159 @@ public sealed class BuiltinExecutionToolTests
     }
 
     [TestMethod]
-    public async Task ProcessRun_AllowlistedDotnet_UsesArgumentListAndReturnsBoundedOutput()
+    public async Task Command_AllowlistedShell_ExecutesCommandAndReturnsOutput()
     {
-        var permission = CreatePermission(allowedExecutables: ["dotnet"]);
+        var permission = CreatePermission(
+            allowedExecutables: GetShellNames(),
+            allowedEnvironmentVariables: SkillScriptEnvironmentPolicy.InheritedVariableNames.ToArray());
         var result = await ExecuteAsync(
-            new BuiltinProcessToolExecutor(),
-            BuiltinToolRegistry.ProcessRunToolId,
-            """{"fileName":"dotnet","arguments":["--version"]}""",
+            new BuiltinCommandToolExecutor(),
+            BuiltinToolRegistry.CommandToolId,
+            $$"""{"script":"{{(OperatingSystem.IsWindows() ? "Write-Output command-ok" : "printf command-ok")}}"}""",
             permission);
 
         Assert.IsTrue(result.Success, result.Error);
         using var output = JsonDocument.Parse(result.OutputJson!);
         Assert.AreEqual(0, output.RootElement.GetProperty("exitCode").GetInt32());
-        StringAssert.Contains(output.RootElement.GetProperty("stdout").GetString(), ".");
+        StringAssert.Contains(output.RootElement.GetProperty("stdout").GetString(), "command-ok");
     }
 
     [TestMethod]
-    public async Task ProcessRun_AllowlistedShell_ExecutesCommand()
+    public async Task Command_AllowsMultipleCommandsAndUnicodeText()
     {
-        var (fileName, argumentsJson, expectedOutput) = GetShellCommand();
+        var shell = OperatingSystem.IsWindows() ? "powershell" : "sh";
+        var script = OperatingSystem.IsWindows()
+            ? "$value='第一行'; Write-Output $value; Write-Output '第二行'"
+            : "printf '第一行\\n'; printf '第二行\\n'";
         var result = await ExecuteAsync(
-            new BuiltinProcessToolExecutor(),
-            BuiltinToolRegistry.ProcessRunToolId,
-            argumentsJson,
-            CreatePermission(allowedExecutables: [fileName]));
+            new BuiltinCommandToolExecutor(),
+            BuiltinToolRegistry.CommandToolId,
+            $$"""{"shell":"{{shell}}","script":"{{script}}"}""",
+            CreatePermission(
+                allowedExecutables: [shell],
+                allowedEnvironmentVariables: SkillScriptEnvironmentPolicy.InheritedVariableNames.ToArray()));
 
         Assert.IsTrue(result.Success, result.Error);
         using var output = JsonDocument.Parse(result.OutputJson!);
         Assert.AreEqual(0, output.RootElement.GetProperty("exitCode").GetInt32());
         StringAssert.Contains(
             output.RootElement.GetProperty("stdout").GetString(),
-            expectedOutput);
+            "第一行");
     }
 
     [TestMethod]
-    public async Task ProcessRun_UnallowlistedShell_IsRejected()
+    public async Task Command_ExecutableAllowlist_DoesNotRestrictAuthorizedCommandTool()
     {
-        var (fileName, argumentsJson, _) = GetShellCommand();
+        var shell = OperatingSystem.IsWindows() ? "powershell" : "sh";
         var result = await ExecuteAsync(
-            new BuiltinProcessToolExecutor(),
-            BuiltinToolRegistry.ProcessRunToolId,
-            argumentsJson,
-            CreatePermission(allowedExecutables: ["dotnet"]));
+            new BuiltinCommandToolExecutor(),
+            BuiltinToolRegistry.CommandToolId,
+            $$"""{"shell":"{{shell}}","script":"echo allowed"}""",
+            CreatePermission(
+                allowedExecutables: ["dotnet"],
+                allowedEnvironmentVariables: SkillScriptEnvironmentPolicy.InheritedVariableNames.ToArray()));
 
-        Assert.IsFalse(result.Success);
-        StringAssert.Contains(result.Error, "effective allowlist");
+        Assert.IsTrue(result.Success, result.Error);
+        using var output = JsonDocument.Parse(result.OutputJson!);
+        StringAssert.Contains(output.RootElement.GetProperty("stdout").GetString(), "allowed");
     }
 
     [TestMethod]
-    public async Task ProcessRun_UnallowlistedEnvironmentVariable_IsRejected()
+    public async Task Command_EnvironmentOverrides_DoNotRequireSeparateAuthorization()
     {
         var result = await ExecuteAsync(
-            new BuiltinProcessToolExecutor(),
-            BuiltinToolRegistry.ProcessRunToolId,
-            """{"fileName":"dotnet","arguments":["--version"],"environment":{"SECRET":"value"}}""",
-            CreatePermission(allowedExecutables: ["dotnet"]));
+            new BuiltinCommandToolExecutor(),
+            BuiltinToolRegistry.CommandToolId,
+            OperatingSystem.IsWindows()
+                ? """{"shell":"powershell","script":"Write-Output $env:SECRET","environment":{"SECRET":"value"}}"""
+                : """{"shell":"sh","script":"printf \"$SECRET\"","environment":{"SECRET":"value"}}""",
+            CreatePermission(
+                allowedExecutables: GetShellNames(),
+                allowedEnvironmentVariables: SkillScriptEnvironmentPolicy.InheritedVariableNames.ToArray()));
 
-        Assert.IsFalse(result.Success);
-        StringAssert.Contains(result.Error, "SECRET");
+        Assert.IsTrue(result.Success, result.Error);
+        using var output = JsonDocument.Parse(result.OutputJson!);
+        StringAssert.Contains(output.RootElement.GetProperty("stdout").GetString(), "value");
     }
 
     [TestMethod]
-    public async Task ProcessRun_SafeInheritedEnvironment_AllowsDotnetBuild()
+    public async Task Command_DirectoryAuthorization_IsRequiredEvenWhenShellIsAllowlisted()
+    {
+        var result = await ExecuteAsync(new BuiltinCommandToolExecutor(), BuiltinToolRegistry.CommandToolId,
+            """{"script":"echo blocked"}""", CreatePermission() with { CommandWorkingDirectory = null });
+        Assert.IsFalse(result.Success);
+        StringAssert.Contains(result.Error, "authorization for working directory");
+    }
+
+    [TestMethod]
+    public async Task Command_LinkedWorkingDirectoryAndExecutable_AreHandledByOperatingSystem()
+    {
+        var directoryLink = Path.Combine(_root, "linked-directory");
+        var realDirectory = Directory.CreateDirectory(Path.Combine(_root, "target-directory")).FullName;
+        var executableLink = Path.Combine(realDirectory, OperatingSystem.IsWindows() ? "linked-command.exe" : "linked-command");
+        var target = OperatingSystem.IsWindows() ? Path.Combine(Environment.SystemDirectory, "cmd.exe") : "/bin/sh";
+        try
+        {
+            Directory.CreateSymbolicLink(directoryLink, realDirectory);
+            File.CreateSymbolicLink(executableLink, target);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            Assert.Inconclusive($"Symbolic link creation is unavailable: {ex.Message}");
+            return;
+        }
+
+        var shell = OperatingSystem.IsWindows() ? "powershell" : "sh";
+        var script = OperatingSystem.IsWindows()
+            ? "& './linked-command.exe' /d /c 'echo linked-ok'"
+            : "'./linked-command' -c 'echo linked-ok'";
+        var arguments = WriteCommandArguments(shell, script, directoryLink);
+        var result = await ExecuteAsync(new BuiltinCommandToolExecutor(), BuiltinToolRegistry.CommandToolId,
+            arguments, CreatePermission() with { CommandWorkingDirectory = directoryLink });
+        Assert.IsTrue(result.Success, result.Error);
+        using var output = JsonDocument.Parse(result.OutputJson!);
+        Assert.AreEqual(0, output.RootElement.GetProperty("exitCode").GetInt32(), result.OutputJson);
+        StringAssert.Contains(output.RootElement.GetProperty("stdout").GetString(), "linked-ok");
+    }
+
+    [TestMethod]
+    public async Task Command_WindowsPwshApplicationAlias_CanExecuteRepeatedly()
+    {
+        if (!OperatingSystem.IsWindows() || !(Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+            .Split(Path.PathSeparator).Any(path => File.Exists(Path.Join(path.Trim().Trim('"'), "pwsh.exe"))))
+        {
+            Assert.Inconclusive("Windows pwsh is not installed on PATH.");
+            return;
+        }
+
+        foreach (var shell in new[] { "pwsh", "cmd", "pwsh", "auto" })
+        {
+            var result = await ExecuteAsync(new BuiltinCommandToolExecutor(), BuiltinToolRegistry.CommandToolId,
+                WriteCommandArguments(shell, "echo shell-ok", _root), CreatePermission(allowedExecutables: []));
+            Assert.IsTrue(result.Success, result.Error);
+            using var output = JsonDocument.Parse(result.OutputJson!);
+            Assert.AreEqual(0, output.RootElement.GetProperty("exitCode").GetInt32(), result.OutputJson);
+            StringAssert.Contains(output.RootElement.GetProperty("stdout").GetString(), "shell-ok");
+        }
+    }
+
+    private static string WriteCommandArguments(string shell, string script, string directory)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("shell", shell);
+            writer.WriteString("script", script);
+            writer.WriteString("workingDirectory", directory);
+            writer.WriteEndObject();
+        }
+
+        return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    [TestMethod]
+    public async Task Command_SafeInheritedEnvironment_AllowsShellExecution()
     {
         var projectPath = Path.Combine(_root, "EnvironmentProbe.csproj");
         await File.WriteAllTextAsync(
@@ -111,22 +202,19 @@ public sealed class BuiltinExecutionToolTests
             """,
             TestContext.CancellationToken);
         var permission = CreatePermission(
-            allowedExecutables: ["dotnet"],
+            allowedExecutables: GetShellNames(),
             allowedEnvironmentVariables: SkillScriptEnvironmentPolicy.InheritedVariableNames.ToArray());
 
         var result = await ExecuteAsync(
-            new BuiltinProcessToolExecutor(),
-            BuiltinToolRegistry.ProcessRunToolId,
-            """{"fileName":"dotnet","arguments":["build","EnvironmentProbe.csproj","--nologo"]}""",
+            new BuiltinCommandToolExecutor(),
+            BuiltinToolRegistry.CommandToolId,
+            $$"""{"script":"{{(OperatingSystem.IsWindows() ? "Write-Output environment-ok" : "printf environment-ok")}}"}""",
             permission);
 
         Assert.IsTrue(result.Success, result.Error);
         using var output = JsonDocument.Parse(result.OutputJson!);
         Assert.AreEqual(0, output.RootElement.GetProperty("exitCode").GetInt32());
-        Assert.DoesNotContain(
-            "C:\\Windows",
-            output.RootElement.GetProperty("stderr").GetString() ?? string.Empty,
-            StringComparison.OrdinalIgnoreCase);
+        StringAssert.Contains(output.RootElement.GetProperty("stdout").GetString(), "environment-ok");
     }
 
     [TestMethod]
@@ -254,15 +342,15 @@ public sealed class BuiltinExecutionToolTests
         _root,
         [_root],
         [_root],
-        AllowedExecutables: allowedExecutables ?? [],
+        AllowedExecutables: allowedExecutables ?? GetShellNames(),
         DenyNetwork: networkPolicy?.DenyAll ?? true,
-        AllowedEnvironmentVariables: allowedEnvironmentVariables ?? [],
-        NetworkPolicy: networkPolicy);
+        AllowedEnvironmentVariables: allowedEnvironmentVariables
+            ?? SkillScriptEnvironmentPolicy.InheritedVariableNames.ToArray(),
+        NetworkPolicy: networkPolicy,
+        CommandWorkingDirectory: _root);
 
-    private static (string FileName, string ArgumentsJson, string ExpectedOutput) GetShellCommand() =>
-        OperatingSystem.IsWindows()
-            ? ("cmd.exe", """{"fileName":"cmd.exe","arguments":["/c","echo mcli-shell-authorized"]}""", "mcli-shell-authorized")
-            : ("sh", """{"fileName":"sh","arguments":["-c","printf mcli-shell-authorized"]}""", "mcli-shell-authorized");
+    private static string[] GetShellNames() =>
+        OperatingSystem.IsWindows() ? ["pwsh", "powershell", "cmd"] : ["bash", "zsh", "sh"];
 
     private static NetworkPolicy CreateLoopbackPolicy(int port, long maxResponseBytes) => new(
         DenyAll: false,

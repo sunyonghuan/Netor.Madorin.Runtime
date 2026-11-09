@@ -118,7 +118,7 @@ var toolSelection = SmokeSupport.Select(
     modelId,
     "你是工具测试助手。必须按用户指定调用工具，禁止假装已执行。拿到真实工具结果后用一句中文或令牌回复。",
     skillIds: null,
-    allowedTools: ["mcli_fs_read", "mcli_fs_write", "mcli_fs_list", "mcli_process"]);
+    allowedTools: ["mcli_fs_read", "mcli_fs_write", "mcli_fs_list", "mcli_command"]);
 var skillSelection = SmokeSupport.Select(
     provider.ProviderId,
     modelId,

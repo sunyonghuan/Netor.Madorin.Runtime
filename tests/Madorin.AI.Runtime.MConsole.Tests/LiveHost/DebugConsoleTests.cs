@@ -46,6 +46,18 @@ public sealed class DebugConsoleTests
     }
 
     [TestMethod]
+    public void Format_PlanRestored_BecomesNoticeWithGoalAndStepCount()
+    {
+        using var document = JsonDocument.Parse(
+            "{\"planId\":\"p\",\"goal\":\"排查空基路径\",\"stepCount\":3}");
+        var view = DebugEventFormatter.Format(CreateEnvelope(MessageTypes.ExpertPlanRestored, document.RootElement));
+
+        Assert.AreEqual(DebugOutputChannel.Notice, view.Channel);
+        Assert.AreEqual("[已恢复未完成计划]（3 步） 排查空基路径", view.Text);
+        Assert.IsFalse(view.Terminal);
+    }
+
+    [TestMethod]
     public void Transcript_GroupsReasoningBeforeAssistantText()
     {
         var transcript = new DebugTranscript();

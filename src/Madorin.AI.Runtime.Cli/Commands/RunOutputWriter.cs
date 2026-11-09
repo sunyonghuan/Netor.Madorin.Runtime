@@ -11,11 +11,16 @@ internal sealed class RunOutputWriter(
     RunOutputFormat format,
     bool noStream,
     bool machineOutputRedirected,
-    Func<string, string> redact)
+    Func<string, string> redact,
+    ReplThinkingStatus? thinking = null)
 {
     private readonly StringBuilder _text = new();
     private string? _runId;
     private string? _sessionId;
+
+    internal bool HasText => _text.Length > 0;
+
+    internal bool EndsWithNewLine => _text.Length > 0 && _text[^1] is '\n' or '\r';
 
     public async ValueTask<RunOutputResult?> WriteEventAsync(
         RuntimeEventEnvelope envelope,
@@ -29,10 +34,36 @@ internal sealed class RunOutputWriter(
                 _runId = accepted?.RunId ?? envelope.RunId;
                 break;
 
+            case MessageTypes.ReasoningDelta:
+                if (format is RunOutputFormat.Text)
+                {
+                    thinking?.BeginThinking();
+                }
+
+                break;
+
+            case MessageTypes.ToolCallDelta:
+            case MessageTypes.ToolCallCompleted:
+                if (format is RunOutputFormat.Text)
+                {
+                    var toolName = TryReadToolName(envelope.Payload);
+                    if (toolName is not null)
+                    {
+                        thinking?.BeginTool(toolName);
+                    }
+                }
+
+                break;
+
             case MessageTypes.TextDelta:
                 var delta = envelope.Payload.Deserialize(RuntimeJsonContext.Default.TextDeltaEvent);
                 if (delta is not null)
                 {
+                    if (format is RunOutputFormat.Text)
+                    {
+                        thinking?.Finish();
+                    }
+
                     _text.Append(delta.Delta);
                     if (format is RunOutputFormat.Text && !noStream)
                     {
@@ -47,6 +78,7 @@ internal sealed class RunOutputWriter(
                 var completed = envelope.Payload.Deserialize(RuntimeJsonContext.Default.RunCompletedEvent);
                 _sessionId = completed?.SessionId ?? _sessionId;
                 _runId = completed?.RunId ?? envelope.RunId;
+                thinking?.Finish();
                 await WriteSuccessAsync(envelope, ct).ConfigureAwait(false);
                 return new RunOutputResult(ExitCodes.Success, _sessionId, _runId);
 
@@ -54,6 +86,7 @@ internal sealed class RunOutputWriter(
                 var failed = envelope.Payload.Deserialize(RuntimeJsonContext.Default.RunFailedEvent);
                 _sessionId = failed?.SessionId ?? _sessionId;
                 _runId = failed?.RunId ?? envelope.RunId;
+                thinking?.Finish();
                 var runtimeError = failed?.Error;
                 await WriteFailureAsync(
                         envelope,
@@ -69,6 +102,7 @@ internal sealed class RunOutputWriter(
                 var cancelled = envelope.Payload.Deserialize(RuntimeJsonContext.Default.RunCancelledEvent);
                 _sessionId = cancelled?.SessionId ?? _sessionId;
                 _runId = cancelled?.RunId ?? envelope.RunId;
+                thinking?.Finish();
                 await WriteFailureAsync(
                         envelope,
                         "RunCancelled",
@@ -339,4 +373,16 @@ internal sealed class RunOutputWriter(
     }
 
     private static string CreateDiagnosticId() => $"diag_{Guid.NewGuid():N}";
+
+    private static string? TryReadToolName(JsonElement payload)
+    {
+        if (payload.ValueKind is not JsonValueKind.Object
+            || !payload.TryGetProperty("name", out var name)
+            || name.ValueKind is not JsonValueKind.String)
+        {
+            return null;
+        }
+
+        return name.GetString();
+    }
 }

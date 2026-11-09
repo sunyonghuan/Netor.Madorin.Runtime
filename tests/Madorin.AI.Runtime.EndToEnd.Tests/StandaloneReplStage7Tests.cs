@@ -305,6 +305,17 @@ public sealed class StandaloneReplStage7Tests
             Assert.AreEqual(ExitCodes.Success, firstExitCode, firstOutput.ToString());
             var initialSessions = await ReadSessionsAsync(workspace, configDirectory);
             Assert.HasCount(2, initialSessions);
+            foreach (var session in initialSessions)
+            {
+                Assert.Contains(
+                    $"/resume {session.SessionId}",
+                    firstOutput.ToString(),
+                    StringComparison.Ordinal);
+                Assert.Contains(
+                    $"madorin run --session {session.SessionId}",
+                    firstOutput.ToString(),
+                    StringComparison.Ordinal);
+            }
             var resumedSessionId = initialSessions[0].SessionId;
             var secondOutput = new StringWriter();
             var secondExitCode = CliApplication.RunForTests(
@@ -574,6 +585,14 @@ public sealed class StandaloneReplStage7Tests
             Assert.AreEqual(RunStatus.Cancelled.ToString(), runs[0].Status);
             Assert.AreEqual(RunStatus.Completed.ToString(), runs[1].Status);
             Assert.AreEqual(runs[0].SessionId, runs[1].SessionId);
+            Assert.Contains(
+                $"/resume {runs[0].SessionId}",
+                output.ToString(),
+                StringComparison.Ordinal);
+            Assert.Contains(
+                $"madorin run --session {runs[0].SessionId}",
+                output.ToString(),
+                StringComparison.Ordinal);
             await AssertOneTerminalEventPerRunAsync(workspace, configDirectory, runs);
         }
         finally

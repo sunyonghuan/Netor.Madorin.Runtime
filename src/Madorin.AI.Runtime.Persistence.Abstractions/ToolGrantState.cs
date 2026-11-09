@@ -28,4 +28,5 @@ public sealed record ToolGrantState(
     string? RevocationReason = null,
     string? ApprovalRequestId = null,
     string[]? AllowedSkillScriptKeys = null,
-    string? SkillCatalogVersion = null);
+    string? SkillCatalogVersion = null,
+    string? CommandWorkingDirectory = null);

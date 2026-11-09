@@ -65,9 +65,9 @@ public static class ProviderCapabilityValidator
             {
                 ReasoningContentBlock when !capabilities.Reasoning => "reasoning",
                 ToolCallContentBlock or ToolResultContentBlock when !capabilities.ToolCalling => "tool_calling",
-                BlobRefContentBlock blob => GetUnsupportedBlobCapability(
-                    capabilities,
-                    blob.Blob.ContentType),
+                // Media support is ultimately determined by the selected endpoint/model.
+                // Do not let user-maintained capability metadata suppress the request.
+                BlobRefContentBlock => null,
                 _ => null
             };
 
@@ -123,23 +123,6 @@ public static class ProviderCapabilityValidator
                 }
             }
         }
-    }
-
-    private static string? GetUnsupportedBlobCapability(
-        ProviderCapabilities capabilities,
-        string contentType)
-    {
-        if (contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
-        {
-            return capabilities.Vision ? null : "vision";
-        }
-
-        if (contentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase))
-        {
-            return capabilities.Audio ? null : "audio";
-        }
-
-        return capabilities.Files ? null : "files";
     }
 
     private static RuntimeProviderException CreateCapabilityException(string capability)

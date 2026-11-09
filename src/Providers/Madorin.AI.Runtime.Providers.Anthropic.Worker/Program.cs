@@ -22,7 +22,7 @@ if (!string.Equals(slug, Slug, StringComparison.Ordinal))
 }
 
 var streams = ProviderWorkerStreams.Bind();
-return await ProviderWorkerHost.RunAsync(
+return await ProviderWorkerHost.RunWithBlobResolverAsync(
     Protocol,
     Slug,
     BuildAdapter,
@@ -32,7 +32,7 @@ return await ProviderWorkerHost.RunAsync(
     declaredCapabilities: null,
     declaredModels: Madorin.AI.Runtime.Providers.Anthropic.Models.AnthropicModelCatalog.All);
 
-static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config)
+static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config, IProviderBlobResolver blobResolver)
 {
     ArgumentNullException.ThrowIfNull(config);
     return new AnthropicProviderAdapter(
@@ -41,5 +41,5 @@ static IRuntimeProviderAdapter BuildAdapter(ProviderConnectionConfig config)
         string.IsNullOrWhiteSpace(config.BaseUrl)
             ? "https://api.anthropic.com"
             : config.BaseUrl.Trim(),
-        ProviderConnectionModels.Resolve(config, Madorin.AI.Runtime.Providers.Anthropic.Models.AnthropicModelCatalog.All));
+        ProviderConnectionModels.Resolve(config, Madorin.AI.Runtime.Providers.Anthropic.Models.AnthropicModelCatalog.All), blobResolver);
 }

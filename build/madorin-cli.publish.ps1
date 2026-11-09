@@ -8,6 +8,7 @@ param(
     [switch]$NoBump,
     [switch]$SkipProviders,
     [string]$Rid = "",
+    [string]$Version = "",
     [ValidateSet("patch", "minor", "major")]
     [string]$Bump = "patch"
 )
@@ -92,7 +93,11 @@ function Show-PublishHelp {
     Write-Host "  -NoBump                  - Don't bump version" -ForegroundColor White
     Write-Host "  -SkipProviders           - Publish CLI only" -ForegroundColor White
     Write-Host "  -Rid <rid>               - Override the platform RID" -ForegroundColor White
+    Write-Host "  -Version <x.y.z>         - Publish the exact version and update version files" -ForegroundColor White
     Write-Host "  -Bump <patch|minor|major> - Version bump type (default: patch)" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Fixed version example:" -ForegroundColor Yellow
+    Write-Host "  .\madorin-cli.publish.ps1 win -Version 1.2.3" -ForegroundColor Green
     Write-Host ""
     exit 0
 }
@@ -253,6 +258,27 @@ function Get-ProjectVersion {
     return $versionMatch.Groups[1].Value
 }
 
+function Set-ProjectVersion {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$NewVersion
+    )
+
+    if ($NewVersion -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
+        throw "Version format incorrect, expected Major.Minor.Patch such as 1.2.3: $NewVersion"
+    }
+
+    $propsContent = Get-Content -Path $DirectoryBuildPropsFile -Raw -Encoding UTF8
+    if ([string]::IsNullOrEmpty($propsContent)) {
+        throw "Directory.Build.props is empty or could not be read: $DirectoryBuildPropsFile"
+    }
+
+    $propsContent = $propsContent -replace "<MadorinCliVersion>([^<]+)</MadorinCliVersion>", "<MadorinCliVersion>$NewVersion</MadorinCliVersion>"
+
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($DirectoryBuildPropsFile, $propsContent, $utf8NoBom)
+}
+
 function Bump-ProjectVersion {
     $propsContent = Get-Content -Path $DirectoryBuildPropsFile -Raw -Encoding UTF8
     if ([string]::IsNullOrEmpty($propsContent)) {
@@ -277,10 +303,7 @@ function Bump-ProjectVersion {
 
     $NewVersion = "$major.$minor.$patch"
 
-    $propsContent = $propsContent -replace "<MadorinCliVersion>([^<]+)</MadorinCliVersion>", "<MadorinCliVersion>$NewVersion</MadorinCliVersion>"
-
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($DirectoryBuildPropsFile, $propsContent, $utf8NoBom)
+    Set-ProjectVersion -NewVersion $NewVersion
 
     Write-Host "Version bumped: $OldVersion -> $NewVersion" -ForegroundColor Yellow
     return $NewVersion
@@ -311,7 +334,13 @@ function Set-ContractsPackageVersion {
     [System.IO.File]::WriteAllText($PackageVersionsFile, $packageVersionsContent, $utf8NoBom)
 }
 
-$NewVersion = if ($NoBump) { Get-ProjectVersion } else { Bump-ProjectVersion }
+if (-not [string]::IsNullOrWhiteSpace($Version)) {
+    Set-ProjectVersion -NewVersion $Version
+    $NewVersion = $Version
+    Write-Host "Version fixed at: $NewVersion" -ForegroundColor Yellow
+} else {
+    $NewVersion = if ($NoBump) { Get-ProjectVersion } else { Bump-ProjectVersion }
+}
 Set-ContractsPackageVersion -Version $NewVersion
 
 $RestorePackagesRoot = [System.IO.Path]::GetFullPath((Join-Path $SolutionDir 'obj/release-packages'))

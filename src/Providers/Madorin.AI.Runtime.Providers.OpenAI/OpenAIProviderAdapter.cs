@@ -1,7 +1,7 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.CompilerServices;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -28,6 +28,8 @@ public sealed class OpenAIProviderAdapter :
     private readonly ConcurrentDictionary<string, IChatClient> _chatClients =
         new(StringComparer.Ordinal);
     private readonly IProviderBlobResolver? _blobResolver;
+    private readonly bool _projectToolAttachmentsForChat;
+    private readonly bool _useVideoUrlContent;
     private readonly ApiKeyCredential? _credential;
     private readonly HttpClient? _ownedHttpClient;
 
@@ -43,11 +45,15 @@ public sealed class OpenAIProviderAdapter :
     public OpenAIProviderAdapter(
         Func<string, IChatClient> chatClientFactory,
         IReadOnlyList<ProviderModel>? models = null,
-        IProviderBlobResolver? blobResolver = null)
+        IProviderBlobResolver? blobResolver = null,
+        bool projectToolAttachmentsForChat = false,
+        bool useVideoUrlContent = false)
     {
         ArgumentNullException.ThrowIfNull(chatClientFactory);
         _chatClientFactory = chatClientFactory;
         _blobResolver = blobResolver;
+        _projectToolAttachmentsForChat = projectToolAttachmentsForChat;
+        _useVideoUrlContent = useVideoUrlContent;
         ProviderId = "openai";
         Models = models ?? [];
     }
@@ -155,7 +161,7 @@ public sealed class OpenAIProviderAdapter :
         };
         var responsesClient = new ResponsesClient(_credential, options);
         _chatClientFactory = modelId =>
-            responsesClient.AsIChatClientWithStoredOutputDisabled(modelId);
+            new Protocol.OpenAIOutputAttachmentChatClient(responsesClient.AsIChatClientWithStoredOutputDisabled(modelId));
     }
 
     public string ProviderId { get; }
@@ -239,6 +245,9 @@ public sealed class OpenAIProviderAdapter :
             yield return adjustment;
         }
 
+        // 记录开始时间和已收到的更新条数，失败时写入 ProviderDetails，用来区分断流、解析失败和请求失败。
+        var startedAt = Stopwatch.GetTimestamp();
+        var receivedUpdates = 0;
         IAsyncEnumerator<MafProviderResponseUpdate>? enumerator = null;
         try
         {
@@ -255,7 +264,9 @@ public sealed class OpenAIProviderAdapter :
         }
         catch (Exception ex)
         {
-            failure = CreateProviderError(ex);
+            failure = CreateProviderError(
+                ex,
+                ProviderFailureContext.Since(ProviderFailureStages.RequestStart, receivedUpdates, startedAt, request.UseNonStreamingResponse));
         }
 
         if (failure is not null || enumerator is null)
@@ -288,10 +299,13 @@ public sealed class OpenAIProviderAdapter :
             }
             catch (Exception ex)
             {
-                failure = CreateProviderError(ex);
+                failure = CreateProviderError(
+                    ex,
+                    ProviderFailureContext.Since(ProviderFailureStages.StreamRead, receivedUpdates, startedAt, request.UseNonStreamingResponse));
                 break;
             }
 
+            receivedUpdates++;
             if (update.FinishReason is { } currentFinishReason)
             {
                 finishReason = currentFinishReason.ToString();
@@ -309,7 +323,12 @@ public sealed class OpenAIProviderAdapter :
             failure = ProviderErrorFactory.Create(
                 "OpenAI",
                 new InvalidDataException("Provider stream ended before a terminal update."),
-                isProtocolError: true);
+                isProtocolError: true,
+                failureContext: ProviderFailureContext.Since(
+                    ProviderFailureStages.StreamEndedWithoutFinishReason,
+                    receivedUpdates,
+                    startedAt,
+                    request.UseNonStreamingResponse));
         }
 
         if (failure is not null)
@@ -441,7 +460,8 @@ public sealed class OpenAIProviderAdapter :
                     case ToolResultContentBlock toolResult:
                         content.Add(new FunctionResultContent(
                         toolResult.CallId,
-                        ConvertToolResult(toolResult)));
+                        await ProviderToolResultMapper.ToContentAsync(
+                            toolResult, ResolveBlobAsync, ct).ConfigureAwait(false)));
                         break;
                     case BlobRefContentBlock blobReference:
                         content.Add(await ResolveBlobAsync(blobReference.Blob, ct).ConfigureAwait(false));
@@ -455,40 +475,24 @@ public sealed class OpenAIProviderAdapter :
             messages.Add(new ChatMessage(ConvertRole(message.Role), content));
         }
 
-        return [.. messages];
+        return _projectToolAttachmentsForChat
+            ? ProviderToolResultMapper.ProjectForChatCompletions([.. messages])
+            : [.. messages];
     }
 
-    private async ValueTask<DataContent> ResolveBlobAsync(
-        BlobReference blob,
-        CancellationToken ct)
+    private async ValueTask<DataContent> ResolveBlobAsync(BlobReference blob, CancellationToken ct)
     {
-        if (_blobResolver is null)
+        var route = _useVideoUrlContent ? ProviderAttachmentRoute.AliyunChatCompletions
+            : _projectToolAttachmentsForChat ? ProviderAttachmentRoute.OpenAIChatCompletions
+            : ProviderAttachmentRoute.OpenAIResponses;
+        var content = await ProviderBlobContentResolver.ResolveAsync(_blobResolver, blob, route, ct)
+            .ConfigureAwait(false);
+        if (_useVideoUrlContent && content.HasTopLevelMediaType("video"))
         {
-            throw new InvalidOperationException(
-                $"Blob '{blob.BlobId}' cannot be sent because no Provider Blob resolver is configured.");
+            content.RawRepresentation = Protocol.OpenAIChatVideoContent.Create(content);
         }
 
-        var resolved = await _blobResolver.ResolveAsync(blob, ct).ConfigureAwait(false);
-        if (resolved.Data.Length != blob.Length)
-        {
-            throw new InvalidDataException($"Blob '{blob.BlobId}' length does not match its descriptor.");
-        }
-
-        var sha256 = Convert.ToHexString(SHA256.HashData(resolved.Data.Span)).ToLowerInvariant();
-        if (!string.Equals(sha256, blob.Sha256, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidDataException($"Blob '{blob.BlobId}' SHA-256 does not match its descriptor.");
-        }
-
-        if (!string.Equals(resolved.ContentType, blob.ContentType, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidDataException($"Blob '{blob.BlobId}' content type does not match its descriptor.");
-        }
-
-        return new DataContent(resolved.Data, resolved.ContentType)
-        {
-            Name = resolved.FileName
-        };
+        return content;
     }
 
     private static ChatRole ConvertRole(string role) => role switch
@@ -519,18 +523,6 @@ public sealed class OpenAIProviderAdapter :
         return converted;
     }
 
-    private static object ConvertToolResult(ToolResultContentBlock toolResult)
-    {
-        if (toolResult.Content is [TextContentBlock text])
-        {
-            return text.Text;
-        }
-
-        return JsonSerializer.SerializeToElement(
-            toolResult.Content,
-            RuntimeJsonContext.Default.ContentBlockArray);
-    }
-
     private static IEnumerable<RuntimeProviderEvent> MapUpdate(
         RuntimeProviderRequest request,
         MafProviderResponseUpdate update,
@@ -552,6 +544,12 @@ public sealed class OpenAIProviderAdapter :
                 case TextContent text when !string.IsNullOrEmpty(text.Text):
                     draft.EndBlock();
                     yield return new TextDeltaProviderEvent(request.InvocationId, text.Text);
+                    break;
+
+                case ProviderOutputAttachmentContent attachment:
+                    draft.EndBlock();
+                    yield return new AttachmentCompletedProviderEvent(request.InvocationId,
+                        attachment.Blob, attachment.FileName);
                     break;
 
                 case FunctionCallContent functionCall:
@@ -692,8 +690,16 @@ public sealed class OpenAIProviderAdapter :
         return (int)Math.Clamp(value, 0, int.MaxValue);
     }
 
-    private static RuntimeError CreateProviderError(Exception exception)
+    /// <summary>把 SDK 异常转换为脱敏的 Runtime 错误，并附带可选的失败阶段上下文。</summary>
+    private static RuntimeError CreateProviderError(
+        Exception exception,
+        ProviderFailureContext? failureContext = null)
     {
+        if (exception is RuntimeProviderException runtimeException)
+        {
+            return runtimeException.Error;
+        }
+
         int? statusCode = exception switch
         {
             ClientResultException clientResult when clientResult.Status > 0 => clientResult.Status,
@@ -718,7 +724,8 @@ public sealed class OpenAIProviderAdapter :
             statusCode,
             retryAfter,
             requestId,
-            isProtocolError: exception is JsonException);
+            isProtocolError: exception is JsonException,
+            failureContext: failureContext);
     }
 
     public void Dispose()
