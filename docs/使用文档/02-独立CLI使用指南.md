@@ -29,6 +29,8 @@ madorin-cli.exe
 madorin-cli
 ```
 
+发布包中的实际文件名是 `madorin-cli.exe` 或 `madorin-cli`；本文后续使用的 `madorin` 是加入 PATH 后的命令别名。你也可以直接把示例中的 `madorin` 替换为发布包中的实际文件名。
+
 ### 添加到 PATH（推荐）
 
 **Windows:**
@@ -47,6 +49,8 @@ export PATH="$PATH:/path/to/madorin/bin"
 
 ```bash
 madorin version
+# 等价的根级快捷写法
+madorin --version
 ```
 
 ## 配置管理
@@ -79,37 +83,41 @@ madorin config validate
 
 ```json
 {
-  "schemaVersion": 1,
+  "defaultProvider": "my-openai",
+  "defaultModel": "gpt-5",
+  "defaultAgent": "default",
   "providers": [
     {
-      "id": "my-openai",
+      "name": "my-openai",
       "protocol": "OpenAI",
       "apiKey": "sk-...",
-      "baseUrl": "https://api.openai.com/v1"
+      "baseUrl": "https://api.openai.com/v1",
+      "models": ["gpt-5"]
     },
     {
-      "id": "my-anthropic",
+      "name": "my-anthropic",
       "protocol": "Anthropic",
       "apiKey": "sk-ant-...",
-      "baseUrl": "https://api.anthropic.com"
+      "baseUrl": "https://api.anthropic.com",
+      "models": ["claude-opus-4-1"]
     },
     {
-      "id": "deepseek",
+      "name": "deepseek",
       "protocol": "DeepSeek",
       "apiKey": "sk-...",
-      "baseUrl": "https://api.deepseek.com"
+      "baseUrl": "https://api.deepseek.com/v1",
+      "models": ["deepseek-chat"]
     }
-  ],
-  "selection": {
-    "provider": "my-openai",
-    "model": "gpt-4o",
-    "agent": "default"
-  },
-  "proxy": {
-    "enabled": true,
-    "url": "http://proxy.company.com:8080"
-  }
+  ]
 }
+```
+
+这是全局独立 CLI 配置 `~/.madorin/config.json` 的结构。工作区配置 `<workspace>/.madorin/config.json` 只用于覆盖当前工作区的 Provider、模型和 Agent 选择，结构为 `{"schemaVersion":1,"selection":{"provider":"my-openai","model":"gpt-5","agent":"default"}}`；代理等扩展能力应按当前 Provider 配置和宿主环境设置，不要把未定义的 `proxy` 节点直接写入独立配置。
+
+查询当前构建支持的 Provider 协议名称：
+
+```bash
+madorin provider protocols
 ```
 
 ### 支持的 Provider
@@ -124,6 +132,7 @@ madorin config validate
 | Gemini | `Gemini` | Google Gemini |
 | GLM | `GLM` | 智谱 GLM |
 | Ollama | `Ollama` | 本地 Ollama 服务 |
+| Custom | `Custom` | 自定义 HTTP Provider 配置 |
 | Azure OpenAI | `Azure OpenAI` | Azure OpenAI Service（实验性） |
 | 自定义兼容 | `OpenAI Compatible` | 兼容 OpenAI 协议的服务 |
 
@@ -211,11 +220,13 @@ madorin run --input "你好" --output-format jsonl
 
 `--json` 是全局机器可读输出选项；`--output-format` 用于选择 `text`、`json` 或 `jsonl` 运行结果格式。`--input` 与 `--input-file` 不能同时使用。
 
-## 三种运行模式
+## 运行模式
 
-### Expert 模式（当前运行模式）
+### Expert 模式（当前 CLI 执行模式）
 
 深度分析和复杂决策，适合技术问题和深入研究。支持子 Agent 委派、工具调用和精细化请求参数控制。
+
+`--mode expert` 是当前 CLI 的实际执行模式。`--mode standalone` 仍被接受以兼容旧调用方式，但会解析为同一个 Expert 执行模式，不代表独立的第三种模式。
 
 ```bash
 # 基础对话
@@ -277,6 +288,8 @@ madorin session show <session-id>
 madorin session show <session-id> --messages
 ```
 
+`--messages` 输出消息元数据摘要；需要读取完整对话内容时，使用 `session export`。
+
 ### 导出会话
 
 ```bash
@@ -302,6 +315,9 @@ madorin session compact <session-id>
 
 # 使用滑动窗口并设置保留 Token 预算
 madorin session compact <session-id> --strategy sliding-window --keep-last-tokens 12000
+
+# 临时指定用于压缩的 Provider 和模型
+madorin session compact <session-id> --provider my-openai --model gpt-5
 
 # 强制重新生成当前投影
 madorin session compact <session-id> --force
@@ -464,6 +480,30 @@ madorin memory clear project --yes
 
 记忆命令使用位置参数 `global` 或 `project`；`effective` 只用于 `memory show`，表示合并后的有效内容。
 
+## Skills 管理
+
+Skills 可以来自当前工作区、用户全局目录，或两者合并后的有效目录。默认 scope 为 `effective`。
+
+```bash
+# 列出当前生效的 Skills
+madorin skill list
+
+# 按来源筛选：effective、workspace 或 global
+madorin skill list --scope workspace
+madorin skill list --scope global
+
+# 查看指定 Skill 定义
+madorin skill show <skill-name> --scope effective
+
+# 校验 Skills 定义，不执行其中脚本
+madorin skill validate
+
+# 重新扫描并刷新本地 Skill catalog
+madorin skill refresh
+```
+
+交互式 REPL 也支持 `/skill list`、`/skill show <名称>` 和 `/skill refresh`。CLI 的 `skill refresh` 会读取并刷新当前 catalog；它不修改 Skill 文件。
+
 ## 数据管理
 
 ### 检查数据库
@@ -472,9 +512,17 @@ madorin memory clear project --yes
 # 检查完整性
 madorin db check
 
-# 生成并执行数据库修复
-madorin db repair
+# 输出每一项数据库检查的详细结果
+madorin db check --verbose
+
+# 先预览可修复的问题
+madorin db repair --dry-run
+
+# 确认并执行修复；--yes 跳过交互确认
+madorin db repair --yes
 ```
+
+`db repair --dry-run` 只显示可识别的 JSONL 尾部损坏和消息索引漂移，不会获取写锁、创建备份或修改数据。确认计划后，使用 `db repair --yes` 执行修复；不加 `--yes` 时会交互询问。JSON 模式下执行修复必须提供 `--yes`。该命令不使用 `--confirm`。
 
 ### 数据库维护
 
@@ -488,6 +536,10 @@ madorin db backup --output backup-2026-09-18.db --include-messages
 # 预览数据库迁移，或迁移到最新支持版本
 madorin db migrate --dry-run
 madorin db migrate
+
+# 预览并迁移到指定的目标 schema 版本
+madorin db migrate --to 21 --dry-run
+madorin db migrate --to 21
 
 # 从权威消息文件重建索引和状态库；先预览，再明确确认
 madorin db rebuild --dry-run
@@ -617,6 +669,16 @@ madorin run --data-dir /custom/data --input "任务"
 ```bash
 madorin doctor
 ```
+
+`doctor` 默认只读检查配置、Provider 访问、数据库和运行环境。使用 `--provider <id>` 只检查指定 Provider；`--fix` 会先备份数据并尝试修复已识别的数据库问题，`--yes` 可用于非交互确认且必须与 `--fix` 一起使用：
+
+```bash
+madorin doctor --provider my-openai
+madorin doctor --fix
+madorin doctor --fix --yes
+```
+
+修复行为会写入数据，建议先运行默认只读检查并保留备份。
 
 输出示例：
 

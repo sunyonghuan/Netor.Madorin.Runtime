@@ -2,11 +2,11 @@
 
 > 状态：阶段 7 冻结基线
 >
-> 适用版本：程序 `0.1.0`、协议 `1.1`、SQLite Schema `14`
+> 适用版本：CLI `0.1.106`、协议 `1.1`、SQLite Schema `21`
 >
 > 机器真值：`tests/Madorin.AI.Runtime.EndToEnd.Tests/Snapshots/stage7-cli-command-matrix.v1.json`
 
-本文冻结当前 51 条命令路径、局部参数、默认值、数据影响、锁要求、主要退出码和可解析示例。精确帮助文本及参数集合由机器快照的 SHA-256 和 `Stage7CommandMatrixTests` 约束；本文用于人工评审和运维判断。
+本文冻结当前 54 条命令路径（包含根命令）、局部参数、默认值、数据影响、锁要求、主要退出码和可解析示例。精确帮助文本及参数集合由机器快照的 SHA-256 和 `Stage7CommandMatrixTests` 约束；本文用于人工评审和运维判断。
 
 ## 1. 通用契约
 
@@ -37,10 +37,12 @@
 | 命令 | 局部参数与默认值 | 数据影响 | 锁 | 主要失败码 | 示例 |
 | --- | --- | --- | --- | --- | --- |
 | `madorin` | 无参数进入单行 REPL | 按交互操作写 Session/Run | 工作区写锁 | `2/4/130` | `madorin` |
-| `madorin run` | `--provider --model --agent --mode --session --input --input-file --output-file --output-format --no-stream --timeout`；模式默认 `expert`，输出默认 `text`，默认流式 | 写 Session、Run、消息、事件及工具审计 | 工作区写锁 | `2/4/130` | `madorin run --input "hello" --no-stream` |
-| `madorin serve` | `--config-dir --log-dir --instance --pipe-prefix --max-runs`；Pipe 默认 `madorin.ai.runtime`，并发默认 `4` | 持续写 Runtime 状态、Session、Run、消息和事件 | 工作区写锁，进程全生命周期持有 | `2/3/4` | `madorin serve --workspace D:\work` |
+| `madorin run` | `--provider --model --agent --mode --session --input --input-file --output-file --output-format --no-stream --timeout --lock-wait --allow-tools --permission-mode --instructions-mode --temperature --top-p --top-k --max-tokens --frequency-penalty --presence-penalty --seed --stop --response-format`；模式默认 `expert`，输出默认 `text`，默认流式；`--mode standalone` 是兼容别名，也映射为 Expert | 写 Session、Run、消息、事件及工具审计 | 工作区写锁 | `2/4/130` | `madorin run --input "hello" --no-stream` |
+| `madorin serve` | `--config-dir --log-dir --instance --pipe-prefix --max-runs --http-port`；Pipe 默认 `madorin.ai.runtime`，并发默认 `4` | 持续写 Runtime 状态、Session、Run、消息和事件 | 工作区写锁，进程全生命周期持有 | `2/3/4` | `madorin serve --workspace D:\work` |
 | `madorin version` | 无 | 只读 | 无 | `1` | `madorin version --json` |
 | `madorin doctor` | `--provider --fix --yes`；`--yes` 仅与 `--fix` 合用 | 默认只读；`--fix` 可修复配置权限、数据和日志问题，修复前保留备份或恢复点 | 修复时按目标获取配置写锁或工作区写锁 | `1/2/4` | `madorin doctor --fix --yes` |
+| `madorin provider` | 子命令组 | 无直接行为 | 无 | `2` | `madorin provider protocols` |
+| `madorin provider protocols` | 无 | 只读，列出当前构建支持的 Provider 协议 | 无 | `0/1` | `madorin provider protocols` |
 
 ## 3. 配置与 Agent
 
@@ -57,7 +59,17 @@
 | `madorin agent edit <agentId>` | `--name --description --system-prompt --provider --model --temperature` | 更新 Agent 定义 | 配置写锁 | `2/4` | `madorin agent edit demo --model gpt-5` |
 | `madorin agent delete <agentId>` | `--replacement --yes` | 删除 Agent 并可迁移默认引用 | 配置写锁 | `2/4` | `madorin agent delete demo --yes` |
 
-## 4. 记忆与 Session
+## 4. Skills
+
+| 命令 | 局部参数与默认值 | 数据影响 | 锁 | 主要失败码 | 示例 |
+| --- | --- | --- | --- | --- | --- |
+| `madorin skill` | 子命令组 | 无直接行为 | 无 | `2` | `madorin skill list` |
+| `madorin skill list` | `--scope`；默认 `effective`，可选 `workspace` 或 `global` | 只读 | 无 | `0/2/4` | `madorin skill list --scope workspace` |
+| `madorin skill show <name>` | `--scope`；默认 `effective` | 只读 | 无 | `0/2/4` | `madorin skill show repl-demo --scope effective` |
+| `madorin skill validate` | `--scope`；默认 `effective` | 只读校验，不执行 Skill 脚本 | 无 | `0/1/2/4` | `madorin skill validate --scope global` |
+| `madorin skill refresh` | 无 | 重新扫描并刷新本地 Skill catalog | 无 | `0/2/4` | `madorin skill refresh` |
+
+## 5. 记忆与 Session
 
 `memory` 的 `<scope>` 只接受 `global` 或 `project`。全局目标为 `~/.madorin/memory.md`，项目目标为 `<workspace>/.madorin/memory.md`。
 
@@ -78,7 +90,7 @@
 | `madorin session compact <sessionId>` | `--strategy --provider --model --keep-last-tokens --dry-run --force`；策略默认 `summary` | dry-run 只展示计划；实际执行生成或刷新上下文缓存 | 实际执行使用工作区写锁 | `2/4` | `madorin session compact s1 --dry-run` |
 | `madorin session delete <sessionId>` | `--confirm --include-blobs`；必须确认 | 删除权威索引并创建可恢复审计/恢复点 | 工作区写锁 | `2/4` | `madorin session delete s1 --confirm` |
 
-## 5. 数据库与 Blob 维护
+## 6. 数据库与 Blob 维护
 
 维护命令不直接暴露数据库物理路径给 SDK 宿主。写操作先获取工作区排他锁；备份或恢复点创建失败时不得进入修改阶段。
 
@@ -95,7 +107,7 @@
 | `madorin storage check` | `--verify-hashes` | 只读检查消息和 Blob 引用；可选完整哈希校验 | 无 | `1/2/4` | `madorin storage check --verify-hashes` |
 | `madorin storage gc` | `--dry-run --older-than --confirm`；龄期默认 `7` 天，未确认时默认 dry-run | 实际执行把可回收 Blob 移入恢复点，不立即永久删除 | 实际执行使用工作区写锁 | `1/2/4` | `madorin storage gc --dry-run --older-than 7` |
 
-## 6. 在线控制
+## 7. 在线控制
 
 `ctl` 只通过 Client SDK 和 Runtime 协议操作目标实例，不直接读取或修改 Runtime 内部文件。`--instance` 绑定实例；未显式指定时只允许解析当前工作区中唯一可用实例。
 
@@ -108,8 +120,9 @@
 | `madorin ctl cancel <runId>` | `--instance --reason` | 请求取消目标 Run | Runtime 绑定；按 `(runtimeInstanceId, runId)` 路由 | `2/3/5` | `madorin ctl cancel run-1 --reason "operator request"` |
 | `madorin ctl credential` | 子命令组 | 无直接行为 | 无 | `2` | `madorin ctl credential update --help` |
 | `madorin ctl credential update` | `--instance --run --provider --profile --api-key-env --expires-at`；`--run --provider --api-key-env` 必填 | 从环境变量读取 Secret 并提交给等待凭据的 Run，不回显明文 | Runtime 绑定 | `2/3/5` | `madorin ctl credential update --run run-1 --provider openai --api-key-env OPENAI_API_KEY` |
+| `madorin ctl shutdown` | `--instance` | 请求 Runtime 优雅关闭并关闭其 Provider | Runtime 绑定 | `2/3/5` | `madorin ctl shutdown --instance runtime-1` |
 
-## 7. 参数约束
+## 8. 参数约束
 
 以下组合固定返回退出码 `2`：
 
@@ -125,7 +138,7 @@
 
 所有必填位置参数、上述条件必填与互斥组合均由 `Stage7CommandMatrixTests` 自动验证。危险维护命令的确认、备份失败、锁冲突、中途故障和恢复点保留由对应 EndToEnd/Persistence 测试验证。
 
-## 8. 快照与变更规则
+## 9. 快照与变更规则
 
 1. 新增、删除或重命名命令时，必须同时更新本文、命令矩阵快照和命令树测试。
 2. 参数、默认值、usage 或帮助文本变化会改变对应 SHA-256，必须作为公开 CLI 契约变更审查。
