@@ -19,6 +19,12 @@ public static class StrictConversationSummarizer
     /// <summary>单次摘要模型请求的时限，超时按 ProviderTimeout 报告并附带请求诊断。</summary>
     public static readonly TimeSpan RequestTimeout = TimeSpan.FromMinutes(5);
 
+    /// <summary>
+    /// 单次摘要请求的输入上限。历史记录按原子消息切到该预算内，各片摘要再合并。
+    /// 模型窗口更小时仍以窗口为准。默认走非流式，端点拒绝时才回退流式。
+    /// </summary>
+    public const int SummarySliceInputTokens = 100_000;
+
     /// <summary>单次请求超时写入 ProviderDetails 的 stage 取值。</summary>
     private const string RequestTimeoutStage = "summary_request_timeout";
 
@@ -46,7 +52,10 @@ public static class StrictConversationSummarizer
             model = (await catalogSource.FetchModelsAsync(token).ConfigureAwait(false))
                 .FirstOrDefault(candidate => candidate.Id == modelId || candidate.ProviderModelId == modelId) ?? model;
         }
-        var budget = ContextTokenBudget.Resolve(model, inputTokenBudget);
+        var sliceBudget = inputTokenBudget is > 0
+            ? Math.Min(inputTokenBudget.Value, SummarySliceInputTokens)
+            : SummarySliceInputTokens;
+        var budget = ContextTokenBudget.Resolve(model, sliceBudget);
         var state = new GenerationState();
         var material = messages;
         for (var level = 0; level < 8; level++)

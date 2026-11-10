@@ -164,6 +164,31 @@ public sealed class SummaryProjectionTests
     }
 
     [TestMethod]
+    public async Task Summary_SlicesLargeHistoryAtOneHundredThousandTokensAndStaysNonStreaming()
+    {
+        var provider = new SummaryProvider(ValidJson) { ContextWindow = 1_000_000 };
+        var chunk = new string('a', 240_000);
+        RuntimeProviderMessage[] history =
+        [
+            new("user", [new TextContentBlock(chunk)]),
+            new("user", [new TextContentBlock(chunk + "b")])
+        ];
+
+        var result = await StrictConversationSummarizer.GenerateAsync(
+            provider, "p", "m", history, ct: TestContext.CancellationToken);
+
+        Assert.IsTrue(StrictConversationSummarizer.IsValidatedSummary(result));
+        Assert.HasCount(3, provider.Requests);
+        foreach (var request in provider.Requests)
+        {
+            Assert.IsTrue(request.UseNonStreamingResponse);
+            Assert.IsLessThanOrEqualTo(
+                StrictConversationSummarizer.SummarySliceInputTokens,
+                ProviderTokenEstimator.Estimate(request).InputTokens!.Value);
+        }
+    }
+
+    [TestMethod]
     public async Task Projection_AppendThreeRoundsAndReopenPreserveSummaryAndAllIncrements()
     {
         var root = Path.Combine(Path.GetTempPath(), "summary-projection-" + Guid.NewGuid().ToString("N"));
