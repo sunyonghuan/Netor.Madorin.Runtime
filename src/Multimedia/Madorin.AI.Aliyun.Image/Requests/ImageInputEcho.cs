@@ -1,4 +1,6 @@
 using System.Text.Json.Nodes;
+using Madorin.AI.Multimedia.Core.Protocol;
+
 using static Madorin.AI.Multimedia.Core.Protocol.JsonProtocol;
 using static Madorin.AI.Multimedia.Core.CommandLine.CommandLineParser;
 namespace Madorin.AI.Aliyun.Image.Requests;

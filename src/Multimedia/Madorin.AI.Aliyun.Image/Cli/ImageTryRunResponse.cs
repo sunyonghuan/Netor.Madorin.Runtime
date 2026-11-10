@@ -20,7 +20,7 @@ internal static class ImageTryRunResponse
 
         var effective = Obj(("schema_version", S(SkillProtocol.ContractVersion)), ("request_id", S(options.RequestId)),
             ("prompt", S(options.Prompt)), ("task", S(options.Task)), ("model", S(options.Model)),
-            ("parameters", Obj(("size", S(options.Size!)), ("num_images", N(options.ImageCount)), ("negative_prompt", S(options.NegativePrompt)), ("prompt_extend", B(options.PromptExtend ?? true)), ("watermark", B(options.Watermark ?? false)), ("seed", options.Seed is null ? null : N(options.Seed.Value))),
+            ("parameters", Obj(("size", S(options.Size!)), ("num_images", N(options.ImageCount)), ("negative_prompt", S(options.NegativePrompt)), ("prompt_extend", B(options.PromptExtend ?? true)), ("watermark", B(options.Watermark ?? false)), ("seed", options.Seed is null ? null : N(options.Seed.Value)))),
             ("attachments", new JsonArray()), ("provider_parameters", new JsonObject()),
             ("execution", execution));
         return Obj(("schema_version", S(SkillProtocol.ContractVersion)), ("response_id", S(options.RequestId)), ("status", S("validated")),

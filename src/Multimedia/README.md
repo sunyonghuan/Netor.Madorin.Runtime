@@ -31,6 +31,7 @@
 | `Madorin.AI.Zhipu.Video` | 智谱 CogVideoX-3 文生视频与单图生视频 CLI。提交、查询、下载 MP4。 | 引用公共类库；首尾帧未实现，真实 API 与 AOT 待验证。 |
 | `Madorin.AI.Kling.Image` | 可灵旧版图像生成 CLI。提交、查询、下载图片。 | 引用公共类库；无通用模型目录，真实 API 与 AOT 待验证。 |
 | `Madorin.AI.Kling.Video` | 可灵 4.0 文生视频与单首帧图生视频 CLI。提交、查询、下载 MP4。 | 引用公共类库；多关键帧未实现，真实 API 与 AOT 待验证。 |
+| `Madorin.AI.Aliyun.Video` | 阿里云百炼万相 2.7 文生视频与单首帧图生视频 CLI。提交、查询、下载 MP4；不传音频时官方自动配音。 | 引用公共类库；首尾帧和视频续写未实现，真实 API 与 AOT 待验证。 |
 
 后续技能复用公共库，不复制基础设施。公共类库随对应 CLI 编译与打包，不创建独立 `publish.json`，不纳入单独发布清单。
 
