@@ -1,0 +1,47 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version"],
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "request_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "task": { "type": "string", "const": "text-to-image" },
+    "model": { "type": "string", "minLength": 1 },
+    "prompt": { "type": "string", "minLength": 1, "maxLength": 2500 },
+    "attachments": { "type": "array", "maxItems": 0 },
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+    "provider_parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kling": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "negative_prompt": { "type": "string", "maxLength": 2500 },
+            "resolution": { "type": "string", "enum": ["1k", "2k"] },
+            "count": { "type": "integer", "minimum": 1, "maximum": 9 },
+            "aspect_ratio": { "type": "string", "enum": ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "21:9"] },
+            "watermark_enabled": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "output_dir": { "type": "string", "minLength": 1 },
+        "timeout": { "type": "integer", "minimum": 1 },
+        "try_run": { "type": "boolean" },
+        "verbose": { "type": "boolean" },
+        "no_wait": { "type": "boolean" },
+        "output_format": { "type": "string", "const": "json" }
+      }
+    }
+  }
+}

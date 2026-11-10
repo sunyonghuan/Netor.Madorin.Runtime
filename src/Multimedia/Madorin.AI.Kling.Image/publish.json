@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "skill_name": "skill-kling-image",
+  "project": "Madorin.AI.Kling.Image.csproj",
+  "executable": "skill-kling-image",
+  "platforms": ["win-x64", "win-arm64", "linux-x64", "linux-arm64", "osx-x64", "osx-arm64"]
+}

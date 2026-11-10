@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>skill-zhipu-image</AssemblyName>
+    <RootNamespace>Madorin.AI.Zhipu.Image</RootNamespace>
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <Version>0.1.0</Version>
+    <SkillContractVersion>1.0</SkillContractVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Madorin.AI.Multimedia.Core/Madorin.AI.Multimedia.Core.csproj" />
+    <InternalsVisibleTo Include="Madorin.AI.Multimedia.Tests" />
+    <EmbeddedResource Include="skill/references/request.schema.json" LogicalName="Madorin.AI.Zhipu.Image.request.schema.json" />
+  </ItemGroup>
+</Project>

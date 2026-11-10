@@ -1,0 +1,52 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version"],
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "request_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "task": { "type": "string", "enum": ["text-to-video", "image-to-video"] },
+    "model": { "type": "string", "minLength": 1 },
+    "prompt": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "attachments": { "type": "array", "maxItems": 1 },
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "duration": { "type": "integer", "enum": [5, 10] },
+        "fps": { "type": "integer", "enum": [30, 60] },
+        "size": { "type": "string", "enum": ["1280x720", "720x1280", "1024x1024", "1920x1080", "1080x1920", "2048x1080", "3840x2160"] },
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "provider_parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "zhipu": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "quality": { "type": "string", "enum": ["speed", "quality"] },
+            "with_audio": { "type": "boolean" },
+            "watermark_enabled": { "type": "boolean" },
+            "user_id": { "type": "string", "minLength": 6, "maxLength": 128 }
+          }
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "output_dir": { "type": "string", "minLength": 1 },
+        "timeout": { "type": "integer", "minimum": 1 },
+        "try_run": { "type": "boolean" },
+        "verbose": { "type": "boolean" },
+        "no_wait": { "type": "boolean" },
+        "output_format": { "type": "string", "const": "json" }
+      }
+    }
+  }
+}

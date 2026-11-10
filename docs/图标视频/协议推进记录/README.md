@@ -16,8 +16,9 @@
 | 1 | Google Gemini 原生图片 | `01-gemini-image.md` | 源码初版在前序批次完成；离线/假 Provider 曾做推演，本轮统一测试待重新执行；分析器构建曾受公共库 CA2016 阻断 |
 | 2 | 阿里云百炼 Wan 2.6 文生图 | `02-aliyun-wan-image.md` | 源码和记录已落盘；未测试，待统一测试 |
 | 3 | BFL FLUX.2 Pro 图片 | `03-bfl-flux-image.md` | 源码和记录已落盘；未测试，待统一测试 |
-| 4 | 智谱 CogView/CogVideoX | 待建立 | 未开始 |
-| 5 | 可灵、MiniMax 等视频协议 | 待建立 | 未开始 |
+| 4 | 智谱 CogView/CogVideoX | `04-zhipu-cogview-cogvideox.md` | 源码和记录已落盘；未测试，待统一测试 |
+| 5 | 快手可灵 / 可图 | `05-kling-image-video.md` | 源码和记录已落盘；未测试，待统一测试 |
+| 6 | MiniMax 等视频协议 | 待建立 | 未开始 |
 
 ## 统一测试门禁
 
