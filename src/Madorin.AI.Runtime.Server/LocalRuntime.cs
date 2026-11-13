@@ -1096,12 +1096,7 @@ public sealed class LocalRuntime : IAsyncDisposable
                 prepared.SessionId),
             MessageTypes.RunFailed => LogRunFailedAsync(envelope, prepared),
             MessageTypes.ToolCallCompleted => LogToolCallAsync(envelope, prepared),
-            MessageTypes.ProviderProjectionAdjusted => _diagnosticLog.TryWriteAsync(
-                RuntimeDiagnosticLogLevel.Warning,
-                "ProviderProjectionAdjusted",
-                prepared.RunId,
-                prepared.SessionId,
-                writeDetails: writer => writer.WriteString("payload", envelope.Payload.GetRawText())),
+            MessageTypes.ProviderProjectionAdjusted => LogProjectionAdjustedAsync(envelope, prepared),
             MessageTypes.UsageUpdated => _diagnosticLog.TryWriteAsync(
                 RuntimeDiagnosticLogLevel.Debug,
                 "UsageUpdated",
@@ -1153,6 +1148,52 @@ public sealed class LocalRuntime : IAsyncDisposable
                     writer.WriteString("callId", capturedCallId);
                 }
             });
+    }
+
+    private ValueTask LogProjectionAdjustedAsync(
+        RuntimeEventEnvelope envelope,
+        PreparedRun prepared)
+    {
+        var payload = envelope.Payload.GetRawText();
+        if (payload.Contains("\"code\":\"stream_ended_without_finish_reason\"", StringComparison.Ordinal))
+        {
+            return _diagnosticLog.TryWriteAsync(
+                RuntimeDiagnosticLogLevel.Error,
+                "ProviderStreamEndedWithoutFinishReason",
+                prepared.RunId,
+                prepared.SessionId,
+                error: CreateAcceptedStreamError(),
+                writeDetails: writer => writer.WriteString("payload", payload));
+        }
+
+        return _diagnosticLog.TryWriteAsync(
+            RuntimeDiagnosticLogLevel.Warning,
+            "ProviderProjectionAdjusted",
+            prepared.RunId,
+            prepared.SessionId,
+            writeDetails: writer => writer.WriteString("payload", payload));
+    }
+
+    private static RuntimeError CreateAcceptedStreamError()
+    {
+        var buffer = new System.Buffers.ArrayBufferWriter<byte>();
+        using (var writer = new System.Text.Json.Utf8JsonWriter(buffer))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("stage", "stream_ended_without_finish_reason");
+            writer.WriteBoolean("responseAccepted", true);
+            writer.WriteString("finishReasonAdded", "stop");
+            writer.WriteEndObject();
+        }
+
+        using var document = System.Text.Json.JsonDocument.Parse(buffer.WrittenMemory);
+        return new RuntimeError(
+            "ProviderProtocolError",
+            "protocol",
+            "OpenAI response ended without finish_reason. A stop marker was added and the response was kept.",
+            IsRetryable: false,
+            document.RootElement.Clone(),
+            Guid.NewGuid().ToString("N"));
     }
 
     private ValueTask LogRunFailedAsync(

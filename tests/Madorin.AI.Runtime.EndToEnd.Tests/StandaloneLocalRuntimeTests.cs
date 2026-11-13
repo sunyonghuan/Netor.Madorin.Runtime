@@ -263,6 +263,9 @@ public sealed class StandaloneLocalRuntimeTests
                 nameof(WriteAsync_WritesRuntimeErrorAndExceptionDetails),
                 entry.GetProperty("stackTrace").GetString()!,
                 StringComparison.Ordinal);
+            var errorLogPath = Path.Combine(logDirectory, "2026072920.error.log");
+            var errorLines = await File.ReadAllLinesAsync(errorLogPath, _testContext.CancellationToken);
+            Assert.AreEqual(line, Assert.ContainsSingle(errorLines));
         }
         finally
         {

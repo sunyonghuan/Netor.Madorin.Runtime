@@ -20,18 +20,23 @@ internal sealed class RuntimeDiagnosticLog : IAsyncDisposable
     private readonly SemaphoreSlim _writeGate = new(1, 1);
     private readonly string _runtimeInstanceId;
     private readonly string _workspaceRoot;
+    private readonly string _logDirectory;
     private readonly RuntimeDiagnosticLogLevel _minimumLevel;
     private readonly TimeProvider _timeProvider;
+    private FileStream? _errorStream;
+    private string? _errorHourKey;
     private int _disposed;
 
     private RuntimeDiagnosticLog(
         FileStream stream,
+        string logDirectory,
         string runtimeInstanceId,
         string workspaceRoot,
         RuntimeDiagnosticLogLevel minimumLevel,
         TimeProvider timeProvider)
     {
         _stream = stream;
+        _logDirectory = logDirectory;
         _runtimeInstanceId = runtimeInstanceId;
         _workspaceRoot = workspaceRoot;
         _minimumLevel = minimumLevel;
@@ -74,6 +79,7 @@ internal sealed class RuntimeDiagnosticLog : IAsyncDisposable
             });
         return new RuntimeDiagnosticLog(
             stream,
+            Path.GetFullPath(logDirectory),
             runtimeInstanceId,
             workspaceRoot,
             minimumLevel,
@@ -147,11 +153,50 @@ internal sealed class RuntimeDiagnosticLog : IAsyncDisposable
         {
             await _stream.WriteAsync(buffer.WrittenMemory, ct).ConfigureAwait(false);
             await _stream.FlushAsync(ct).ConfigureAwait(false);
+            if (level == RuntimeDiagnosticLogLevel.Error)
+            {
+                await WriteErrorLineAsync(buffer.WrittenMemory, ct).ConfigureAwait(false);
+            }
         }
         finally
         {
             _writeGate.Release();
         }
+    }
+
+    /// <summary>
+    /// 错误单独写入日志目录下的 yyyyMMddHH.error.log，按本地小时切换文件。
+    /// 内容与 runtime.jsonl 的同一行一致，包含错误码、消息和 ProviderDetails。
+    /// </summary>
+    private async ValueTask WriteErrorLineAsync(ReadOnlyMemory<byte> line, CancellationToken ct)
+    {
+        var hourKey = _timeProvider.GetLocalNow().ToString("yyyyMMddHH", CultureInfo.InvariantCulture);
+        if (_errorStream is null || !string.Equals(_errorHourKey, hourKey, StringComparison.Ordinal))
+        {
+            if (_errorStream is not null)
+            {
+                await _errorStream.DisposeAsync().ConfigureAwait(false);
+                _errorStream = null;
+            }
+
+            Directory.CreateDirectory(_logDirectory);
+            _errorStream = new FileStream(
+                Path.Combine(_logDirectory, hourKey + ".error.log"),
+                new FileStreamOptions
+                {
+                    Mode = FileMode.Append,
+                    Access = FileAccess.Write,
+                    Share = FileShare.ReadWrite,
+                    BufferSize = 4096,
+                    Options = FileOptions.Asynchronous | FileOptions.SequentialScan
+                });
+            _errorHourKey = hourKey;
+        }
+
+        var errorStream = _errorStream
+            ?? throw new InvalidOperationException("The error log was not opened.");
+        await errorStream.WriteAsync(line, ct).ConfigureAwait(false);
+        await errorStream.FlushAsync(ct).ConfigureAwait(false);
     }
 
     public async ValueTask TryWriteAsync(
@@ -201,6 +246,13 @@ internal sealed class RuntimeDiagnosticLog : IAsyncDisposable
         {
             try
             {
+                if (_errorStream is not null)
+                {
+                    await _errorStream.FlushAsync().ConfigureAwait(false);
+                    await _errorStream.DisposeAsync().ConfigureAwait(false);
+                    _errorStream = null;
+                }
+
                 await _stream.FlushAsync().ConfigureAwait(false);
                 await _stream.DisposeAsync().ConfigureAwait(false);
             }

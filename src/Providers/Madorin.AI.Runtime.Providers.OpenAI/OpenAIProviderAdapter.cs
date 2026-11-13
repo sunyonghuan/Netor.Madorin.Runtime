@@ -318,23 +318,43 @@ public sealed class OpenAIProviderAdapter :
             }
         }
 
+        var acceptedWithoutFinishReason = false;
         if (failure is null && finishReason is null)
         {
-            failure = ProviderErrorFactory.Create(
-                "OpenAI",
-                new InvalidDataException("Provider stream ended before a terminal update."),
-                isProtocolError: true,
-                failureContext: ProviderFailureContext.Since(
-                    ProviderFailureStages.StreamEndedWithoutFinishReason,
-                    receivedUpdates,
-                    startedAt,
-                    request.UseNonStreamingResponse));
+            if (receivedUpdates > 0)
+            {
+                // The gateway closed after delivering content and omitted finish_reason.
+                // Add the terminal marker so the response is stored, and report the protocol gap separately.
+                finishReason = "stop";
+                acceptedWithoutFinishReason = true;
+            }
+            else
+            {
+                failure = ProviderErrorFactory.Create(
+                    "OpenAI",
+                    new InvalidDataException("Provider stream ended before a terminal update."),
+                    isProtocolError: true,
+                    failureContext: ProviderFailureContext.Since(
+                        ProviderFailureStages.StreamEndedWithoutFinishReason,
+                        receivedUpdates,
+                        startedAt,
+                        request.UseNonStreamingResponse));
+            }
         }
 
         if (failure is not null)
         {
             yield return new InvocationFailedProviderEvent(request.InvocationId, failure);
             yield break;
+        }
+
+        if (acceptedWithoutFinishReason)
+        {
+            yield return new ProjectionAdjustedProviderEvent(
+                request.InvocationId,
+                ProviderFailureStages.StreamEndedWithoutFinishReason,
+                "openai",
+                "finish_reason");
         }
 
         draft.Commit(Signatures, request.ProviderId);
