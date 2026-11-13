@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "skill_name": "skill-aliyun-video",
+  "project": "Madorin.AI.Aliyun.Video.csproj",
+  "executable": "skill-aliyun-video",
+  "platforms": ["win-x64", "win-arm64", "linux-x64", "linux-arm64", "osx-x64", "osx-arm64"]
+}

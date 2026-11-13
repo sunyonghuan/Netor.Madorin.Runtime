@@ -4,4 +4,4 @@
 
 Provider 使用 `POST /api/v1/services/aigc/multimodal-generation/generation`、Bearer API Key、`input.messages` 请求和 `output.choices[].message.content[].image` 临时 PNG URL 响应。CLI 下载并完整验证图片后才报告产物。
 
-本批不支持旧版 Wan 异步协议、公开 query/download、图像编辑、图文混排、参考附件或 Runtime 集成。按统一安排，本批源码完成后再与其他协议一起构建、测试和发布验证。
+本批不支持旧版 Wan 异步协议、公开 query/download、图像编辑、图文混排、参考附件或 Runtime 集成。视频由独立的 `skill-aliyun-video` 接入，不在本项目实现。按统一安排，本批源码完成后再与其他协议一起构建、测试和发布验证。
