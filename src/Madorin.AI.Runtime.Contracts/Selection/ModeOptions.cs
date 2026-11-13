@@ -15,7 +15,12 @@ public sealed record ExpertContextPolicy(
     bool PreserveReasoning = false,
     string? SummaryProviderId = null,
     string? SummaryModelId = null,
-    bool SummaryRequired = false);
+    bool SummaryRequired = false,
+    int? TriggerMessageCount = null)
+{
+    /// <summary>摘要模式未配置触发条数时，未覆盖消息达到该数量即自动压缩。</summary>
+    public const int DefaultTriggerMessageCount = 30;
+}
 
 /// <summary>
 /// Expert mode configuration with a primary agent and optional sub-agents for delegation.
