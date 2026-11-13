@@ -29,6 +29,7 @@ public sealed class RuntimeClient : IRuntimeClient
     private string? _sessionKey;
     private string? _eventPipeName;
     private long _lastConfirmedGsn;
+    private long _lastSentAckGsn;
     private CancellationTokenSource? _lifecycleCancellation;
     private Task? _heartbeatTask;
     private int _heartbeatIntervalSeconds;
@@ -673,6 +674,7 @@ public sealed class RuntimeClient : IRuntimeClient
                 StringComparison.Ordinal))
             {
                 Interlocked.Exchange(ref _lastConfirmedGsn, 0);
+                Interlocked.Exchange(ref _lastSentAckGsn, 0);
             }
 
             _confirmedRuntimeInstanceId = _runtimeInstanceId;
@@ -971,7 +973,10 @@ public sealed class RuntimeClient : IRuntimeClient
             throw new InvalidOperationException("The Runtime client is not connected.");
         }
 
-        if (lastConfirmedGsn <= Interlocked.Read(ref _lastConfirmedGsn))
+        // 去重只依据「本连接内实际发送成功过的最大 GSN」。
+        // 不能用 _lastConfirmedGsn：它可能已被本地游标推进过，而服务端并未收到该 ACK，
+        // 会造成「宿主 74040 / Runtime 74030」的脑裂。
+        if (lastConfirmedGsn <= Interlocked.Read(ref _lastSentAckGsn))
         {
             return;
         }
@@ -984,6 +989,7 @@ public sealed class RuntimeClient : IRuntimeClient
             parameters,
             cancellationToken).ConfigureAwait(false);
         ThrowIfError(response);
+        Interlocked.Exchange(ref _lastSentAckGsn, lastConfirmedGsn);
         UpdateConfirmedGsn(lastConfirmedGsn);
         _confirmedRuntimeInstanceId = _runtimeInstanceId;
     }
