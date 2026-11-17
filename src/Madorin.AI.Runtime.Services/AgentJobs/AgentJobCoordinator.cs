@@ -329,22 +329,17 @@ public sealed class AgentJobCoordinator : IAgentJobCoordinator
         if (tasks.Length > 0)
         {
             var drain = Task.WhenAll(tasks);
-            var completed = await Task.WhenAny(drain, Task.Delay(DisposeDrainTimeoutMs))
-                .ConfigureAwait(false);
-            if (!ReferenceEquals(completed, drain))
+            try
+            {
+                await drain.WaitAsync(TimeSpan.FromMilliseconds(DisposeDrainTimeoutMs)).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
             {
                 // 超时仍继续释放；Worker 应已收到 cancel。
             }
-            else
+            catch
             {
-                try
-                {
-                    await drain.ConfigureAwait(false);
-                }
-                catch
-                {
-                    // 单 job 失败不应阻止 Dispose。
-                }
+                // 单 job 失败不应阻止 Dispose。
             }
         }
 
