@@ -766,13 +766,13 @@ public sealed class ExpertModeOrchestrator(
                                 var providerSequence = runSequence++;
                                 if (IsDroppableDelta(mapped.MessageType))
                                 {
-                                    var envelope = await CreateDeltaEnvelopeAsync(
+                                    var envelope = CreateDeltaEnvelopeAsync(
                                         runtimeInstanceId,
                                         runId,
                                         providerSequence,
                                         mapped.MessageType,
                                         mapped.Payload,
-                                        ct).ConfigureAwait(false);
+                                        ct);
                                     if (envelope is not null)
                                     {
                                         yield return envelope;
@@ -2876,30 +2876,25 @@ public sealed class ExpertModeOrchestrator(
             payload);
     }
 
-    private async Task<RuntimeEventEnvelope?> CreateDeltaEnvelopeAsync(
+    private static RuntimeEventEnvelope CreateDeltaEnvelopeAsync(
         string runtimeInstanceId,
         string runId,
         long runSequence,
         string messageType,
         JsonElement payload,
-        CancellationToken ct)
+        CancellationToken ct = default)
     {
-        var gsn = await _outbox.AppendDeltaAsync(
-            runId,
-            runSequence,
-            messageType,
-            payload.GetRawText(),
-            ct).ConfigureAwait(false);
-        return gsn is null
-            ? null
-            : new RuntimeEventEnvelope(
-                runtimeInstanceId,
-                gsn.Value,
-                runId,
-                runSequence,
-                messageType,
-                DateTimeOffset.UtcNow,
-                payload);
+         // [架构重构] Delta 事件直接推送，不再入库
+         // 流式展示片段不分配 GSN，不写 event_outbox 表，不写 .evt 镜像文件
+         // 从根本上消除高频数据库写锁竞争（峰值 350 条/秒 → 0）
+         return new RuntimeEventEnvelope(
+             runtimeInstanceId,
+            Gsn: 0, // Delta 不再有全局序号
+             runId,
+             runSequence,
+             messageType,
+             DateTimeOffset.UtcNow,
+             payload);
     }
 
     private Task<RuntimeEventEnvelope> CreateStatusEnvelopeAsync(

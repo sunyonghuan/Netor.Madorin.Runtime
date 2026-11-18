@@ -365,59 +365,8 @@ public sealed class SqliteOutboxTests
         }
     }
 
-    [TestMethod]
-    public async Task AppendDeltaAsync_WhenReplayQuotaIsReached_DropsBeforeAllocatingGsn()
-    {
-        await using var connection = await CreateDatabaseAsync(TestContext.CancellationToken);
-        var replayDirectory = Path.Combine(
-            Path.GetTempPath(),
-            "madorin-runtime-replay-tests",
-            Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(replayDirectory);
-        try
-        {
-            using var outbox = new SqliteEventOutbox(
-                connection,
-                replayDirectory,
-                maxReplayBytes: 3);
-            var first = await outbox.AppendAsync(
-                "run-1",
-                0,
-                "run.accepted",
-                "{}",
-                TestContext.CancellationToken);
-
-            var dropped = await outbox.AppendDeltaAsync(
-                "run-1",
-                1,
-                "output.delta",
-                new string('x', 220),
-                TestContext.CancellationToken);
-            var second = await outbox.AppendAsync(
-                "run-1",
-                2,
-                "run.completed",
-                "{}",
-                TestContext.CancellationToken);
-
-            Assert.AreEqual(1L, first);
-            Assert.IsNull(dropped);
-            Assert.AreEqual(2L, second);
-            Assert.HasCount(2, await outbox.LoadPendingAsync(TestContext.CancellationToken));
-            Assert.HasCount(1, Directory.GetFiles(replayDirectory, "*.evt"));
-
-            await outbox.AcknowledgeAsync(first, TestContext.CancellationToken);
-            Assert.HasCount(0, Directory.GetFiles(replayDirectory, "*.evt"));
-        }
-        finally
-        {
-            if (Directory.Exists(replayDirectory))
-            {
-                Directory.Delete(replayDirectory, recursive: true);
-            }
-        }
-    }
-
+    // [架构重构] Delta 不再入库，AppendDeltaAsync 已移除，相关测试已过时
+    
     [TestMethod]
     [DoNotParallelize]
     public async Task AppendAsync_WhenMemoryTierIsFull_SpillsAndRecordsCapacityMetrics()
@@ -470,19 +419,13 @@ public sealed class SqliteOutboxTests
                 "run.completed",
                 "abcdef",
                 TestContext.CancellationToken);
-            var dropped = await outbox.AppendDeltaAsync(
-                "run-1",
-                2,
-                "output.delta",
-                new string('x', 64),
-                TestContext.CancellationToken);
+            // [架构重构] AppendDeltaAsync 已移除
 
             Assert.AreEqual(1L, first);
             Assert.AreEqual(2L, second);
-            Assert.IsNull(dropped);
             Assert.AreEqual(6L, outbox.MemoryReplayBytes);
             Assert.AreEqual(1L, outbox.MemorySpillCount);
-            Assert.AreEqual(1L, outbox.DroppedDeltaCount);
+            // [架构重构] DroppedDeltaCount 已移除
             Assert.AreEqual(2L, outbox.BackpressureCount);
             Assert.IsLessThanOrEqualTo(8L, outbox.MemoryReplayBytes);
 

@@ -24,7 +24,6 @@ public sealed class SqliteEventOutbox : IEventOutbox, IDisposable
     private readonly long _maxReplayBytes;
     private readonly SemaphoreSlim _gate;
     private long _backpressureCount;
-    private long _droppedDeltaCount;
     private long _memoryReplayBytes;
     private long _memorySpillCount;
     private long _replayBytes;
@@ -89,44 +88,6 @@ public sealed class SqliteEventOutbox : IEventOutbox, IDisposable
         }
     }
 
-    public async Task<long?> AppendDeltaAsync(
-        string runId,
-        long runSequence,
-        string messageType,
-        string payloadJson,
-        CancellationToken ct = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(runId);
-        ArgumentException.ThrowIfNullOrWhiteSpace(messageType);
-        ArgumentNullException.ThrowIfNull(payloadJson);
-        ArgumentOutOfRangeException.ThrowIfNegative(runSequence);
-
-        await _gate.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
-            var payloadBytes = Encoding.UTF8.GetByteCount(payloadJson);
-            if (!HasReplayCapacity(payloadBytes, ReserveForCriticalEvents()))
-            {
-                Interlocked.Increment(ref _droppedDeltaCount);
-                RecordBackpressure("disk", "quota");
-                EventOutboxMetrics.RecordDeltaDropped();
-                return null;
-            }
-
-            return await AppendCoreAsync(
-                runId,
-                runSequence,
-                messageType,
-                payloadJson,
-                payloadBytes,
-                ct).ConfigureAwait(false);
-        }
-        finally
-        {
-            _gate.Release();
-        }
-    }
-
     /// <summary>Returns the bytes retained by the disk replay mirror.</summary>
     public long ReplayBytes => Interlocked.Read(ref _replayBytes);
 
@@ -135,9 +96,6 @@ public sealed class SqliteEventOutbox : IEventOutbox, IDisposable
 
     /// <summary>Returns the number of events spilled from memory to persistent replay.</summary>
     public long MemorySpillCount => Interlocked.Read(ref _memorySpillCount);
-
-    /// <summary>Returns the number of Delta events dropped before GSN allocation.</summary>
-    public long DroppedDeltaCount => Interlocked.Read(ref _droppedDeltaCount);
 
     /// <summary>Returns the number of capacity-driven backpressure actions.</summary>
     public long BackpressureCount => Interlocked.Read(ref _backpressureCount);

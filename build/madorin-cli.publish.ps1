@@ -360,6 +360,15 @@ function Clear-NuGetHttpCache {
     dotnet nuget locals http-cache --clear | Out-Host
 }
 
+function Clear-LocalReleasePackageCache {
+    if (-not (Test-Path -LiteralPath $RestorePackagesDir -PathType Container)) {
+        return
+    }
+
+    Get-ChildItem -LiteralPath $RestorePackagesDir -Directory -Filter 'Madorin.AI.Runtime.*' -ErrorAction SilentlyContinue |
+        Remove-Item -Recurse -Force
+}
+
 function Clear-ProjectReleaseCache {
     param(
         [Parameter(Mandatory = $true)]
@@ -618,9 +627,7 @@ if (Test-Path -LiteralPath $legacySkillOutputDir -PathType Container) {
     Remove-Item -LiteralPath $legacySkillOutputDir -Recurse -Force
 }
 
-if (Test-Path -LiteralPath $RestorePackagesDir -PathType Container) {
-    [System.IO.Directory]::Delete($RestorePackagesDir, $true)
-}
+Clear-LocalReleasePackageCache
 [System.IO.Directory]::CreateDirectory($RestorePackagesDir) | Out-Null
 
 $escapedPackagesDir = [System.Security.SecurityElement]::Escape($PackagesDir)

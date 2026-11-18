@@ -11,14 +11,6 @@ public interface IEventOutbox
         string payloadJson,
         CancellationToken ct = default);
 
-    /// <summary>Appends a Delta only when replay capacity remains; null means it was dropped before GSN allocation.</summary>
-    public Task<long?> AppendDeltaAsync(
-        string runId,
-        long runSequence,
-        string messageType,
-        string payloadJson,
-        CancellationToken ct = default);
-
     /// <summary>Marks a pending event as sent.</summary>
     public Task MarkSentAsync(long gsn, CancellationToken ct = default);
 
