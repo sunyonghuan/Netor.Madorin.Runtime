@@ -766,33 +766,12 @@ public sealed class ExpertModeOrchestrator(
                                 var providerSequence = runSequence++;
                                 if (IsDroppableDelta(mapped.MessageType))
                                 {
-                                    var envelope = CreateDeltaEnvelopeAsync(
+                                    yield return CreateDeltaEnvelope(
                                         runtimeInstanceId,
                                         runId,
                                         providerSequence,
                                         mapped.MessageType,
-                                        mapped.Payload,
-                                        ct);
-                                    if (envelope is not null)
-                                    {
-                                        yield return envelope;
-                                    }
-                                    else
-                                    {
-                                        var droppedPayload = JsonSerializer.SerializeToElement(
-                                            new DeltaDroppedEvent(
-                                                runId,
-                                                providerSequence,
-                                                providerSequence),
-                                            RuntimeJsonContext.Default.DeltaDroppedEvent);
-                                        yield return await CreateEnvelopeAsync(
-                                            runtimeInstanceId,
-                                            runId,
-                                            runSequence++,
-                                            MessageTypes.DeltaDropped,
-                                            droppedPayload,
-                                            ct).ConfigureAwait(false);
-                                    }
+                                        mapped.Payload);
                                 }
                                 else
                                 {
@@ -2876,26 +2855,24 @@ public sealed class ExpertModeOrchestrator(
             payload);
     }
 
-    private static RuntimeEventEnvelope CreateDeltaEnvelopeAsync(
+    /// <summary>
+    /// Builds a streaming delta envelope that bypasses the Outbox: no GSN is allocated,
+    /// nothing is written to <c>event_outbox</c> or the replay mirror.
+    /// </summary>
+    private static RuntimeEventEnvelope CreateDeltaEnvelope(
         string runtimeInstanceId,
         string runId,
         long runSequence,
         string messageType,
-        JsonElement payload,
-        CancellationToken ct = default)
-    {
-         // [架构重构] Delta 事件直接推送，不再入库
-         // 流式展示片段不分配 GSN，不写 event_outbox 表，不写 .evt 镜像文件
-         // 从根本上消除高频数据库写锁竞争（峰值 350 条/秒 → 0）
-         return new RuntimeEventEnvelope(
-             runtimeInstanceId,
-            Gsn: 0, // Delta 不再有全局序号
-             runId,
-             runSequence,
-             messageType,
-             DateTimeOffset.UtcNow,
-             payload);
-    }
+        JsonElement payload) =>
+        new(
+            runtimeInstanceId,
+            Gsn: 0,
+            runId,
+            runSequence,
+            messageType,
+            DateTimeOffset.UtcNow,
+            payload);
 
     private Task<RuntimeEventEnvelope> CreateStatusEnvelopeAsync(
         string runtimeInstanceId,

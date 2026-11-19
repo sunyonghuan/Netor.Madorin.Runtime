@@ -29,6 +29,13 @@ namespace Madorin.AI.Runtime.Server;
 
 public sealed class RuntimeServer : IAsyncDisposable
 {
+    /// <summary>
+    /// Minimum interval between Outbox dispatch sweeps triggered by streaming deltas, so that
+    /// out-of-band critical events (tool completion, plan updates) still reach the host promptly
+    /// without issuing one database read per delta.
+    /// </summary>
+    private const long StreamingPendingDispatchIntervalMs = 250;
+
     private readonly WorkspaceWriteLock _instanceLock;
     private readonly FileStream _instanceNameLock;
     private readonly string _dataDirectory;
@@ -2668,6 +2675,7 @@ public sealed class RuntimeServer : IAsyncDisposable
                 .ConfigureAwait(false);
             var runRepository = new SqliteSessionRepository(dispatchConnection);
             using var dispatchOutbox = CreateEventOutbox(dispatchConnection);
+            var lastPendingDispatchTick = Environment.TickCount64;
             await foreach (var envelope in _executionCore.RunAsync(
                 runId,
                 sessionId,
@@ -2689,6 +2697,19 @@ public sealed class RuntimeServer : IAsyncDisposable
                 isHostModeSkills: _hostProviderRegistry is not null,
                 ct: ct).ConfigureAwait(false))
             {
+                if (envelope.Gsn == 0)
+                {
+                    await SendStreamingEventAsync(session, envelope).ConfigureAwait(false);
+                    if (Environment.TickCount64 - lastPendingDispatchTick >= StreamingPendingDispatchIntervalMs)
+                    {
+                        await DispatchPendingEventsAsync(session, dispatchOutbox, _shutdown.Token)
+                            .ConfigureAwait(false);
+                        lastPendingDispatchTick = Environment.TickCount64;
+                    }
+
+                    continue;
+                }
+
                 if (string.Equals(envelope.MessageType, MessageTypes.RunStatusChanged, StringComparison.Ordinal)
                     && envelope.Payload.Deserialize(RuntimeJsonContext.Default.RunStatusChangedEvent)
                         is { } statusChanged
@@ -2739,6 +2760,7 @@ public sealed class RuntimeServer : IAsyncDisposable
 
                 await DispatchPendingEventsAsync(session, dispatchOutbox, _shutdown.Token)
                     .ConfigureAwait(false);
+                lastPendingDispatchTick = Environment.TickCount64;
             }
         }
         catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
@@ -3195,6 +3217,35 @@ public sealed class RuntimeServer : IAsyncDisposable
         finally
         {
             _eventDispatchGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Sends a non-persisted streaming envelope (GSN 0) straight to the current host event channel.
+    /// Streaming deltas are never buffered or replayed: when the host is offline or the outbound
+    /// queue is full the delta is dropped and the host rebuilds the final message from history.
+    /// </summary>
+    private async Task SendStreamingEventAsync(
+        AuthenticatedSession session,
+        RuntimeEventEnvelope envelope)
+    {
+        if (_sessions.TryGetValue(session.HostInstanceId, out var currentSession))
+        {
+            session = currentSession;
+        }
+
+        var eventChannel = session.TryGetEventChannel();
+        if (eventChannel is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await eventChannel.SendAsync(envelope, _shutdown.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+        {
         }
     }
 

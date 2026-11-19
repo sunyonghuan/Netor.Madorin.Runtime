@@ -799,7 +799,8 @@ public sealed class RuntimeClient : IRuntimeClient
                     "The event belongs to a different Runtime instance.");
             }
 
-            if (envelope.Gsn <= Interlocked.Read(ref _lastConfirmedGsn))
+            if (envelope.Gsn != 0
+                && envelope.Gsn <= Interlocked.Read(ref _lastConfirmedGsn))
             {
                 continue;
             }

@@ -393,7 +393,8 @@ internal static class ReferenceHost
                         $"Runtime {handle.Index} received an event from another instance.");
                 }
 
-                if (envelope.Gsn <= lastGsn)
+                var isStreaming = envelope.Gsn == 0;
+                if (!isStreaming && envelope.Gsn <= lastGsn)
                 {
                     throw new InvalidDataException(
                         $"Runtime {handle.Index} emitted non-monotonic GSN {envelope.Gsn}.");
@@ -415,6 +416,11 @@ internal static class ReferenceHost
                     + $"{envelope.Gsn.ToString(System.Globalization.CultureInfo.InvariantCulture)}|"
                     + $"{envelope.RunSequence.ToString(System.Globalization.CultureInfo.InvariantCulture)}|"
                     + envelope.MessageType);
+                if (isStreaming)
+                {
+                    continue;
+                }
+
                 await handle.Client.AcknowledgeEventsAsync(envelope.Gsn, cancellationToken);
                 lastGsn = envelope.Gsn;
                 if (string.Equals(envelope.RunId, runId, StringComparison.Ordinal)

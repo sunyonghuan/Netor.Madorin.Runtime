@@ -365,8 +365,6 @@ public sealed class SqliteOutboxTests
         }
     }
 
-    // [架构重构] Delta 不再入库，AppendDeltaAsync 已移除，相关测试已过时
-    
     [TestMethod]
     [DoNotParallelize]
     public async Task AppendAsync_WhenMemoryTierIsFull_SpillsAndRecordsCapacityMetrics()
@@ -419,14 +417,12 @@ public sealed class SqliteOutboxTests
                 "run.completed",
                 "abcdef",
                 TestContext.CancellationToken);
-            // [架构重构] AppendDeltaAsync 已移除
 
             Assert.AreEqual(1L, first);
             Assert.AreEqual(2L, second);
             Assert.AreEqual(6L, outbox.MemoryReplayBytes);
             Assert.AreEqual(1L, outbox.MemorySpillCount);
-            // [架构重构] DroppedDeltaCount 已移除
-            Assert.AreEqual(2L, outbox.BackpressureCount);
+            Assert.AreEqual(1L, outbox.BackpressureCount);
             Assert.IsLessThanOrEqualTo(8L, outbox.MemoryReplayBytes);
 
             await outbox.AcknowledgeAsync(second, TestContext.CancellationToken);
@@ -437,7 +433,6 @@ public sealed class SqliteOutboxTests
             Assert.IsTrue(measurements.Contains("madorin.runtime.outbox.configured_capacity"));
             Assert.IsTrue(measurements.Contains("madorin.runtime.outbox.retained"));
             Assert.IsTrue(measurements.Contains("madorin.runtime.outbox.memory_spill"));
-            Assert.IsTrue(measurements.Contains("madorin.runtime.outbox.delta_dropped"));
             Assert.IsTrue(measurements.Contains("madorin.runtime.outbox.backpressure"));
         }
         finally

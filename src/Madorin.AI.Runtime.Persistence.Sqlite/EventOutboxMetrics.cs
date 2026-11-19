@@ -11,9 +11,6 @@ internal static class EventOutboxMetrics
     private static readonly Histogram<long> ConfiguredCapacity = Meter.CreateHistogram<long>(
         "madorin.runtime.outbox.configured_capacity",
         "By");
-    private static readonly Counter<long> DeltaDropped = Meter.CreateCounter<long>(
-        "madorin.runtime.outbox.delta_dropped",
-        "{event}");
     private static readonly Counter<long> MemorySpill = Meter.CreateCounter<long>(
         "madorin.runtime.outbox.memory_spill",
         "{event}");
@@ -40,8 +37,6 @@ internal static class EventOutboxMetrics
             diskBytes,
             new KeyValuePair<string, object?>("tier", "disk"));
     }
-
-    public static void RecordDeltaDropped() => DeltaDropped.Add(1);
 
     public static void RecordMemorySpill() => MemorySpill.Add(1);
 

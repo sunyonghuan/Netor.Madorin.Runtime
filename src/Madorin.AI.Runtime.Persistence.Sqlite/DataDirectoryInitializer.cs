@@ -35,7 +35,7 @@ public static class DataDirectoryInitializer
         {
             DataSource = Path.Combine(fullPath, "state.db"),
             Mode = SqliteOpenMode.ReadWriteCreate,
-            Cache = SqliteCacheMode.Shared,
+            Cache = SqliteCacheMode.Private,
             Pooling = false,
             DefaultTimeout = 5
         }.ToString();

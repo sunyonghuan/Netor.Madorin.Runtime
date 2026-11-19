@@ -88,7 +88,7 @@ public sealed class FramedEventChannel : IEventChannel
                 bytes,
                 RuntimeJsonContext.Default.RuntimeEventEnvelope)
                 ?? throw new InvalidDataException("The event envelope was empty.");
-            if (envelope.Gsn > eventReplayCursor)
+            if (envelope.Gsn == 0 || envelope.Gsn > eventReplayCursor)
             {
                 yield return envelope;
             }
