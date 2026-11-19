@@ -10,7 +10,9 @@ param(
     [string]$Rid = "",
     [string]$Version = "",
     [ValidateSet("patch", "minor", "major")]
-    [string]$Bump = "patch"
+    [string]$Bump = "patch",
+    [string]$WorkstationSnapshotDir = "",
+    [switch]$NoWorkstationSnapshot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -95,6 +97,14 @@ function Show-PublishHelp {
     Write-Host "  -Rid <rid>               - Override the platform RID" -ForegroundColor White
     Write-Host "  -Version <x.y.z>         - Publish the exact version and update version files" -ForegroundColor White
     Write-Host "  -Bump <patch|minor|major> - Version bump type (default: patch)" -ForegroundColor White
+    Write-Host "  -WorkstationSnapshotDir <dir> - Override the Workstation docs/CLI/madorin-Cli snapshot directory" -ForegroundColor White
+    Write-Host "  -NoWorkstationSnapshot   - Don't copy CLI output to the Workstation snapshot" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Workstation snapshot:" -ForegroundColor Yellow
+    Write-Host "  After each platform is packaged, <rid>/madorin-cli is copied to" -ForegroundColor White
+    Write-Host "  ../Netor.Madorin.Workstation/docs/CLI/madorin-Cli/<rid>/madorin-cli" -ForegroundColor White
+    Write-Host "  so Netor.Madorin.Workstation/scripts/publish.ps1 can pick it up directly." -ForegroundColor White
+    Write-Host "  The copy is skipped with a warning when docs/CLI does not exist." -ForegroundColor White
     Write-Host ""
     Write-Host "Fixed version example:" -ForegroundColor Yellow
     Write-Host "  .\madorin-cli.publish.ps1 win -Version 1.2.3" -ForegroundColor Green
@@ -212,6 +222,11 @@ $PackageName = 'Madorin.Cli'
 $SkillDirectoryName = 'madorin-cli'
 $SkillSourceDir = Join-Path $SolutionDir "skills/$SkillDirectoryName"
 $ProviderWorkersManifestFile = Join-Path $BuildDir 'provider-workers.json'
+$WorkstationSnapshotDirectoryName = 'madorin-Cli'
+if ([string]::IsNullOrWhiteSpace($WorkstationSnapshotDir)) {
+    $WorkstationSnapshotDir = Join-Path $SolutionDir "../Netor.Madorin.Workstation/docs/CLI/$WorkstationSnapshotDirectoryName"
+}
+$WorkstationSnapshotDir = [System.IO.Path]::GetFullPath($WorkstationSnapshotDir)
 $script:CurrentRid = ''
 $script:SkillOutputDir = ''
 $script:BinDir = ''
@@ -595,6 +610,11 @@ Write-Host "Client:    $ClientProjectFile"
 Write-Host "Skill:     $SkillSourceDir"
 Write-Host "Output:    $OutputDir\<rid>\$SkillDirectoryName"
 Write-Host "Packages:  $PackagesDir"
+if ($NoWorkstationSnapshot) {
+    Write-Host "Snapshot:  (disabled by -NoWorkstationSnapshot)"
+} else {
+    Write-Host "Snapshot:  $WorkstationSnapshotDir\<rid>\$SkillDirectoryName"
+}
 Write-Host "Version:   $NewVersion"
 Write-Host ""
 
@@ -705,6 +725,42 @@ function Initialize-PlatformOutput {
     } else {
         New-Item -ItemType Directory -Path $script:BinDir -Force | Out-Null
     }
+}
+
+function Sync-WorkstationSnapshot {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PlatformRid
+    )
+
+    if ($NoWorkstationSnapshot) {
+        Write-Host "[*] Skipping Workstation snapshot (-NoWorkstationSnapshot)." -ForegroundColor Yellow
+        return
+    }
+
+    $snapshotParentDir = Split-Path -Parent $WorkstationSnapshotDir
+    if (-not (Test-Path -LiteralPath $snapshotParentDir -PathType Container)) {
+        Write-Warning "Workstation snapshot skipped: directory does not exist: $snapshotParentDir"
+        return
+    }
+
+    $platformSnapshotDir = Join-Path $WorkstationSnapshotDir $PlatformRid
+    $skillSnapshotDir = Join-Path $platformSnapshotDir $SkillDirectoryName
+
+    Write-Host "[*] Syncing CLI output to Workstation snapshot..." -ForegroundColor Green
+    if (-not (Test-Path -LiteralPath $platformSnapshotDir -PathType Container)) {
+        New-Item -ItemType Directory -Path $platformSnapshotDir -Force | Out-Null
+    }
+
+    if (Test-Path -LiteralPath $skillSnapshotDir) {
+        Remove-Item -LiteralPath $skillSnapshotDir -Recurse -Force
+    }
+
+    Copy-Item -LiteralPath $script:SkillOutputDir -Destination $skillSnapshotDir -Recurse -Force
+
+    $snapshotFileCount = (Get-ChildItem -LiteralPath $skillSnapshotDir -Recurse -File | Measure-Object).Count
+    Write-Host "  Snapshot: $skillSnapshotDir" -ForegroundColor Cyan
+    Write-Host "  Files:    $snapshotFileCount" -ForegroundColor Cyan
 }
 
 function Assert-NativePublishOutput {
@@ -840,6 +896,8 @@ foreach ($platformRid in $PublishConfig.Rids) {
         Write-Host "  Zip:     $zipPath" -ForegroundColor Cyan
         Write-Host "  Size:    ${zipSizeMb} MB" -ForegroundColor Cyan
         Write-Host "  SHA256:  $hashPath" -ForegroundColor Cyan
+
+        Sync-WorkstationSnapshot -PlatformRid $platformRid
     } else {
         Write-Host "[7/7] Skipping packaging (target: $($PublishConfig.Type))." -ForegroundColor Yellow
     }

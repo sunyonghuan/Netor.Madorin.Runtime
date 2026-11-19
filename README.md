@@ -87,6 +87,8 @@ releases/Madorin-Cli/osx-arm64/madorin-cli/bin/
 
 每个 `bin` 目录都包含该平台的 CLI、对应的 Provider Worker 和 `providers.manifest.json`。需要单平台时再指定 `win`、`linux` 或 `mac`。当前发布矩阵不包含 Intel 版 macOS，也不把 Linux ARM64 列为正式目标。
 
+每个平台打包完成后，脚本会把 `releases/Madorin-Cli/<rid>/madorin-cli` 整体复制到同级仓库的 `../Netor.Madorin.Workstation/docs/CLI/madorin-Cli/<rid>/madorin-cli`，供 Workstation 的 `scripts/publish.ps1` 直接拷贝；该目录不存在时只给出警告并跳过。可用 `-WorkstationSnapshotDir <dir>` 改路径，或用 `-NoWorkstationSnapshot` 关闭（bash 脚本对应 `MADORIN_WORKSTATION_SNAPSHOT_DIR` 与 `--no-workstation-snapshot`）。
+
 ## 当前能力
 
 当前源码中的运行模式只有 **Expert**。V1 实施方案曾经规划 Expert、Meeting、Work 三种模式；Meeting 与 Work 已从运行时移除。多 Agent 协作改由 Expert 内的委派、并行作业和小型计划承担。历史三模式描述只解释设计来源，不能当作当前契约。

@@ -8,6 +8,7 @@ WORKERS_JSON="$SCRIPT_DIR/provider-workers.json"
 DEFAULT_RID="${MADORIN_PUBLISH_DEFAULT_RID:-linux-x64}"
 RID_REGEX="${MADORIN_PUBLISH_RID_REGEX:-^(linux-x64|linux-arm64)$}"
 HASH_CMD="${MADORIN_PUBLISH_HASH_CMD:-sha256sum}"
+WORKSTATION_SNAPSHOT_DIR="${MADORIN_WORKSTATION_SNAPSHOT_DIR:-$SOLUTION_DIR/../Netor.Madorin.Workstation/docs/CLI/madorin-Cli}"
 
 RID=""
 REBUILD=0
@@ -15,11 +16,13 @@ NO_BUMP=0
 BUMP=patch
 VERSION=""
 SKIP_PROVIDERS=0
+NO_WORKSTATION_SNAPSHOT=0
 POSITIONAL=()
 
 usage() {
-  echo "Usage: $0 [linux|win|mac|list] [--rid linux-x64] [--version x.y.z] [--rebuild] [--no-bump] [--bump patch|minor|major] [--skip-providers]" >&2
+  echo "Usage: $0 [linux|win|mac|list] [--rid linux-x64] [--version x.y.z] [--rebuild] [--no-bump] [--bump patch|minor|major] [--skip-providers] [--no-workstation-snapshot]" >&2
   echo "No platform argument publishes linux-x64. Pass win, linux, or mac to select platforms when pwsh is available." >&2
+  echo "After packaging, <rid>/madorin-cli is copied to ../Netor.Madorin.Workstation/docs/CLI/madorin-Cli/<rid>/madorin-cli (override with MADORIN_WORKSTATION_SNAPSHOT_DIR)." >&2
   echo "Example: $0 --version 1.2.3" >&2
 }
 
@@ -56,6 +59,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-providers)
       SKIP_PROVIDERS=1
+      shift
+      ;;
+    --no-workstation-snapshot)
+      NO_WORKSTATION_SNAPSHOT=1
       shift
       ;;
     -h|--help)
@@ -111,6 +118,12 @@ if command -v pwsh >/dev/null 2>&1; then
   fi
   if [[ "$SKIP_PROVIDERS" -eq 1 ]]; then
     pwsh_args+=(-SkipProviders)
+  fi
+  if [[ "$NO_WORKSTATION_SNAPSHOT" -eq 1 ]]; then
+    pwsh_args+=(-NoWorkstationSnapshot)
+  fi
+  if [[ -n "${MADORIN_WORKSTATION_SNAPSHOT_DIR:-}" ]]; then
+    pwsh_args+=(-WorkstationSnapshotDir "$MADORIN_WORKSTATION_SNAPSHOT_DIR")
   fi
   exec pwsh "${pwsh_args[@]}"
 fi
@@ -351,3 +364,17 @@ else
 fi
 echo "  Zip: $zip_path"
 echo "  SHA256: $hash_path"
+
+if [[ "$NO_WORKSTATION_SNAPSHOT" -eq 1 ]]; then
+  echo "[*] Skipping Workstation snapshot (--no-workstation-snapshot)."
+elif [[ ! -d "$(dirname "$WORKSTATION_SNAPSHOT_DIR")" ]]; then
+  echo "[WARN] Workstation snapshot skipped: directory does not exist: $(dirname "$WORKSTATION_SNAPSHOT_DIR")" >&2
+else
+  echo "[*] Syncing CLI output to Workstation snapshot"
+  snapshot_platform_dir="$WORKSTATION_SNAPSHOT_DIR/$RID"
+  snapshot_skill_dir="$snapshot_platform_dir/madorin-cli"
+  mkdir -p "$snapshot_platform_dir"
+  rm -rf "$snapshot_skill_dir"
+  cp -a "$SKILL_OUTPUT_DIR" "$snapshot_skill_dir"
+  echo "  Snapshot: $snapshot_skill_dir"
+fi
