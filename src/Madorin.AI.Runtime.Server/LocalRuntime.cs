@@ -942,7 +942,9 @@ public sealed class LocalRuntime : IAsyncDisposable
                 snapshot.Mode,
                 effectiveSelection,
                 request.InputOverride,
-                Language: request.Language);
+                Language: request.Language,
+                ProjectId: request.ProjectId,
+                WorkspacePath: request.WorkspacePath);
             ValidateRequest(executionRequest);
             if (request.TurnOverride is null
                 && effectiveSelection.ModeOptions is ExpertModeOptions

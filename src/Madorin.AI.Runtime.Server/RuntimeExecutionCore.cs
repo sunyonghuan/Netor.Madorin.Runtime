@@ -52,6 +52,12 @@ internal sealed class RuntimeExecutionCore(
     private readonly string _runtimeInstanceId = runtimeInstanceId;
     private readonly string _workspaceRoot = Path.GetFullPath(workspaceRoot);
     private readonly WorkspaceInstructionsState? _workspaceInstructionsState = workspaceInstructionsState;
+    private readonly object _workspaceIdentityGate = new();
+    private readonly Dictionary<string, WorkspaceIdentity> _sessionWorkspaceIdentities =
+        new(StringComparer.Ordinal);
+    private string? _projectId;
+    private string? _memoryWorkspaceId;
+    private string? _requestWorkspacePath;
 
     public async IAsyncEnumerable<RuntimeEventEnvelope> RunAsync(
         string runId,
@@ -83,6 +89,8 @@ internal sealed class RuntimeExecutionCore(
                 "A Runtime execution cannot use both a control peer and a local tool consent handler.",
                 nameof(localToolConsentHandler));
         }
+
+        var workspaceIdentity = ResolveWorkspaceIdentity(sessionId, request);
 
         // Host-mode progressive discovery: one Run-scoped activation table shared by all agents.
         SkillActivationStore? skillActivationStore = isHostModeSkills
@@ -267,7 +275,10 @@ internal sealed class RuntimeExecutionCore(
                 skillActivationStore: skillActivationStore,
                 agentJobCoordinator: agentJobCoordinator,
                 providerResolver: expertProviderResolver,
-                workspaceInstructionsState: _workspaceInstructionsState),
+                workspaceInstructionsState: _workspaceInstructionsState,
+                projectId: workspaceIdentity.ProjectId,
+                memoryWorkspaceId: workspaceIdentity.MemoryWorkspaceId,
+                workspacePath: workspaceIdentity.WorkspacePath),
 
             _ => throw new NotSupportedException(
                 $"Runtime mode '{request.Mode}' is not supported.")
@@ -284,6 +295,64 @@ internal sealed class RuntimeExecutionCore(
             yield return envelope;
         }
     }
+
+    /// <summary>
+    /// 解析并缓存当前工作区的项目 Id。一个 Runtime 实例只服务一个项目，
+    /// 新会话提供项目 Id，续跑在没有携带时复用实例缓存。
+    /// </summary>
+    private WorkspaceIdentity ResolveWorkspaceIdentity(
+        string sessionId,
+        NewSessionRunRequest request)
+    {
+        var candidate = FirstNonEmpty(request.ProjectId, request.WorkspaceId);
+        var workspacePath = NormalizeWorkspacePath(request.WorkspacePath);
+        if (!string.IsNullOrWhiteSpace(candidate) || workspacePath is not null)
+        {
+            var projectId = string.IsNullOrWhiteSpace(candidate) ? null : candidate.Trim();
+            var memoryWorkspaceId = projectId is null ? null : MemoryWorkspaceId.Compute(projectId);
+            lock (_workspaceIdentityGate)
+            {
+                _projectId = projectId ?? _projectId;
+                _memoryWorkspaceId = memoryWorkspaceId ?? _memoryWorkspaceId;
+                _requestWorkspacePath = workspacePath ?? _requestWorkspacePath;
+                var identity = new WorkspaceIdentity(
+                    projectId ?? _projectId,
+                    memoryWorkspaceId ?? _memoryWorkspaceId,
+                    workspacePath ?? _requestWorkspacePath);
+                _sessionWorkspaceIdentities[sessionId] = identity;
+                return identity;
+            }
+        }
+
+        lock (_workspaceIdentityGate)
+        {
+            if (_sessionWorkspaceIdentities.TryGetValue(sessionId, out var sessionIdentity))
+            {
+                return sessionIdentity;
+            }
+
+            var projectId = _projectId;
+            return new WorkspaceIdentity(
+                projectId,
+                projectId is null ? null : MemoryWorkspaceId.Compute(projectId),
+                _requestWorkspacePath);
+        }
+    }
+
+    private static string? NormalizeWorkspacePath(string? value)
+    {
+        return string.IsNullOrWhiteSpace(value) ? null : Path.GetFullPath(value.Trim());
+    }
+
+    private static string? FirstNonEmpty(params string?[] values)
+    {
+        return values.FirstOrDefault(static value => !string.IsNullOrWhiteSpace(value))?.Trim();
+    }
+
+    private sealed record WorkspaceIdentity(
+        string? ProjectId,
+        string? MemoryWorkspaceId,
+        string? WorkspacePath);
 
     private async Task<SqliteConnection> OpenDatabaseConnectionAsync(CancellationToken ct)
     {

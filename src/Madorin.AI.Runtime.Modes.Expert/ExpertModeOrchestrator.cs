@@ -52,7 +52,10 @@ public sealed class ExpertModeOrchestrator(
     SkillActivationStore? skillActivationStore = null,
     IAgentJobCoordinator? agentJobCoordinator = null,
     Func<string, IRuntimeProviderAdapter>? providerResolver = null,
-    WorkspaceInstructionsState? workspaceInstructionsState = null) : IModeOrchestrator
+    WorkspaceInstructionsState? workspaceInstructionsState = null,
+    string? projectId = null,
+    string? memoryWorkspaceId = null,
+    string? workspacePath = null) : IModeOrchestrator
 {
     private const string ProjectionVersion = "expert-full-tail-v1";
     /// <summary>与 BuiltinToolRegistry.DelegateToAgentToolId 保持一致，避免 Modes.Expert 反向依赖 Tools.Builtin。</summary>
@@ -77,6 +80,13 @@ public sealed class ExpertModeOrchestrator(
         ?? throw new ArgumentNullException(nameof(store));
     private readonly string _workspaceRoot = workspaceRoot
         ?? throw new ArgumentNullException(nameof(workspaceRoot));
+    private readonly string? _projectId = string.IsNullOrWhiteSpace(projectId) ? null : projectId.Trim();
+    private readonly string? _memoryWorkspaceId = string.IsNullOrWhiteSpace(memoryWorkspaceId)
+        ? null
+        : memoryWorkspaceId.Trim();
+    private string? _runProjectId;
+    private string? _runMemoryWorkspaceId;
+    private string? _runWorkspacePath;
     private readonly AgentContextComposer? _agentContextComposer = agentContextComposer;
     private readonly Func<CredentialsRefreshRequestedEvent, CancellationToken, Task<bool>>?
         _credentialRefreshHandler = credentialRefreshHandler;
@@ -143,6 +153,17 @@ public sealed class ExpertModeOrchestrator(
         expert.RequestControl?.Validate();
 
         _conversationLanguage = request.Language;
+        _runWorkspacePath = !string.IsNullOrWhiteSpace(request.WorkspacePath)
+            ? Path.GetFullPath(request.WorkspacePath.Trim())
+            : !string.IsNullOrWhiteSpace(workspacePath)
+                ? Path.GetFullPath(workspacePath.Trim())
+                : _workspaceRoot;
+        _runProjectId = !string.IsNullOrWhiteSpace(request.ProjectId)
+            ? request.ProjectId.Trim()
+            : _projectId;
+        _runMemoryWorkspaceId = !string.IsNullOrWhiteSpace(_runProjectId)
+            ? MemoryWorkspaceId.Compute(_runProjectId)
+            : _memoryWorkspaceId;
         var providerId = expert.Agent.ProviderId ?? request.Selection.DefaultSelection.ProviderId;
         var modelId = expert.Agent.ModelId ?? request.Selection.DefaultSelection.ModelId;
         if (!string.Equals(_provider.ProviderId, providerId, StringComparison.Ordinal))
@@ -191,8 +212,10 @@ public sealed class ExpertModeOrchestrator(
         {
             Instructions = ConversationEnvironmentPrompt.Append(
                 agentContext.Instructions,
-                _workspaceRoot,
-                request.Language)
+                _runWorkspacePath,
+                request.Language,
+                projectId: _runProjectId,
+                workspaceId: _runMemoryWorkspaceId)
         };
         using var memorySnapshotLease = CaptureMemorySnapshot(invocationId, agentContext);
         var fullSkillCatalog = await CaptureSkillCatalogSnapshotAsync(ct).ConfigureAwait(false);
@@ -3421,8 +3444,10 @@ public sealed class ExpertModeOrchestrator(
             : await _agentContextComposer.ComposeAsync(subAgentSystemPrompt, ct).ConfigureAwait(false);
         var subAgentInstructions = ConversationEnvironmentPrompt.Append(
             subAgentContext.Instructions,
-            _workspaceRoot,
-            _conversationLanguage);
+            _runWorkspacePath ?? _workspaceRoot,
+            _conversationLanguage,
+            projectId: _runProjectId,
+            workspaceId: _runMemoryWorkspaceId);
 
         // Create initial messages for sub-agent: system + user task
         var systemMessage = new RuntimeProviderMessage(

@@ -19,12 +19,14 @@ public static class ConversationEnvironmentPrompt
         string instructions,
         string workspaceRoot,
         string? language,
-        DateTimeOffset? now = null)
+        DateTimeOffset? now = null,
+        string? projectId = null,
+        string? workspaceId = null)
     {
         ArgumentNullException.ThrowIfNull(instructions);
         ArgumentException.ThrowIfNullOrWhiteSpace(workspaceRoot);
 
-        var block = Build(workspaceRoot, language, now ?? DateTimeOffset.Now);
+        var block = Build(workspaceRoot, language, now ?? DateTimeOffset.Now, projectId, workspaceId);
         if (instructions.Length == 0)
         {
             return block;
@@ -33,7 +35,12 @@ public static class ConversationEnvironmentPrompt
         return instructions + "\n\n" + block;
     }
 
-    private static string Build(string workspaceRoot, string? language, DateTimeOffset now)
+    private static string Build(
+        string workspaceRoot,
+        string? language,
+        DateTimeOffset now,
+        string? projectId,
+        string? workspaceId)
     {
         var builder = new StringBuilder();
         builder.Append("## Environment\n");
@@ -42,6 +49,16 @@ public static class ConversationEnvironmentPrompt
         builder.Append("date: ").Append(FormatDate(now)).Append('\n');
         builder.Append("cli: ").Append(CliName).Append(' ').Append(ResolveCliVersion()).Append('\n');
         builder.Append("workspace: ").Append(workspaceRoot);
+        if (!string.IsNullOrWhiteSpace(projectId))
+        {
+            builder.Append('\n').Append("project_id: ").Append(projectId.Trim());
+        }
+
+        if (!string.IsNullOrWhiteSpace(workspaceId))
+        {
+            builder.Append('\n').Append("workspace_id: ").Append(workspaceId.Trim());
+        }
+
         var shell = TryDetectShell();
         if (shell is not null)
         {

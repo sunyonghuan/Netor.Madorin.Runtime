@@ -228,9 +228,11 @@ locale: zh-CN
 date: 2026-09-22 +08:00
 cli: madorin 0.1.50
 workspace: E:\work\demo
+project_id: 01M6RJCSMGWFP2TFZM2KMQ967G
+workspace_id: 56906cf240965c29707b5dd0af52a96e
 ```
 
-`locale` 来自上面的语言规则。`date` 是本地日期和时区偏移，不包含时分秒。Unix 上能确定交互式 shell 时多一行 `shell`；Windows 上省略。
+`locale` 来自上面的语言规则。`date` 是本地日期和时区偏移，不包含时分秒。Unix 上能确定交互式 shell 时多一行 `shell`；Windows 上省略。`project_id` 是宿主项目标识；`workspace_id` 是 `MD5(project_id)`，供记忆工具直接使用。没有项目标识的独立运行省略这两行。
 
 ### 取消运行
 

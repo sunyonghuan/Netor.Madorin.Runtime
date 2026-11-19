@@ -2334,7 +2334,9 @@ public sealed class RuntimeServer : IAsyncDisposable
             effectiveSelection,
             existingRun.InputOverride,
             ProviderConfigs: existingRun.ProviderConfigs,
-            Language: existingRun.Language);
+            Language: existingRun.Language,
+            ProjectId: existingRun.ProjectId,
+            WorkspacePath: existingRun.WorkspacePath);
         var plan = new RunStartPlan(
             $"session:{existingRun.SessionId}",
             RuntimeRunMetadata.ComputeRequestHash(existingRun),
