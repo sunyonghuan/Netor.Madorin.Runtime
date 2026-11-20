@@ -2787,6 +2787,13 @@ public sealed class RuntimeServer : IAsyncDisposable
         catch (Exception ex)
         {
             activeRun.ReleaseCapacity();
+            await _diagnosticLog.TryWriteAsync(
+                    RuntimeDiagnosticLogLevel.Error,
+                    "RunFailed",
+                    runId,
+                    sessionId,
+                    exception: ex)
+                .ConfigureAwait(false);
             await CompleteFailedRunAsync(runId, sessionId, session, ex).ConfigureAwait(false);
         }
         finally
@@ -2891,9 +2898,7 @@ public sealed class RuntimeServer : IAsyncDisposable
         var error = new RuntimeError(
             errorCode,
             "runtime",
-            string.IsNullOrWhiteSpace(exception.Message)
-                ? "Run execution failed."
-                : exception.Message,
+            UserVisibleFailure.ForRun(exception, errorCode),
             IsRetryable: false,
             ProviderDetails: null,
             Guid.NewGuid().ToString("N"));

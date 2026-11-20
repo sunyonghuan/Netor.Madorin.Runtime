@@ -34,9 +34,9 @@ public static partial class ProviderWorkerHost
             }
             catch (Exception ex)
             {
+                WriteWorkerException(ex, invoke.Connection);
                 terminal = new InvocationFailedProviderEvent(invoke.InvocationId,
-                    new Madorin.AI.Runtime.Contracts.RuntimeError("InvokeFailed", "provider",
-                        Redact(ex.Message, invoke.Connection), false, null, Guid.NewGuid().ToString("N")));
+                    ProviderErrorFactory.Create(slug, ex));
             }
             finally
             {
@@ -79,10 +79,11 @@ public static partial class ProviderWorkerHost
             catch (Exception ex)
             {
                 _blobResolvers.TryRemove(invoke.InvocationId, out _);
+                WriteWorkerException(ex, invoke.Connection);
                 await WriteSafeErrorAsync(
                         invoke.InvocationId,
                         ProviderWorkerIpc.ErrorInvokeFailed,
-                        ex.Message,
+                        ProviderErrorFactory.Create(slug, ex).Message,
                         invoke.Connection, invoke.Generation)
                     .ConfigureAwait(false);
                 return null;
@@ -174,6 +175,17 @@ public static partial class ProviderWorkerHost
             }
 
             return message.Replace(connection.ApiKey, "***", StringComparison.Ordinal);
+        }
+
+        private void WriteWorkerException(Exception exception, ProviderConnectionConfig? connection)
+        {
+            try
+            {
+                stderr.WriteLine(Redact(exception.ToString(), connection));
+            }
+            catch (IOException)
+            {
+            }
         }
     }
 }

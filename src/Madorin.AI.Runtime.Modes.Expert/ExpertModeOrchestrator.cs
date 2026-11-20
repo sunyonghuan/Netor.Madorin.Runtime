@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Diagnostics;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using Madorin.AI.Runtime.Contracts;
@@ -741,7 +742,13 @@ public sealed class ExpertModeOrchestrator(
                         }
                         catch (Exception ex)
                         {
-                            failure = CreateRuntimeError("ProviderExecutionFailed", ex.Message);
+                            Trace.TraceError(
+                                "Provider stream failed. ProviderId={0}. {1}",
+                                providerId,
+                                ex);
+                            failure = ProviderErrorFactory.Create(
+                                string.IsNullOrWhiteSpace(providerId) ? "Provider" : providerId,
+                                ex);
                             break;
                         }
 

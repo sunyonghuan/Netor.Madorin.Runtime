@@ -1233,9 +1233,7 @@ public sealed class LocalRuntime : IAsyncDisposable
             : new RuntimeError(
                 "RunExecutionFailed",
                 "runtime",
-                string.IsNullOrWhiteSpace(exception?.Message)
-                    ? "Run execution failed."
-                    : exception.Message,
+                UserVisibleFailure.ForRun(exception, "RunExecutionFailed"),
                 IsRetryable: false,
                 ProviderDetails: null,
                 Guid.NewGuid().ToString("N"));
