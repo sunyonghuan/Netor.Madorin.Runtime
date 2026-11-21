@@ -2699,6 +2699,8 @@ public sealed class RuntimeServer : IAsyncDisposable
                 isHostModeSkills: _hostProviderRegistry is not null,
                 ct: ct).ConfigureAwait(false))
             {
+                activeRun.ReportActivity();
+
                 if (envelope.Gsn == 0)
                 {
                     await SendStreamingEventAsync(session, envelope).ConfigureAwait(false);
@@ -2717,6 +2719,7 @@ public sealed class RuntimeServer : IAsyncDisposable
                         is { } statusChanged
                     && Enum.TryParse<RunStatus>(statusChanged.Status, ignoreCase: false, out var changedStatus))
                 {
+                    activeRun.SetWaiting(IsWaitingStatus(changedStatus));
                     await runRepository.UpdateRunProgressAsync(
                         runId,
                         changedStatus,
@@ -2804,6 +2807,11 @@ public sealed class RuntimeServer : IAsyncDisposable
             TryDisposeDisconnectedSession(session);
         }
     }
+
+    private static bool IsWaitingStatus(RunStatus status)
+        => status is RunStatus.WaitingForTool
+            or RunStatus.WaitingForApproval
+            or RunStatus.WaitingForCredentials;
 
     private void TryDisposeDisconnectedSession(AuthenticatedSession session)
     {
@@ -3784,6 +3792,10 @@ public sealed class RuntimeServer : IAsyncDisposable
         public CancellationToken CancellationToken => _lease.CancellationToken;
 
         public bool IsTimedOut => _lease.IsTimedOut;
+
+        public void ReportActivity() => _lease.ReportActivity();
+
+        public void SetWaiting(bool waiting) => _lease.SetWaiting(waiting);
 
         public string OwnerHostInstanceId { get; } = ownerHostInstanceId;
 

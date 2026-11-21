@@ -51,6 +51,10 @@ public sealed record RuntimeServerOptions
 
     public int MaxConcurrentRunsPerSession { get; init; } = 1;
 
+    /// <summary>
+    /// Run 不活动超时：连续该时长没有任何运行事件才判定超时，不是 Run 的总时长预算。
+    /// 等待工具执行、审批或凭据期间暂停计时，恢复运行后重新获得完整窗口。
+    /// </summary>
     public TimeSpan RunTimeout { get; init; } = TimeSpan.FromMinutes(30);
 
     public int HeartbeatIntervalSeconds { get; init; } = 15;

@@ -336,6 +336,66 @@ public sealed class RuntimeControlTests
     [TestMethod]
     [DoNotParallelize]
     [Timeout(30_000, CooperativeCancellation = true)]
+    public async Task RunInactivityTimeout_ActiveStreamingRun_CompletesBeyondTotalWindow()
+    {
+        var workspace = CreateTemporaryDirectory();
+        var instanceId = Guid.NewGuid().ToString("N");
+        var secret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+        var provider = new SlowStreamingProviderAdapter();
+        using var shutdown = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.CancellationToken);
+        try
+        {
+            await using var server = await RuntimeServer.StartAsync(
+                new RuntimeServerOptions(workspace)
+                {
+                    InstanceId = instanceId,
+                    PipePrefix = $"madorin.run-inactivity.{Guid.NewGuid():N}",
+                    HandshakeSecret = secret,
+                    RunTimeout = TimeSpan.FromSeconds(1),
+                    MemoryUserHome = Path.Combine(workspace, "home"),
+                    ProviderResolver = _ => provider
+                },
+                TestContext.CancellationToken);
+            var serverTask = server.RunAsync(shutdown.Token);
+            await using var client = new RuntimeClient(
+                new RuntimeClientOptions(
+                    server.PipeName,
+                    Guid.NewGuid().ToString("N"),
+                    ExpectedRuntimeInstanceId: instanceId,
+                    HandshakeSecret: secret));
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(
+                TestContext.CancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(20));
+            await client.ConnectAsync(timeout.Token);
+
+            var runId = await client.StartNewSessionRunAsync(
+                CreateRequest("inactivity-session", "inactivity-run"),
+                timeout.Token);
+            await ReadRunEventAsync(
+                client,
+                runId,
+                MessageTypes.RunCompleted,
+                timeout.Token);
+            var snapshot = await client.QueryRunAsync(runId, timeout.Token);
+            Assert.AreEqual(RunStatus.Completed, snapshot.Status);
+
+            shutdown.Cancel();
+            await serverTask;
+        }
+        finally
+        {
+            shutdown.Cancel();
+            if (Directory.Exists(workspace))
+            {
+                Directory.Delete(workspace, recursive: true);
+            }
+        }
+    }
+
+    [TestMethod]
+    [DoNotParallelize]
+    [Timeout(30_000, CooperativeCancellation = true)]
     public async Task HostLeaseTimeout_CancelsOwnedRunAndDisconnectsSession()
     {
         var workspace = CreateTemporaryDirectory();
@@ -1143,6 +1203,34 @@ public sealed class RuntimeControlTests
             }
 
             yield break;
+        }
+
+        public Task ValidateCapabilitiesAsync(
+            ContentBlock[] input,
+            CancellationToken ct = default) => Task.CompletedTask;
+    }
+
+    private sealed class SlowStreamingProviderAdapter(string providerId = "blocking")
+        : IRuntimeProviderAdapter
+    {
+        public string ProviderId { get; } = providerId;
+
+        public ProviderCapabilities Capabilities { get; } = new(Streaming: true);
+
+        public IReadOnlyList<ProviderModel> Models { get; } =
+            [new("blocking-model", "Slow Streaming Model", ContextWindow: 8192)];
+
+        public async IAsyncEnumerable<RuntimeProviderEvent> CompleteStreamingAsync(
+            RuntimeProviderRequest request,
+            [EnumeratorCancellation] CancellationToken ct = default)
+        {
+            for (var index = 0; index < 10; index++)
+            {
+                await Task.Delay(250, ct);
+                yield return new TextDeltaProviderEvent(request.InvocationId, $"chunk-{index} ");
+            }
+
+            yield return new InvocationCompletedProviderEvent(request.InvocationId, "stop");
         }
 
         public Task ValidateCapabilitiesAsync(

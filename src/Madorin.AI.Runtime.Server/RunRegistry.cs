@@ -134,6 +134,9 @@ internal sealed class RunRegistry : IDisposable
         private readonly string _providerId;
         private readonly CancellationTokenSource _cancellation;
         private readonly Timer _timeoutTimer;
+        private readonly long _inactivityTimeoutMs;
+        private long _lastActivityTick;
+        private int _waiting;
         private string? _sessionId;
         private int _cancelRequested;
         private int _timedOut;
@@ -148,16 +151,44 @@ internal sealed class RunRegistry : IDisposable
             _owner = owner;
             _providerId = providerId;
             _cancellation = CancellationTokenSource.CreateLinkedTokenSource(shutdownToken);
+            _inactivityTimeoutMs = (long)timeout.TotalMilliseconds;
+            _lastActivityTick = Environment.TickCount64;
+            // 不活动看门狗：连续 timeout 时长没有任何运行事件才判定 Run 死亡；
+            // 等待工具、审批或凭据期间暂停计时，恢复后重新获得完整窗口。
+            var checkInterval = TimeSpan.FromMilliseconds(Math.Max(_inactivityTimeoutMs / 4, 1));
             _timeoutTimer = new Timer(
-                static state => ((RunLease)state!).CancelForTimeout(),
+                static state => ((RunLease)state!).CheckInactivity(),
                 this,
-                timeout,
-                Timeout.InfiniteTimeSpan);
+                checkInterval,
+                checkInterval);
         }
 
         public CancellationToken CancellationToken => _cancellation.Token;
 
         public bool IsTimedOut => Volatile.Read(ref _timedOut) != 0;
+
+        /// <summary>报告一次运行事件，重置不活动计时。</summary>
+        public void ReportActivity()
+        {
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                return;
+            }
+
+            Volatile.Write(ref _lastActivityTick, Environment.TickCount64);
+        }
+
+        /// <summary>进入或离开等待态（工具/审批/凭据）；等待期间不活动看门狗不计时。</summary>
+        public void SetWaiting(bool waiting)
+        {
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                return;
+            }
+
+            Volatile.Write(ref _waiting, waiting ? 1 : 0);
+            Volatile.Write(ref _lastActivityTick, Environment.TickCount64);
+        }
 
         public bool Cancel()
         {
@@ -208,6 +239,26 @@ internal sealed class RunRegistry : IDisposable
             _timeoutTimer.Dispose();
             _cancellation.Dispose();
             _owner.Release(_providerId, _sessionId);
+        }
+
+        private void CheckInactivity()
+        {
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                return;
+            }
+
+            var now = Environment.TickCount64;
+            if (Volatile.Read(ref _waiting) != 0)
+            {
+                Volatile.Write(ref _lastActivityTick, now);
+                return;
+            }
+
+            if (now - Volatile.Read(ref _lastActivityTick) >= _inactivityTimeoutMs)
+            {
+                CancelForTimeout();
+            }
         }
 
         private void CancelForTimeout()
